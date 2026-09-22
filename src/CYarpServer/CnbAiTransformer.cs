@@ -49,6 +49,12 @@ namespace CYarpServer
             }
 
             proxyRequest.RequestUri = new Uri(destinationPrefix.TrimEnd('/') + path + httpContext.Request.QueryString.Value);
+
+            // Never forward the caller's Host (our public domain / IP): upstream edges route by
+            // Host, and CNB's edge answers the wrong host with
+            // "301 Moved Permanently -> https://cnb.cool" instead of serving the AI endpoint.
+            // Clearing it makes HttpClient derive Host from the target Uri.
+            proxyRequest.Headers.Host = null;
         }
     }
 }

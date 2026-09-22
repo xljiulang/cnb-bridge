@@ -111,6 +111,11 @@ namespace CYarp.Cnb.Tests
             Assert.Equal("Bearer cnb-token-A", recorded.Authorization);
             Assert.Contains("\"content\":\"hi\"", recorded.Body);
             Assert.DoesNotContain(ProxyKey, string.Join('\n', recorded.Headers.Values));
+
+            // The caller's Host (our public domain/IP) must not reach the upstream: CNB's edge
+            // routes by Host and answers "301 Moved Permanently -> https://cnb.cool" for hosts
+            // it does not serve.
+            Assert.Equal(new Uri(this.upstream.BaseAddress).Authority, recorded.Headers["Host"]);
         }
 
         [Fact]

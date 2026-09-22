@@ -392,6 +392,7 @@ OpenAI 客户端接入时：`base_url = <base>/org/repo/v1`，`api_key = <PROXY_
 | 裸路径 `502` 但带前缀正常 | 同时有多个工作空间在线 | 始终带前缀调用 |
 | `/{clientId}/v1/models` 返回 `503` | 服务端活着但该工作空间的隧道断了（假死） | cron 会自动 `stop + start`；也可手动重启工作空间 |
 | 上游返回 401/412 之类 | 上游鉴权/网络策略 | 412 表示请求不是从 CNB 工作空间内发出；401 多半是 `CNB_TOKEN` 过期，重启工作空间让平台重铸 |
+| 对话请求返回 `301 Moved Permanently` 且 `Location: https://cnb.cool`（响应体是一小段 HTML） | 服务端把**调用方的 Host**（你的公网域名/IP）转发给了上游；CNB 边缘按 Host 路由，认不出就重定向到官网。这是 2026-09 之前服务端版本的 bug | 更新服务端二进制到包含 Host 修复的版本（`CnbAiTransformer` 里清掉转发 Host）并重启服务；`/v1/models` 这类本地应答不受影响，所以「models 通、对话不通」正是这个症状 |
 | 启动日志里 `CYarp options in effect` 显示的是库默认值（`00:00:50` / `10`） | appsettings 没被读到，或升级 CYarp 后配置绑定回退路径失效 | 确认 `appsettings.json` 在二进制同目录；见根 README 第七节「为什么 CYarpOptions 要在服务端项目里绑定」 |
 | `CYarpServer start` 报「系统已存在同名但不同路径的服务」 | 之前从别的目录安装过 | 在旧目录执行 `sudo ./CYarpServer stop`，或 `sudo systemctl disable --now CYarpServer && sudo rm /etc/systemd/system/CYarpServer.service` |
 | `start` 报「无法操作服务：没有root权限」 | 没用 root | 加 `sudo` |
