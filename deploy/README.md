@@ -67,7 +67,10 @@
 前置：安装 .NET 10 SDK（`dotnet --list-sdks` 能看到 10.x）。构建机需要联网一次（下载 ILCompiler 与 zig 工具链，之后进 NuGet 缓存可离线复现）。
 
 ```powershell
-pwsh ./scripts/publish.ps1
+pwsh ./scripts/publish.ps1          # 客户端(linux-x64 AOT) + 服务端(linux-x64 自包含 trimmed)
+
+# 只发服务端，并且是 Windows 版
+pwsh ./scripts/publish.ps1 -SkipClient -ServerRuntimeIdentifier win-x64
 ```
 
 产出：
@@ -75,6 +78,7 @@ pwsh ./scripts/publish.ps1
 | 产物 | 位置 | 形态 | 大小 |
 |---|---|---|---|
 | `CYarpClient` | `deploy/cyarp/CYarpClient`（同步后是载荷里的 `cyarp/CYarpClient`） | Native AOT 单文件（glibc 2.17） | 约 8 MB |
+| `CYarpServer.exe` | `artifacts/server-win-x64/` | Windows 自包含 + trimmed 单文件 | 约 15 MB |
 | `CYarpServer` | `artifacts/server/CYarpServer` | 自包含 + trimmed 单文件 | 约 17 MB |
 
 两个产物都**不需要目标机器装 .NET 运行时**。
@@ -195,6 +199,25 @@ sudo ufw allow 80/tcp
 # firewalld
 sudo firewall-cmd --permanent --add-port=80/tcp && sudo firewall-cmd --reload
 ```
+
+### 2.7 Windows 部署（可选）
+
+服务端也能跑在 Windows 上，ServiceSelf 会把它装成 Windows 服务（同样不需要装 .NET 运行时）：
+
+```powershell
+# 在开发机发布 Windows 版（产物在 artifacts/server-win-x64/）
+pwsh ./scripts/publish.ps1 -SkipClient -ServerRuntimeIdentifier win-x64
+
+# 把 CYarpServer.exe 与 appsettings.json 拷到目标机器同一目录，例如 C:\cyarp\
+# 改 appsettings.json 里的 ProxyKey，然后以管理员身份：
+C:\cyarp\CYarpServer.exe start     # 安装 + 启动 + 开机自启（SCM 服务）
+C:\cyarp\CYarpServer.exe logs      # 跟随服务日志
+C:\cyarp\CYarpServer.exe logs filter=ERROR
+C:\cyarp\CYarpServer.exe stop      # 停止并删除服务
+C:\cyarp\CYarpServer.exe           # 前台运行，方便调试
+```
+
+改端口同样在 `appsettings.json` 里加 `"Urls": "http://+:8080"`（默认 `http://+:80` 需要管理员权限才能绑定）。
 
 ---
 
@@ -363,6 +386,7 @@ OpenAI 客户端接入时：`base_url = <base>/org/repo/v1`，`api_key = <PROXY_
 | 一开工作空间就失败，日志里是 `client binary not found or not executable: .../cyarp/CYarpClient` | `cyarp-start.sh` 与 `cyarp/CYarpClient` 没在同一目录（载荷结构被改动），或二进制没随仓库提交 | 保持载荷结构不变；确认 `cyarp/CYarpClient` 已提交（注意 `.gitignore` 别把它排除） |
 | 构建日志停在 `cyarp client: no tunnel after 30s` | 域名/端口不通、`CYARP_SERVER_URI` 写错、服务端没起 | 看脚本打印的 `cyarp.log` 尾部；在 VPS 上 `curl -i http://127.0.0.1/v1/models -H "Authorization: Bearer <key>"` |
 | 客户端日志 `Connect failure ... Connection refused` | 服务端未监听该地址/端口，或被防火墙拦 | 确认 `sudo systemctl status CYarpServer` 与 `Now listening on: ...`；放行端口 |
+| Windows 上启动即报 `SocketException (10013) ... 访问权限`（WSAEACCES） | 端口落在 Windows 保留段（Hyper-V/WSL 预留，如 8081-8180），或用了 <1024 的端口但没提权 | `netsh interface ipv4 show excludedportrange protocol=tcp` 查保留段，换一个端口：在 `appsettings.json` 加 `"Urls": "http://+:18089"` |
 | 公网全部请求 `401` | `PROXY_KEY` 与 `appsettings.json` 里的 `ProxyKey` 不一致 | 重新 `curl` 带正确 key；或把 `ProxyKey` 清空（仅调试） |
 | 公网请求 `502` | 没有该 `clientId` 的在线工作空间（前缀写错、大小写不符），或多工作空间下用了裸 `/v1/...` | 用脚本打印的 `clientId`（形如 `org/repo`）对齐 URL 前缀；单工作空间在线时裸路径才可用 |
 | 裸路径 `502` 但带前缀正常 | 同时有多个工作空间在线 | 始终带前缀调用 |
