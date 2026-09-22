@@ -38,3 +38,10 @@ target/
 bin/
 obj/
 *.log
+
+# 本仓库：Native AOT 发布产物
+# 客户端二进制与 appsettings.json 需要入库（CNB 工作空间直接用），调试符号不要。
+artifacts/
+*.dbg
+*.pdb
+cyarp-cnb.slnx

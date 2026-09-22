@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <AssemblyName>CYarpServer</AssemblyName>
+    <RootNamespace>CYarpServer</RootNamespace>
+    <!-- Bind configuration with the source generator instead of reflection. -->
+    <EnableConfigurationBindingGenerator>true</EnableConfigurationBindingGenerator>
+  </PropertyGroup>
+
+  <!--
+    Native AOT is enabled whenever a runtime identifier is given, which is required
+    for AOT anyway:  dotnet publish -c Release -r linux-x64
+    GLibcVersion pins the zig/clang target to glibc 2.17 so the binary also runs on
+    older distributions (the zig default requires glibc 2.29).
+  -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <StripSymbols>true</StripSymbols>
+    <GLibcVersion>2.17</GLibcVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="PublishAotClang" Version="1.0.5" />
+    <PackageReference Include="ServiceSelf" Version="1.0.8" />
+    <ProjectReference Include="..\CYarp.Server\CYarp.Server.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Update="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+  </ItemGroup>
+
+</Project>
