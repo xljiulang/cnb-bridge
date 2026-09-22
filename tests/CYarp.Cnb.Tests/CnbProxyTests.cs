@@ -27,7 +27,7 @@ namespace CYarp.Cnb.Tests
     /// </summary>
     public sealed class CnbProxyTests : IAsyncLifetime
     {
-        private const string ProxyKey = "pk-test";
+        private const string ApiKey = "pk-test";
         private const string ChatBody = """{"model":"model-a","messages":[{"role":"user","content":"hi"}]}""";
 
         private readonly StubUpstream upstream = new();
@@ -47,7 +47,7 @@ namespace CYarp.Cnb.Tests
                 ["--urls", "http://127.0.0.1:0"],
                 settings: new Dictionary<string, string?>
                 {
-                    ["ProxyKey"] = ProxyKey,
+                    ["ApiKey"] = ApiKey,
                     ["ProxyModels:0"] = "model-a",
                     ["ProxyModels:1"] = "model-b",
                     ["Logging:LogLevel:Default"] = "Warning",
@@ -112,7 +112,7 @@ namespace CYarp.Cnb.Tests
             Assert.Equal("?stream=false", recorded.Query);
             Assert.Equal("Bearer cnb-token-A", recorded.Authorization);
             Assert.Contains("\"content\":\"hi\"", recorded.Body);
-            Assert.DoesNotContain(ProxyKey, string.Join('\n', recorded.Headers.Values));
+            Assert.DoesNotContain(ApiKey, string.Join('\n', recorded.Headers.Values));
 
             // The caller's Host (our public domain/IP) must not reach the upstream: CNB's edge
             // routes by Host and answers "301 Moved Permanently -> https://cnb.cool" for hosts
@@ -228,15 +228,33 @@ namespace CYarp.Cnb.Tests
         }
 
         [Fact]
-        public async Task WrongProxyKey_IsRejectedBeforeReachingTheUpstream()
+        public async Task Chat_RequiresTheApiKey()
         {
             await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
 
+            using var ok = await this.PostChatAsync("/orgA/repoA/v1/chat/completions");
             using var wrong = await this.PostChatAsync("/orgA/repoA/v1/chat/completions", "pk-wrong");
-            using var missing = await this.PostChatAsync("/orgA/repoA/v1/chat/completions", proxyKey: null);
+            using var missing = await this.PostChatAsync("/orgA/repoA/v1/chat/completions", apiKey: null);
 
+            Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
             Assert.Equal(HttpStatusCode.Unauthorized, wrong.StatusCode);
             Assert.Equal(HttpStatusCode.Unauthorized, missing.StatusCode);
+
+            // Only the request with the right key reached the upstream.
+            Assert.Single(this.upstream.Requests);
+        }
+
+        [Fact]
+        public async Task Models_IsOpenSoTheKeepaliveProbeNeedsNoKey()
+        {
+            await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
+
+            // No Authorization header at all, exactly like the keepalive cron's probe.
+            using var anonymous = await this.publicClient.GetAsync("/orgA/repoA/v1/models");
+            using var wrongKey = await this.GetAsync("/orgA/repoA/v1/models", "pk-wrong");
+
+            Assert.Equal(HttpStatusCode.OK, anonymous.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, wrongKey.StatusCode);
             Assert.Empty(this.upstream.Requests);
         }
 
@@ -249,7 +267,7 @@ namespace CYarp.Cnb.Tests
             {
                 Content = new StringContent("""{"model":"model-a","messages":[{"role":"user","content":"hi"}],"stream":true}""", Encoding.UTF8, "application/json"),
             };
-            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {ProxyKey}");
+            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {ApiKey}");
 
             using var response = await this.publicClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -267,25 +285,29 @@ namespace CYarp.Cnb.Tests
             Assert.Contains("data: {\"chunk\":2}", await reader.ReadToEndAsync());
         }
 
-        private Task<HttpResponseMessage> PostChatAsync(string path, string? proxyKey = ProxyKey)
+        private Task<HttpResponseMessage> PostChatAsync(string path, string? apiKey = ApiKey)
         {
             var request = new HttpRequestMessage(HttpMethod.Post, path)
             {
                 Content = new StringContent(ChatBody, Encoding.UTF8, "application/json"),
             };
 
-            if (proxyKey != null)
+            if (apiKey != null)
             {
-                request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {proxyKey}");
+                request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {apiKey}");
             }
 
             return this.publicClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
         }
 
-        private Task<HttpResponseMessage> GetAsync(string path)
+        private Task<HttpResponseMessage> GetAsync(string path, string? apiKey = ApiKey)
         {
             var request = new HttpRequestMessage(HttpMethod.Get, path);
-            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {ProxyKey}");
+            if (apiKey != null)
+            {
+                request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {apiKey}");
+            }
+
             return this.publicClient.SendAsync(request);
         }
 

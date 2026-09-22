@@ -98,11 +98,13 @@ namespace CYarpServer
 
             LogCYarpOptions(app.Services);
 
-            // Optional inbound gate for the public OpenAI-compatible API.
-            var proxyKey = app.Services.GetRequiredService<IOptions<CnbProxyOptions>>().Value.ProxyKey;
-            if (string.IsNullOrEmpty(proxyKey) == false)
+            // Optional inbound gate for the public OpenAI-compatible API. It only covers the
+            // chat endpoint: models is answered locally from configuration (a static list with
+            // no upstream call), so it stays open for the workspace keepalive probe.
+            var apiKey = app.Services.GetRequiredService<IOptions<CnbProxyOptions>>().Value.ApiKey;
+            if (string.IsNullOrEmpty(apiKey) == false)
             {
-                app.Use(CreateProxyKeyGate(proxyKey));
+                app.Use(CreateApiKeyGate(apiKey));
             }
 
             app.MapCYarp(context => context.User.FindFirstValue(CnbClaims.ClientId) ?? DefaultClientId);
@@ -153,13 +155,16 @@ namespace CYarpServer
             return string.IsNullOrWhiteSpace(configured) ? DefaultUrls : configured;
         }
 
-        private static Func<HttpContext, RequestDelegate, Task> CreateProxyKeyGate(string proxyKey)
+        private static Func<HttpContext, RequestDelegate, Task> CreateApiKeyGate(string apiKey)
         {
             return async (context, next) =>
             {
-                // The CYarp handshake carries the CNB token in its Authorization header,
-                // never the public ProxyKey.
-                if (IsCYarpEndpoint(context.Request.Path))
+                // Not behind the ApiKey:
+                // - the CYarp endpoints: their Authorization header carries the CNB token,
+                //   never the public ApiKey;
+                // - GET /{org}/{repo}/v1/models: answered locally, needs no credential, and the
+                //   workspace keepalive cron probes it without one.
+                if (IsCYarpEndpoint(context.Request.Path) || IsModelsEndpoint(context))
                 {
                     await next(context);
                     return;
@@ -168,7 +173,7 @@ namespace CYarpServer
                 const string scheme = "Bearer ";
                 var header = context.Request.Headers.Authorization.ToString();
                 var token = header.StartsWith(scheme, StringComparison.OrdinalIgnoreCase) ? header[scheme.Length..].Trim() : string.Empty;
-                if (FixedTimeEquals(token, proxyKey) == false)
+                if (FixedTimeEquals(token, apiKey) == false)
                 {
                     context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                     return;
@@ -182,7 +187,8 @@ namespace CYarpServer
         /// Gets whether the path addresses a CYarp endpoint: "/cyarp" or "/cyarp/" (the client
         /// handshake) and "/cyarp/{tunnelId}" (the tunnel). tunnelId is a GUID, so a path with
         /// another segment below "/cyarp/" is a public API path whose workspace id happens to
-        /// start with "cyarp" (e.g. "/cyarp/repo/v1/models") and must still present the ProxyKey.
+        /// start with "cyarp" (e.g. "/cyarp/repo/v1/chat/completions") and must still present
+        /// the ApiKey.
         /// </summary>
         private static bool IsCYarpEndpoint(PathString path)
         {
@@ -192,6 +198,17 @@ namespace CYarpServer
             }
 
             return remainder.HasValue == false || remainder.Value!.AsSpan(1).IndexOf('/') < 0;
+        }
+
+        /// <summary>
+        /// Gets whether the request is <c>GET /{org}/{repo}/v1/models</c>, the locally answered
+        /// model list. It is deliberately open (see <see cref="CreateApiKeyGate"/>).
+        /// </summary>
+        private static bool IsModelsEndpoint(HttpContext context)
+        {
+            return HttpMethods.IsGet(context.Request.Method)
+                && context.Request.Path.Value is { } path
+                && path.EndsWith("/v1/models", StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool FixedTimeEquals(string left, string right)

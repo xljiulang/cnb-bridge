@@ -14,7 +14,7 @@ namespace CYarpServer
     /// <item>maps the public path to <c>/chat/completions</c> (the client's target Uri already
     /// carries <c>/{org}/{repo}/-/ai</c>, and the only forwarded route is
     /// <c>/{org}/{repo}/v1/chat/completions</c>)</item>
-    /// <item>replaces the caller's Authorization (the public ProxyKey) with the CNB token that
+    /// <item>replaces the caller's Authorization (the public ApiKey) with the CNB token that
     /// the CYarp client reported during its handshake</item>
     /// <item>drops the caller's Host so the upstream edge sees the host it actually serves</item>
     /// </list>
@@ -34,7 +34,7 @@ namespace CYarpServer
         {
             await base.TransformRequestAsync(httpContext, proxyRequest, destinationPrefix, cancellationToken);
 
-            // Never let the caller's own credential (the public ProxyKey) reach the upstream:
+            // Never let the caller's own credential (the public ApiKey) reach the upstream:
             // drop it, then inject the CNB token reported by the CYarp client handshake.
             proxyRequest.Headers.Remove(HeaderNames.Authorization);
             if (string.IsNullOrEmpty(upstreamAuthorization) == false)

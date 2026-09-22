@@ -18,9 +18,10 @@ namespace CYarpServer
     /// delivered without extending the CYarp API.
     /// </para>
     /// <para>
-    /// Deliberately permissive: no shared secret is validated and the handshake is never
-    /// rejected, so behaviour matches the previous implementation. The tunnel endpoint is
-    /// therefore open to anyone who can reach this server (see README).
+    /// Deliberately permissive: the handshake is never rejected. Any client that can reach this
+    /// server may register a tunnel (and therefore claim any workspace id), which is an accepted
+    /// trade-off for this deployment; see the security section of the README before exposing the
+    /// server more widely.
     /// </para>
     /// </summary>
     internal sealed class CYarpTunnelAuthenticationHandler(
@@ -41,7 +42,7 @@ namespace CYarpServer
             var targetUri = Request.Headers[TargetUriHeader].ToString();
             if (string.IsNullOrEmpty(targetUri))
             {
-                // A public API call: leave it anonymous, the ProxyKey middleware handles it.
+                // A public API call: leave it anonymous, the ApiKey middleware handles it.
                 return Task.FromResult(AuthenticateResult.NoResult());
             }
 

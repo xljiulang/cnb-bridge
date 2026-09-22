@@ -4,7 +4,7 @@
 `https://<subdomain>-9001.cnb.run`。
 
 ```
-公网客户端 ──Bearer PROXY_KEY──▶ http://<你的域名>/<clientId>/v1/chat/completions
+公网客户端 ──Bearer ApiKey──▶ http://<你的域名>/<clientId>/v1/chat/completions
                                       │  (Kestrel 直接对外，无反向代理)
                                       ▼
                                  CYarpServer (VPS, 单文件自包含, ServiceSelf 常驻)
@@ -87,7 +87,7 @@ unit，Windows 走 SCM，同一条命令。
 #    CYarpServer（来自 artifacts/server/）
 #    appsettings.json（来自 artifacts/server/）
 
-# 2) 改 appsettings.json 里的 ProxyKey（公网调用方要带的 key）
+# 2) 改 appsettings.json 里的 ApiKey（公网调用方要带的 key）
 
 # 3) 安装并启动为系统服务（root）
 sudo ./CYarpServer start
@@ -103,7 +103,7 @@ sudo ./CYarpServer stop            # 停止并删除服务
 
 ```jsonc
 {
-  "ProxyKey": "CHANGE-ME-public-api-key",     // 为空则不校验（仅建议内网调试时）
+  "ApiKey": "CHANGE-ME-public-api-key",     // 公网 chat 调用要带的 Bearer key；为空则不校验
   "ProxyModels": [ "deepseek-v4-flash", "glm-5.3-flash", "kimi-k3" ],
   "CYarpOptions": {
     "Node": "node0",
@@ -122,7 +122,7 @@ sudo ./CYarpServer stop            # 停止并删除服务
 现在的取舍是**先不上 TLS**（见第九节风险）。要加时**代码不用动**：
 
 1. 在 `appsettings.json` 增加 Kestrel 的 HTTPS 端点与证书（或再加一层你熟悉的 TLS 终结）；
-2. 客户端 `CYARP_SERVER_URI` 从 `ws://` 改成 `wss://`；
+2. 客户端 `CYARP_SERVER_URI` 从 `http://` 改成 `https://`；
 3. `deploy/.cnb.yml` 的 `FIXED_URL` 从 `http://` 改成 `https://`。
 
 ---
@@ -135,8 +135,9 @@ sudo ./CYarpServer stop            # 停止并删除服务
 > 要放进**你想暴露其 AI 端点**的那个仓库：隧道出口是 `https://api.cnb.cool/$CNB_REPO_SLUG/-/ai`，
 > 而 `CNB_REPO_SLUG` 与 `CNB_TOKEN` 的作用域都是「工作空间所在仓库」。
 
-**第 2 步**：改 `.cnb.yml` 里标了「改这里」的三处：`CYARP_SERVER_URI`（workspace）、`PROXY_KEY` 与
+**第 2 步**：改 `.cnb.yml` 里标了「改这里」的两处：`CYARP_SERVER_URI`（workspace）与
 `FIXED_URL`（keepalive cron）。保活 cron 必须在 `main:` 键下（对应默认分支），否则永不触发。
+`.cnb.yml` 里不需要任何 key：`v1/models` 免鉴权，cron 直接探活。
 
 **第 3 步**：仓库页面点「云开发」启动工作空间，构建日志出现下面两行即隧道已通：
 
@@ -156,27 +157,29 @@ sudo ./CYarpServer stop            # 停止并删除服务
 
 | 环境变量 | 值 | 说明 |
 |---|---|---|
-| `CYarpClientOptions__ServerUri` | `ws://ai.example.com` | 你的 CYarpServer 地址（加 TLS 后改 `wss://`） |
+| `CYarpClientOptions__ServerUri` | `http://ai.example.com` | 你的 CYarpServer 地址（加 TLS 后改 `https://`） |
 | `CYarpClientOptions__TargetUri` | `https://api.cnb.cool/$CNB_REPO_SLUG/-/ai` | 隧道出口指向 CNB 内网 AI |
 | `CYarpClientOptions__ConnectHeaders__Authorization` | `Bearer $CNB_TOKEN` | 握手时把 CNB token 交给 Server |
-| `CYarpClientOptions__ConnectHeaders__X-CYarp-Client` | `<org>/<repo>` | 工作空间 id（仓库 slug 原样），同时是公网路径前缀 |
+| `CYarpClientOptions__ConnectHeaders__X-CYarp-Client` | `<org>/<repo>` | 工作空间 id，固定取 `CNB_REPO_SLUG`（脚本内写死，不可配置），同时是公网路径前缀 |
 | `CYarpClientOptions__KeepAliveInterval` | `00:00:30` | 心跳，同时也是工作空间保活信号 |
 
 > 两个坑已在脚本里处理：① `X-CYarp-Client` 这种**带连字符的变量名不能用 `export`**（bash 报
 > `not a valid identifier`），脚本用 `env "NAME=value"` 注入；② CYarp 2.0.3 的就绪日志是中文
 > 「连接到服务器…成功」，脚本的就绪判定同时匹配中英文。
+>
+> 客户端**不携带任何公网 key**：握手只发 CNB token。服务端隧道入站也不做鉴权（见第九节）。
 
 ---
 
 ## 五、公网调用
 
 ```bash
-# 该工作空间的隧道状态（在线 200 / 离线 503；本地应答，不耗额度）
-curl http://ai.example.com/org/repo/v1/models -H "Authorization: Bearer $PROXY_KEY"
+# 该工作空间的隧道状态（在线 200 / 离线 503；本地应答、免鉴权、不耗额度）
+curl http://ai.example.com/org/repo/v1/models
 
-# 对话（OpenAI 客户端把 base_url 设成带 <org>/<repo> 前缀的地址即可）
+# 对话（需要 ApiKey；OpenAI 客户端把 base_url 设成带 <org>/<repo> 前缀的地址即可）
 curl http://ai.example.com/org/repo/v1/chat/completions \
-  -H "Authorization: Bearer $PROXY_KEY" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ApiKey" -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true}'
 ```
 
@@ -186,15 +189,15 @@ curl http://ai.example.com/org/repo/v1/chat/completions \
 
 | 请求 | 行为 |
 |---|---|
-| `GET /{org}/{repo}/v1/models` | 该工作空间在线 `200`（返回 `ProxyModels` 配置的列表），**离线 `503`**（隧道假死信号，不耗额度） |
-| `POST /{org}/{repo}/v1/chat/completions` | 转发到该工作空间：上游收到 `/{org}/{repo}/-/ai/chat/completions`；离线 `502` |
+| `GET /{org}/{repo}/v1/models` | **免鉴权**。该工作空间在线 `200`（返回 `ProxyModels` 配置的列表），**离线 `503`**（隧道假死信号，不耗额度） |
+| `POST /{org}/{repo}/v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；转发到该工作空间，上游收到 `/{org}/{repo}/-/ai/chat/completions`；离线 `502` |
 | 其它路径（含裸 `/v1/models`、`/v1/chat/completions`、单段/三段前缀、`/v1/embeddings`…） | `404`（路由表即接口清单） |
 | 方法不匹配（如 `POST .../v1/models`） | `405` |
-| `PROXY_KEY` 缺失/错误 | `401`，请求不会到达任何工作空间 |
-| `/cyarp`、`/cyarp/{tunnelId}`（隧道握手） | 不受 `PROXY_KEY` 约束，握手头里带的是 CNB token；形如 `/cyarp/<repo>/v1/...` 的公网路径仍要求 key |
+| chat 的 `ApiKey` 缺失/错误 | `401`，请求不会到达任何工作空间 |
+| `/cyarp`、`/cyarp/{tunnelId}`（隧道握手） | 不受 `ApiKey` 约束，握手头里带的是 CNB token；形如 `/cyarp/<repo>/v1/chat/completions` 的公网路径仍要求 key |
 
-> 前缀固定为**两段** `{org}/{repo}`（大小写敏感）。旧的单段形态（如把 `/` 换成 `~` 的 `org~repo`）不再作为公网
-> 路由存在：`CYARP_CLIENT_ID` 若被改成非两段形态，隧道仍能注册，但公网侧没有对应路由，调用会得到 `404`。
+> 前缀固定为**两段** `{org}/{repo}`（大小写敏感）。`clientId` 恒等于工作空间的 `CNB_REPO_SLUG`
+> （`cyarp-start.sh` 内写死，`.cnb.yml` 里没有可配项），所以公网前缀不可能与隧道注册的 id 不一致。
 
 服务端收到请求后：**丢弃调用方的 `Authorization`（公网 key）**，换成该工作空间握手时报上来的
 `Authorization: Bearer <CNB_TOKEN>` 再发往上游，因此上游鉴权成立，公网 key 不会泄漏。
@@ -222,14 +225,14 @@ POST /orgA/repoA/v1/chat/completions
 |---|---|---|
 | L0 | `services.vscode.options.keepAliveTimeout: 18h` | 把「10 分钟无操作即回收」放宽到会话上限 |
 | L1 | `main:` cron 每 5 分钟查 `workspace/list`，无 running → `workspace/start` | 被平台回收后自动拉起 |
-| L2 | cron 探活 `$FIXED_URL/$CLIENT_ID/v1/models`，连续两次非 200 → `stop + start` | 「假死」：workspace 显示 running 但隧道已断 |
+| L2 | cron 探活 `$FIXED_URL/$CLIENT_ID/v1/models`（**不带 key**），连续两次非 200 → `stop + start` | 「假死」：workspace 显示 running 但隧道已断 |
 
 L0 + 客户端 30s 心跳长连接共同把工作空间钉住；隧道断开由 CYarpClient 自己重连（5s/10s）；
 被回收或假死由 cron 兜底。每次 cron 触发都是流水线新铸造的 `CNB_TOKEN`，工作空间重建后新 token
 随新进程自动生效。
 
-> L2 探的是 `/{clientId}/v1/models`：本地应答、不耗 AI 额度，同时**隧道断了会返回 503**，
-> 所以能真正识别假死。裸 `/v1/models` 恒 200，只用来判断服务端是否活着。
+> L2 探的是 `/{org}/{repo}/v1/models`：本地应答、免鉴权（所以 cron 里不需要任何 key）、不耗 AI 额度，
+> 同时**隧道断了会返回 503**，所以能真正识别假死。
 
 ---
 
@@ -324,7 +327,7 @@ dotnet test cyarp-cnb.sln -c Release
 | `GET /{org}/{repo}/v1/models` | 在线 `200`（内容为 `ProxyModels` 数组）、离线 `503`、含尾斜杠 `200`，均不触达上游 |
 | 裸 `/v1/...`、单段/三段前缀、其它 `/v1/*` | 返回 `404` |
 | 方法不匹配（`POST .../v1/models`） | 返回 `405` |
-| `PROXY_KEY` 错误/缺失 | `401` 且上游零请求 |
+| `ApiKey` 错误/缺失 | `401` 且上游零请求 |
 | `stream=true` | SSE 分帧透传：假上游写第一帧后阻塞，直到测试读到第一帧才写第二帧（整体缓冲的实现会卡死失败） |
 
 另有 `scripts/verify-endpoint.sh`（在公网机器与工作空间内各跑一次对比），验证「必须从工作空间内部
@@ -340,12 +343,15 @@ CNB_TOKEN=xxx CNB_REPO_SLUG=org/repo bash scripts/verify-endpoint.sh
 
 ---
 
-## 九、已知取舍：隧道握手未鉴权 + 现阶段没有 TLS
+## 九、已知取舍：models 免鉴权、隧道入站无鉴权、现阶段没有 TLS
 
-- **隧道握手不做鉴权**：认证 handler 只解析信息、不做准入拒绝，也没校验共享密钥。因此能访问到
-  服务端端口的人都可以用任意 `X-CYarp-Client` 注册隧道，把该工作空间的请求引到自己那里（能看到
-  请求体），并把真正的工作空间踢下线。要收紧只需在该 handler 里加一个共享密钥 claim 校验并在
-  失败时返回 `401`，改动局限在这一个文件。
+- **`GET /{org}/{repo}/v1/models` 免鉴权**：它是本地应答的静态模型列表（不耗额度、不触上游、不含敏感
+  数据），免鉴权是为了让保活 cron 不带任何密钥探活。知道组织/仓库名的人可以读到模型列表与该工作空间的
+  隧道在线状态。
+- **隧道入站不做鉴权**：客户端只带 CNB token（不具备公网密钥语义），服务端不做准入拒绝，也没校验
+  共享密钥。因此能访问到服务端端口的人都可以用任意 `X-CYarp-Client` 注册隧道，把该工作空间的请求引到
+  自己那里（能看到请求体），并把真正的工作空间踢下线。要收紧只需在该 handler 里加一个共享密钥 claim
+  校验并在失败时返回 `401`，改动局限在这一个文件。
 - **没有 TLS**：Kestrel 直接对外只提供 HTTP，CNB token（握手头 + 隧道内注入）与 API 内容都是明文。
   请据此控制暴露面（只监听需要的网卡/端口、用防火墙或 WireGuard 收敛来源）。加 HTTPS 的改法见
   「三、服务端部署 → 以后要加 HTTPS」，不需要改代码。

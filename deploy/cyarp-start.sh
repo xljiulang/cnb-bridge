@@ -12,18 +12,19 @@
 #   CNB_TOKEN      temporary CNB credential, auto-issued per pipeline run
 #   CNB_REPO_SLUG  built-in org/repo
 # You must provide (via .cnb.yml env: or a secrets repo import):
-#   CYARP_SERVER_URI  e.g. ws://ai.example.com
+#   CYARP_SERVER_URI  e.g. http://ai.example.com  (use https:// once the server has TLS)
 # Optional:
-#   CYARP_CLIENT_ID   default: CNB_REPO_SLUG as-is (e.g. "org/repo").
-#                     This id is the public path prefix:
-#                       https://<domain>/<org>/<repo>/v1/...
+#   CYARP_RUN_DIR     where cyarp.log is written, default /workspace/cyarp
+#   CYARP_BIN         client binary path, default <script dir>/cyarp/CYarpClient
+#
+# The client does not carry any public API key: only the CNB token is sent, in the handshake.
 set -euo pipefail
 
-SERVER_URI="${CYARP_SERVER_URI:?CYARP_SERVER_URI is required, e.g. ws://ai.example.com}"
+SERVER_URI="${CYARP_SERVER_URI:?CYARP_SERVER_URI is required, e.g. http://ai.example.com}"
 REPO="${CNB_REPO_SLUG:?CNB_REPO_SLUG is missing}"
-# The client id is the repo slug verbatim, so it may contain "/" (org/repo). The server
-# matches it as a multi segment path prefix.
-CLIENT_ID="${CYARP_CLIENT_ID:-$REPO}"
+# The client id is always the repo slug (org/repo, slashes included) - it is not configurable,
+# so the public path prefix can never drift from the workspace that is actually tunneling.
+CLIENT_ID="$REPO"
 RUN_DIR="${CYARP_RUN_DIR:-/workspace/cyarp}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="${CYARP_BIN:-$SCRIPT_DIR/cyarp/CYarpClient}"

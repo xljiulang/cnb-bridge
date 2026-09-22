@@ -57,7 +57,7 @@ namespace CYarpServer
 
         /// <summary>
         /// <c>POST /{org}/{repo}/v1/chat/completions</c> - forwarded through the tunnel of that
-        /// workspace. The caller's credential (the public ProxyKey) is dropped and replaced with
+        /// workspace. The caller's credential (the public ApiKey) is dropped and replaced with
         /// the CNB token the CYarp client reported during its handshake.
         /// </summary>
         public static async Task HandleChatAsync(HttpContext context)

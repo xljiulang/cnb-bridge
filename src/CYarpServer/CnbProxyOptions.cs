@@ -16,11 +16,16 @@ namespace CYarpServer
         public static readonly string[] DefaultModels = ["deepseek-v4-flash", "glm-5.3-flash", "kimi-k3"];
 
         /// <summary>
-        /// Gets or sets the bearer token required from public callers.
-        /// Leave empty to disable the inbound check.
-        /// The CNB token never reaches this side; callers use their own key.
+        /// Gets or sets the one shared API key of this server, required from public callers as
+        /// <c>Authorization: Bearer &lt;ApiKey&gt;</c> on the chat endpoint.
+        /// Leave empty to disable the check (then anyone who can reach the server may call chat).
+        /// The CNB token never reaches this side; callers use this key instead.
+        /// <para>
+        /// The name is ApiKey, not ProxyKey: an old "ProxyKey" entry is not recognised and would
+        /// silently leave the server unauthenticated, so it is worth double checking after an upgrade.
+        /// </para>
         /// </summary>
-        public string? ProxyKey { get; set; }
+        public string? ApiKey { get; set; }
 
         /// <summary>
         /// Gets or sets the model ids advertised on /v1/models, e.g.

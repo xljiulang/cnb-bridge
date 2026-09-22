@@ -92,5 +92,5 @@ if (-not $SkipClient) {
 if (-not $SkipServer) {
     $serverName = if ($ServerRuntimeIdentifier -like 'win-*') { 'CYarpServer.exe' } else { 'CYarpServer' }
     Write-Host "server binary : $(Join-Path $ServerOutput $serverName)" -ForegroundColor Green
-    Write-Host 'Deploy: copy the server binary + appsettings.json, edit the ProxyKey, then run "sudo ./CYarpServer start" (Linux) or "CYarpServer.exe start" as administrator (Windows).'
+    Write-Host 'Deploy: copy the server binary + appsettings.json, edit the ApiKey, then run "sudo ./CYarpServer start" (Linux) or "CYarpServer.exe start" as administrator (Windows).'
 }
