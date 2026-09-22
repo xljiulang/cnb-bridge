@@ -1,14 +1,14 @@
 # 这个文件是 CNB 仓库的流水线配置，必须位于仓库根目录。
 #
-# 本文件来自工具仓库的 deploy/ 目录（在那里它叫 deploy/.cnb.yml），同步到 CNB 仓库后位于仓库根。
-# 也就是说：deploy/ 的内容就是「CNB 仓库根内容」的镜像，放到仓库根后应得到这样的结构：
+# 本文件来自工具仓库的 src/CYarpClient/（发布时由 scripts/publish.ps1 复制到 artifacts/client/）。
+# artifacts/client/ 的内容就是「CNB 仓库根内容」的镜像，放到仓库根后应得到这样的结构：
 #
 #   <CNB 仓库>/
 #     .cnb.yml            <- 本文件
-#     cyarp-start.sh      <- 启动脚本（按自身目录找 cyarp/CYarpClient）
-#     cyarp/CYarpClient   <- Native AOT 客户端
-#     cyarp/appsettings.json
-#     README.md
+#     cyarp-start.sh      <- 启动脚本（按自身目录找 CYarpClient）
+#     CYarpClient         <- Native AOT 客户端
+#     appsettings.json
+#     Readme.md
 #
 # 数据流：
 #   公网客户端 -> http://<你的域名>/<org>/<repo>/v1/...  （CYarpServer，chat 要带 ApiKey）

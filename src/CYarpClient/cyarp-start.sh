@@ -5,8 +5,10 @@
 #
 # Layout contract: this script and the client binary live in the same directory, i.e.
 #   <payload>/cyarp-start.sh
-#   <payload>/cyarp/CYarpClient
-# where <payload> is the CNB repository root (the contents of this deploy/ directory).
+#   <payload>/CYarpClient
+# where <payload> is the CNB repository root (the contents of artifacts/client/ in the tool
+# repository). This file lives next to the client project (src/CYarpClient/) and is copied
+# into artifacts/client/ by scripts/publish.ps1.
 #
 # Injected by the CNB pipeline (do not set these yourself):
 #   CNB_TOKEN      temporary CNB credential, auto-issued per pipeline run
@@ -27,7 +29,7 @@ REPO="${CNB_REPO_SLUG:?CNB_REPO_SLUG is missing}"
 CLIENT_ID="$REPO"
 RUN_DIR="${CYARP_RUN_DIR:-/workspace/cyarp}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN="${CYARP_BIN:-$SCRIPT_DIR/cyarp/CYarpClient}"
+BIN="${CYARP_BIN:-$SCRIPT_DIR/CYarpClient}"
 
 if [ -z "${CNB_TOKEN:-}" ]; then
   echo "===== CNB_TOKEN is missing, refusing to start ====="

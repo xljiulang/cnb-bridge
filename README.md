@@ -34,17 +34,21 @@ global.json                SDK 固定到 .NET 10（rollForward latestFeature）
 Directory.Build.props      net10.0 / Nullable / LangVersion 等公共属性
 src/
   CYarpServer/             服务端进程：Kestrel + 认证 handler + 多工作空间路由 + ServiceSelf
+    Readme.md              服务端部署指南（唯一源，发布时复制到 artifacts/server/）
   CYarpClient/             客户端进程：环境变量注入 + 自动重连 + 内置文件日志（Native AOT）
+    .cnb.yml               CNB 流水线配置（唯一源，发布时复制到 artifacts/client/）
+    cyarp-start.sh         CNB 工作空间启动脚本（唯一源，发布时复制到 artifacts/client/）
+    Readme.md              客户端部署指南（唯一源，发布时复制到 artifacts/client/）
 tests/CYarp.Cnb.Tests/     端到端集成测试（进程内起 server/client/假上游）
-deploy/
-  README.md                部署指南（VPS 服务端 + CNB 工作空间逐步操作）
-  .cnb.yml                 CNB 流水线配置（含保活 cron）——本目录即 CNB 仓库根内容
-  cyarp-start.sh           CNB 工作空间启动脚本（按自身目录找 cyarp/CYarpClient）
-  cyarp/CYarpClient        已编译好的 linux-x64 Native AOT 客户端（入库）
-  cyarp/appsettings.json   客户端非敏感默认配置
 scripts/
   publish.ps1              一键发布客户端(AOT) + 服务端(自包含 trimmed)
   verify-endpoint.sh       验证「必须从工作空间内部发出请求」的前提
+artifacts/                 发布产物（不入库，由 publish.ps1 生成）
+  server/linux-x64/        CYarpServer + appsettings.json
+  server/win-x64/          CYarpServer.exe + appsettings.json
+  server/Readme.md         服务端部署指南（副本）
+  client/                  CNB 仓库载荷镜像：CYarpClient + appsettings.json
+                           + cyarp-start.sh + .cnb.yml + Readme.md
 ```
 
 ---
@@ -61,14 +65,20 @@ dotnet build cyarp-cnb.sln -c Release
 # 端到端集成测试
 dotnet test cyarp-cnb.sln -c Release
 
-# 发布 linux-x64（Windows 上即可完成）
+# 发布全部产物（server 的 linux-x64 与 win-x64 + client 载荷）
 pwsh ./scripts/publish.ps1
+
+# 单发某一侧 / 某一架构
+pwsh ./scripts/publish.ps1 -SkipClient
+pwsh ./scripts/publish.ps1 -SkipClient -ServerRuntimeIdentifier win-x64
+pwsh ./scripts/publish.ps1 -SkipServer
 ```
 
 | 产物 | 位置 | 形态 | 说明 |
 |---|---|---|---|
-| `CYarpClient` | `deploy/cyarp/CYarpClient` | **Native AOT** 单文件，约 8 MB | linux-x64，glibc ≥ 2.17，**入库**，CNB 工作空间直接用 |
-| `CYarpServer` | `artifacts/server/CYarpServer` | **自包含 + trimmed** 单文件，约 17 MB | linux-x64，运行时内嵌，上传到 VPS 即可 |
+| `CYarpServer`（Linux） | `artifacts/server/linux-x64/` | **自包含 + trimmed** 单文件，约 17 MB | 运行时内嵌，上传到 VPS 即可 |
+| `CYarpServer.exe`（Windows） | `artifacts/server/win-x64/` | 同上，约 15 MB | 装成 Windows 服务 |
+| `client/` 载荷 | `artifacts/client/` | **Native AOT** 单文件，约 8 MB + 脚本/配置/文档 | glibc ≥ 2.17；把该目录**内容**放到 CNB 仓库根即可 |
 
 > 服务端发布时会有一条 `IL2104: Assembly 'CYarp.Server' produced trim warnings`。这是 CYarp 包内部的
 > 裁剪提示，实机验证过握手、隧道、转发、流式响应全部正常（见第七节），因此保留提示不静默屏蔽。
@@ -84,8 +94,8 @@ unit，Windows 走 SCM，同一条命令。
 
 ```bash
 # 1) 上传两个文件到 VPS 同一目录，例如 /opt/cyarp/
-#    CYarpServer（来自 artifacts/server/）
-#    appsettings.json（来自 artifacts/server/）
+#    CYarpServer（来自 artifacts/server/linux-x64/）
+#    appsettings.json（来自 artifacts/server/linux-x64/）
 
 # 2) 改 appsettings.json 里的 ApiKey（公网调用方要带的 key）
 
@@ -123,14 +133,15 @@ sudo ./CYarpServer stop            # 停止并删除服务
 
 1. 在 `appsettings.json` 增加 Kestrel 的 HTTPS 端点与证书（或再加一层你熟悉的 TLS 终结）；
 2. 客户端 `CYARP_SERVER_URI` 从 `http://` 改成 `https://`；
-3. `deploy/.cnb.yml` 的 `FIXED_URL` 从 `http://` 改成 `https://`。
+3. 载荷里 `.cnb.yml` 的 `FIXED_URL` 从 `http://` 改成 `https://`。
 
 ---
 
 ## 四、CNB 工作空间侧接入
 
-**第 1 步**：把 `deploy/` 的**内容**放到 CNB 仓库根目录（`.cnb.yml`、`cyarp-start.sh`、`cyarp/CYarpClient`
-三样必带），例如 `rsync -a --delete deploy/ /path/to/cnb-some-repo/` 后提交推送。
+**第 1 步**：把 `artifacts/client/` 的**内容**放到 CNB 仓库根目录（`.cnb.yml`、`cyarp-start.sh`、`CYarpClient`
+三样必带），例如 `pwsh ./scripts/publish.ps1 -SkipServer` 之后 `rsync -a --delete artifacts/client/ /path/to/cnb-some-repo/`，
+提交推送。
 
 > 要放进**你想暴露其 AI 端点**的那个仓库：隧道出口是 `https://api.cnb.cool/$CNB_REPO_SLUG/-/ai`，
 > 而 `CNB_REPO_SLUG` 与 `CNB_TOKEN` 的作用域都是「工作空间所在仓库」。

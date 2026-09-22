@@ -1,0 +1,271 @@
+# 服务端部署指南（CYarpServer）
+
+把 CNB 工作空间里的 AI 端点，发布成固定域名的 OpenAI 兼容 API。本文只讲**服务端**（VPS / Windows 上的
+`CYarpServer`）；工作空间侧的接入见 [`../CYarpClient/Readme.md`](../CYarpClient/Readme.md)。
+
+``` 
+公网客户端 ──Bearer ApiKey──▶ http://<你的域名>/<org>/<repo>/v1/chat/completions
+                                      │  Kestrel 直接对外（无 Docker、无 Nginx/Caddy）
+                                      ▼
+                              CYarpServer (VPS 系统服务)
+                                      │  长连接隧道（工作空间主动向外拨号）
+                                      ▼
+                       CYarpClient ← 跑在 CNB 工作空间
+                                      │  Authorization: Bearer $CNB_TOKEN
+                                      ▼
+                https://api.cnb.cool/$CNB_REPO_SLUG/-/ai/chat/completions
+```
+
+架构与设计取舍见仓库根目录 [`README.md`](../../README.md)。
+
+---
+
+## 1. 需要准备什么
+
+| 项 | 说明 | 是否必需 |
+|---|---|---|
+| VPS | Linux x64（glibc ≥ 2.17，即 CentOS 7 / Ubuntu 18.04 及以上）或 Windows；有公网 IP | 必需 |
+| 域名 | 指向该 VPS 的 A 记录；现在只跑 HTTP，所以不必配证书 | 可选（也可以直接用 IP） |
+| `ApiKey` | 公网 chat 调用方要带的密钥（一个服务一份通用 key），自己编一个强随机串 | 必需 |
+| `CNB_TOKEN` | **平台自动注入**到工作空间，不需要申请、不要写进仓库 | 不用准备 |
+
+---
+
+## 2. 构建产物（开发机）
+
+前置：.NET 10 SDK。构建机需联网一次（下载 ILCompiler 与 zig 工具链，之后进 NuGet 缓存可离线复现）。
+
+```powershell
+# 默认一次产出：server 的 linux-x64 与 win-x64，以及客户端载荷
+pwsh ./scripts/publish.ps1
+
+# 只发服务端，或只发某一个架构
+pwsh ./scripts/publish.ps1 -SkipClient
+pwsh ./scripts/publish.ps1 -SkipClient -ServerRuntimes linux-x64
+pwsh ./scripts/publish.ps1 -SkipClient -ServerRuntimeIdentifier win-x64
+```
+
+服务端产物（**自包含 + trimmed 单文件**，目标机器不需要装 .NET 运行时）：
+
+| 产物 | 位置 | 大小 |
+|---|---|---|
+| Linux | `artifacts/server/linux-x64/CYarpServer` | 约 17 MB |
+| Windows | `artifacts/server/win-x64/CYarpServer.exe` | 约 15 MB |
+
+> 发布时会有一条 `IL2104: Assembly 'CYarp.Server' produced trim warnings`，这是 CYarp 包内部的裁剪提示，
+> 属已知情况（见根 README 第七节）。服务端不使用 Native AOT：`CYarp.Server` 包用
+> `Map(pattern, Delegate)` 映射端点，AOT 下首个请求会失败。
+
+---
+
+## 3. 部署（Linux / VPS）
+
+### 3.1 上传
+
+只需两个文件，放在同一个目录（下文以 `/opt/cyarp/` 为例）：
+
+```bash
+sudo mkdir -p /opt/cyarp && cd /opt/cyarp
+
+# 在开发机上
+scp artifacts/server/linux-x64/CYarpServer   root@<VPS_IP>:/opt/cyarp/
+scp artifacts/server/linux-x64/appsettings.json root@<VPS_IP>:/opt/cyarp/
+
+# 在 VPS 上
+chmod +x /opt/cyarp/CYarpServer
+```
+
+### 3.2 配置
+
+编辑 `/opt/cyarp/appsettings.json`，**至少改掉 `ApiKey`**：
+
+```jsonc
+{
+  // 公网 chat 调用方必须带这个 key（Authorization: Bearer <ApiKey>）；留空表示不校验
+  // 注意：键名是 ApiKey，不是 ProxyKey —— 写成旧名会被当作未配置，公网就不校验了
+  "ApiKey": "换成你自己的强随机串",
+
+  // /{org}/{repo}/v1/models 本地返回的模型列表，不占上游额度（JSON 数组，不是逗号字符串）
+  "ProxyModels": [ "deepseek-v4-flash", "glm-5.3-flash", "kimi-k3" ],
+
+  // 监听地址：不写则默认 http://+:80（80 端口需要 root，ServiceSelf 安装时本来就是 root）
+  // "Urls": "http://+:8080",
+
+  "CYarpOptions": {
+    "Node": "node0",
+    "Client": { "KeepAlive": true, "KeepAliveInterval": "00:00:40" },
+    "HttpTunnel": { "MaxTunnelsPerClient": 20, "CreationTimeout": "00:00:10" }
+  },
+  "Logging": {
+    "LogLevel": { "Default": "Information", "CYarp": "Information", "Yarp.ReverseProxy": "Warning" }
+  }
+}
+```
+
+`CYarpOptions` 的生效值会在启动日志里回显（`CYarp options in effect: ...`）；如果这里与文件不一致，说明配置没被读到。
+
+### 3.3 安装并启动为系统服务
+
+```bash
+cd /opt/cyarp
+sudo ./CYarpServer start      # 安装 + 启动 + 设置开机自启
+```
+
+`start` 背后做的事：把本程序写进 `/etc/systemd/system/CYarpServer.service`、执行 `systemctl daemon-reload / start / enable`。
+
+```bash
+sudo ./CYarpServer logs                 # 跟随服务日志（通过命名管道订阅服务进程的日志）
+sudo ./CYarpServer logs filter=ERROR    # 只看含关键字 ERROR 的日志
+sudo ./CYarpServer stop                 # 停止 + 取消开机自启 + 删除 unit 文件
+
+# 服务已经安装好之后，也可以用原生 systemd 命令
+sudo systemctl status CYarpServer
+sudo systemctl restart CYarpServer
+sudo journalctl -u CYarpServer -f       # 需要看 systemd 侧的日志时用这个
+```
+
+也可以前台直接跑，方便调试：
+
+```bash
+sudo ./CYarpServer        # 不接任何子命令时就是前台运行，Ctrl+C 退出
+```
+
+> 启动日志里应能看到 `Now listening on: http://...:80` 与 `CYarp options in effect: ...`。
+
+### 3.4 验证服务端
+
+```bash
+curl -i http://<你的域名或IP>/<org>/<repo>/v1/models
+```
+
+该端点免鉴权（本地应答、不耗额度）。此时若还没有工作空间接入，`/{org}/{repo}/v1/models` 会返回 `503`：
+
+| 请求 | 期望 |
+|---|---|
+| `GET /{org}/{repo}/v1/models`（不需要 key） | `503`：服务端活着，但该工作空间的隧道还没连上 |
+| `POST /{org}/{repo}/v1/chat/completions` + 正确 `ApiKey` | `502`（没有在线工作空间） |
+| 同样请求但不带 key | `401`（chat 需要 `ApiKey`；若 key 配空则不校验） |
+| 任何裸 `/v1/...` 路径 | `404`（未发布） |
+
+### 3.5 升级与迁移
+
+```bash
+# 覆盖二进制后重启（unit 已存在，用 systemctl 即可）
+scp artifacts/server/linux-x64/CYarpServer root@<VPS_IP>:/opt/cyarp/
+chmod +x /opt/cyarp/CYarpServer
+sudo systemctl restart CYarpServer
+```
+
+注意两点：
+
+- **换目录**：unit 里记录的是绝对路径，且 ServiceSelf 会检查「同名但不同路径」并报错。要搬到别的目录，先 `sudo ./CYarpServer stop` 再在新目录 `sudo ./CYarpServer start`。
+- **改端口**：在 `appsettings.json` 里加 `"Urls": "http://+:8080"` 后 `sudo systemctl restart CYarpServer`；systemd 服务不继承你 shell 里的 `ASPNETCORE_URLS`。
+
+### 3.6 防火墙
+
+放行服务端监听端口（默认 80）：
+
+```bash
+# ufw
+sudo ufw allow 80/tcp
+# firewalld
+sudo firewall-cmd --permanent --add-port=80/tcp && sudo firewall-cmd --reload
+```
+
+---
+
+## 4. 部署（Windows，可选）
+
+ServiceSelf 会把它装成 Windows 服务（同样不需要装 .NET 运行时）：
+
+```powershell
+# 在开发机发布 Windows 版（产物在 artifacts/server/win-x64/）
+pwsh ./scripts/publish.ps1 -SkipClient -ServerRuntimeIdentifier win-x64
+
+# 把 CYarpServer.exe 与 appsettings.json 拷到目标机器同一目录，例如 C:\cyarp\
+# 改 appsettings.json 里的 ApiKey，然后以管理员身份：
+C:\cyarp\CYarpServer.exe start     # 安装 + 启动 + 开机自启（SCM 服务）
+C:\cyarp\CYarpServer.exe logs      # 跟随服务日志
+C:\cyarp\CYarpServer.exe logs filter=ERROR
+C:\cyarp\CYarpServer.exe stop      # 停止并删除服务
+C:\cyarp\CYarpServer.exe           # 前台运行，方便调试
+```
+
+改端口同样在 `appsettings.json` 里加 `"Urls": "http://+:8080"`（默认 `http://+:80` 需要管理员权限才能绑定）。
+
+---
+
+## 5. 下面要做什么
+
+服务端起好之后，到**要暴露 AI 端点的那个 CNB 仓库**里接入客户端：把 `artifacts/client/` 的内容放到
+仓库根、改 `.cnb.yml` 里的 `CYARP_SERVER_URI` 与 `FIXED_URL`，然后开工作空间。
+完整步骤见 [`../CYarpClient/Readme.md`](../CYarpClient/Readme.md)。
+
+---
+
+## 6. 配置参考
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `ApiKey` | 空 | 公网 **chat** 调用方的 Bearer key；为空则不校验。`v1/models` 永久免鉴权 |
+| `ProxyModels` | `[ "deepseek-v4-flash", "glm-5.3-flash", "kimi-k3" ]` | `/{org}/{repo}/v1/models` 本地返回的列表（JSON 数组；写成逗号字符串会在启动时报绑定错误） |
+| `Urls` | `http://+:80` | Kestrel 监听地址；也可用 `--urls` 启动参数 |
+| `CYarpOptions:Client:KeepAliveInterval` | `00:00:40` | 服务端心跳周期 |
+| `CYarpOptions:HttpTunnel:MaxTunnelsPerClient` | `20` | 每个工作空间并发 HTTP 隧道（≈并发请求）上限 |
+| `CYarpOptions:HttpTunnel:CreationTimeout` | `00:00:10` | 隧道建立超时 |
+| `Logging:LogLevel:*` | Information | 日志级别 |
+
+环境变量写法：`ApiKey=xxx`、`CYarpOptions__HttpTunnel__MaxTunnelsPerClient=50`（服务由 systemd 拉起时需写进 unit 的 `Environment=`，见 3.5）。
+
+### 公网接口与鉴权
+
+公网只有两条接口，`clientId` 由 `{org}` 与 `{repo}` 两段拼成（即仓库 slug，大小写敏感）：
+
+| 请求 | 行为 |
+|---|---|
+| `GET /{org}/{repo}/v1/models` | **免鉴权**（本地应答、不耗额度）：该工作空间在线 `200`，隧道断了 `503` |
+| `POST /{org}/{repo}/v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；转发到该工作空间，上游收到 `/{org}/{repo}/-/ai/chat/completions`；离线 `502` |
+| 其它路径（裸 `/v1/*`、单段/三段前缀、`/v1/embeddings`…） | `404` |
+| 方法不匹配（如 `POST .../v1/models`） | `405` |
+| `/cyarp`、`/cyarp/{tunnelId}`（隧道握手） | 不受 `ApiKey` 约束，握手头里带的是 CNB token；形如 `/cyarp/<repo>/v1/chat/completions` 的公网路径仍要求 key |
+
+服务端转发时**丢弃调用方的 `Authorization`（ApiKey）**，换成该工作空间握手时报上来的
+`Authorization: Bearer <CNB_TOKEN>`，因此上游鉴权成立、公网 key 不会泄漏。
+
+---
+
+## 7. 故障排查
+
+| 症状 | 可能原因 | 处理 |
+|---|---|---|
+| 启动即报配置绑定错误（涉及 `ProxyModels`） | `ProxyModels` 必须是 JSON 数组 | 改成 `"ProxyModels": [ "m1", "m2" ]`；旧的逗号分隔字符串不再支持 |
+| 启动日志里 `CYarp options in effect` 显示的是库默认值（`00:00:50` / `10`） | appsettings 没被读到，或升级 CYarp 后配置绑定回退路径失效 | 确认 `appsettings.json` 在二进制同目录；见根 README 第七节「为什么 CYarpOptions 要在服务端项目里绑定」 |
+| chat 返回 `401` | 请求里的 key 与 `appsettings.json` 的 `ApiKey` 不一致，或压根没带 | `curl` 时加 `-H "Authorization: Bearer <ApiKey>"`；或把 `ApiKey` 清空（仅调试）。注意 `v1/models` 免鉴权，**它返回 401 才说明键名写错了（例如仍写成 `ProxyKey`）** |
+| chat 返回 `502` | 没有该前缀的在线工作空间（写成裸路径、前缀写错、大小写不符） | 用形如 `<base>/<org>/<repo>/v1/chat/completions` 的地址，`{org}/{repo}` 与工作空间仓库 slug 逐字符一致（大小写敏感） |
+| `/{org}/{repo}/v1/models` 返回 `503` | 服务端活着但该工作空间的隧道断了（假死） | 工作空间的保活 cron 会自动 `stop + start`；也可手动重启工作空间 |
+| 调用带前缀仍返回 `404` | 路径形态不对：只发布 `/{org}/{repo}/v1/models` 与 `/{org}/{repo}/v1/chat/completions` | 原子路径、单段前缀（如 `org~repo`）、三段前缀、其它 `/v1/*` 都是 404 |
+| 对话请求返回 `301 Moved Permanently` 且 `Location: https://cnb.cool`（响应体是一小段 HTML） | 服务端把**调用方的 Host**（你的公网域名/IP）转发给了上游；CNB 边缘按 Host 路由，认不出就重定向到官网。这是 2026-09 之前服务端版本的 bug | 更新服务端二进制到包含 Host 修复的版本（`CnbAiTransformer` 里清掉转发 Host）并重启服务；`/v1/models` 这类本地应答不受影响，所以「models 通、对话不通」正是这个症状 |
+| 上游返回 401/412 之类 | 上游鉴权/网络策略 | 412 表示请求不是从 CNB 工作空间内发出；401 多半是 `CNB_TOKEN` 过期，重启工作空间让平台重铸 |
+| Windows 上启动即报 `SocketException (10013) ... 访问权限`（WSAEACCES） | 端口落在 Windows 保留段（Hyper-V/WSL 预留，如 8081-8180），或用了 <1024 的端口但没提权 | `netsh interface ipv4 show excludedportrange protocol=tcp` 查保留段，换一个端口：在 `appsettings.json` 加 `"Urls": "http://+:18089"` |
+| `CYarpServer start` 报「系统已存在同名但不同路径的服务」 | 之前从别的目录安装过 | 在旧目录执行 `sudo ./CYarpServer stop`，或 `sudo systemctl disable --now CYarpServer && sudo rm /etc/systemd/system/CYarpServer.service` |
+| `start` 报「无法操作服务：没有root权限」 | 没用 root | 加 `sudo` |
+
+常用观察点：
+
+```bash
+sudo ./CYarpServer logs                  # 订阅服务进程的日志（可加 filter=关键字）
+sudo journalctl -u CYarpServer -n 100 --no-pager
+```
+
+### 两个已知取舍
+
+- **`GET /{org}/{repo}/v1/models` 免鉴权**：它是本地应答的静态模型列表（不耗额度、不触上游、不含敏感数据），
+  免鉴权是为了让工作空间的保活 cron 不带任何密钥探活。知道组织/仓库名的人可以读到模型列表与该工作空间的隧道在线状态。
+- **隧道入站不做鉴权**：客户端只带 CNB token（不具备公网密钥语义），服务端不做准入拒绝。因此能访问到服务端端口
+  的人都可以用任意 `X-CYarp-Client` 注册隧道，把该工作空间的请求引到自己那里（能看到请求体），并把真正的工作空间
+  踢下线。要收紧只需在该 handler 里加一个共享密钥 claim 校验并在失败时返回 `401`。
+
+另外现在**没有 TLS**：Kestrel 直接对外只提供 HTTP，CNB token（握手头 + 隧道内注入）与 API 内容都是明文。
+请据此控制暴露面（只监听需要的网卡/端口、用防火墙或 WireGuard 收敛来源）。要加 HTTPS：在 `appsettings.json` 增加
+Kestrel 的 HTTPS 端点与证书，然后把客户端 `.cnb.yml` 里的 `CYARP_SERVER_URI` 改成 `https://`、
+`FIXED_URL` 改成 `https://`，代码不用动。

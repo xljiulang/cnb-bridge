@@ -39,12 +39,13 @@ bin/
 obj/
 *.log
 
-# 本仓库：Native AOT 发布产物
-# 客户端二进制与 appsettings.json 需要入库（CNB 工作空间直接用），调试符号不要。
+# 本仓库：发布产物目录（不入库）
+# artifacts/server/<rid>/ 是服务端单文件产物，artifacts/client/ 是 CNB 仓库的载荷镜像。
+# 这些都由 scripts/publish.ps1 生成；它们的源在 src/CYarpServer 与 src/CYarpClient。
 artifacts/
 *.dbg
 *.pdb
 cyarp-cnb.slnx
 
 # 客户端运行时的按天文件日志（本地跑过客户端时会出现）
-deploy/cyarp/logs/
+src/CYarpClient/logs/
