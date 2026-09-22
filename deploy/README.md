@@ -114,8 +114,8 @@ chmod +x /opt/cyarp/CYarpServer
   // 公网调用方必须带这个 key；留空表示不校验（只建议内网调试时）
   "ProxyKey": "换成你自己的强随机串",
 
-  // /v1/models 本地返回的模型列表，不占上游额度
-  "ProxyModels": "deepseek-v4-flash,glm-5.3-flash,kimi-k3",
+  // /{org}/{repo}/v1/models 本地返回的模型列表，不占上游额度（JSON 数组，不是逗号字符串）
+  "ProxyModels": [ "deepseek-v4-flash", "glm-5.3-flash", "kimi-k3" ],
 
   // 监听地址：不写则默认 http://+:80（80 端口需要 root，ServiceSelf 安装时本来就是 root）
   // "Urls": "http://+:8080",
@@ -287,41 +287,33 @@ FIXED_URL: "http://ai.example.com"
 假设工作空间 `org/repo` 已在线，`<base>` = `http://你的域名`：
 
 ```bash
-# 1) 服务存活（本地应答，不耗额度，也不需要隧道）
-curl -s -o /dev/null -w '%{http_code}\n' $BASE/v1/models -H "Authorization: Bearer $PROXY_KEY"
-# 期望 200
-
-# 2) 该工作空间的隧道状态（在线 200 / 隧道假死 503，不耗额度）
+# 1) 该工作空间的隧道状态（在线 200 / 隧道假死 503，本地应答不耗额度）
 curl -s -o /dev/null -w '%{http_code}\n' $BASE/org/repo/v1/models -H "Authorization: Bearer $PROXY_KEY"
 # 期望 200
 
-# 3) 真实调用
-curl -s $BASE/org/repo/v1/chat/completions \
-  -H "Authorization: Bearer $PROXY_KEY" -H "Content-Type: application/json" \
-  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}'
-# 期望 200 + JSON
-
-# 4) 流式
+# 2) 真实调用（上游不支持非流式，必须 stream:true）
 curl -sN $BASE/org/repo/v1/chat/completions \
   -H "Authorization: Bearer $PROXY_KEY" -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true}'
 # 期望 SSE 分帧返回
 
-# 5) 鉴权与路由边界
-curl -s -o /dev/null -w '%{http_code}\n' $BASE/v1/models -H "Authorization: Bearer wrong"   # 401
+# 3) 鉴权与路由边界
+curl -s -o /dev/null -w '%{http_code}\n' $BASE/org/repo/v1/models -H "Authorization: Bearer wrong"   # 401
 curl -s -o /dev/null -w '%{http_code}\n' $BASE/ghost/repo/v1/models -H "Authorization: Bearer $PROXY_KEY"  # 503
 curl -s -o /dev/null -w '%{http_code}\n' $BASE/ghost/repo/v1/chat/completions -H "Authorization: Bearer $PROXY_KEY" -H 'Content-Type: application/json' -d '{}'  # 502
+curl -s -o /dev/null -w '%{http_code}\n' $BASE/v1/models -H "Authorization: Bearer $PROXY_KEY"   # 404（裸路径未发布）
 ```
 
 OpenAI 客户端接入时：`base_url = <base>/org/repo/v1`，`api_key = <PROXY_KEY>`。
-单工作空间在线时也可以省掉前缀，直接 `base_url = <base>/v1`。
 
-前缀规则（细节见根 README「路由与鉴权规则」）：
+路由规则（细节见根 README「路由与鉴权规则」）：
 
-- `{clientId}` 就是仓库 slug，所以公网地址形如 `/<org>/<repo>/v1/...`；与**已连接**的工作空间做最长匹配，大小写敏感。
-- 多工作空间同时在线时，请始终带前缀调用；带前缀的 `/v1/models` 在线 200、隧道断了 503（本地应答，不耗额度）。
+- 公网接口只有两条：`GET /{org}/{repo}/v1/models`（在线 200 / 离线 503，本地应答不耗额度）与
+  `POST /{org}/{repo}/v1/chat/completions`（经隧道转发）。`clientId` 由 `{org}` 与 `{repo}` 两段拼成，大小写敏感。
+- 其它路径（裸 `/v1/models`、裸 `/v1/chat/completions`、单段或三段前缀、`/v1/embeddings` 等）返回 **404**；
+  方法不匹配返回 **405**。所以调用必须带 `/{org}/{repo}` 前缀。
 - 组织名恰好叫 `cyarp` 也没问题：`/cyarp/<repo>/v1/...` 这类公网路径照样要求 `PROXY_KEY`，只有真正的 `/cyarp` 握手端点免鉴权。
-- 旧形态（把 `/` 换成 `~` 的 id，如 `org~repo`）仍可作为普通 id 使用，但它与 `org/repo` 是两个不同的工作空间。
+- `CYARP_CLIENT_ID` 默认就是仓库 slug（两段）。若把它改成非两段形态，隧道仍能注册，但公网侧没有对应路由，调用会得到 404。
 
 ---
 
@@ -332,7 +324,7 @@ OpenAI 客户端接入时：`base_url = <base>/org/repo/v1`，`api_key = <PROXY_
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `ProxyKey` | 空 | 公网调用方的 Bearer key；为空则不校验 |
-| `ProxyModels` | `deepseek-v4-flash,glm-5.3-flash,kimi-k3` | `/v1/models` 本地返回的列表 |
+| `ProxyModels` | `[ "deepseek-v4-flash", "glm-5.3-flash", "kimi-k3" ]` | `/{org}/{repo}/v1/models` 本地返回的列表（JSON 数组；写成逗号字符串会在启动时报绑定错误） |
 | `Urls` | `http://+:80` | Kestrel 监听地址；也可用 `--urls` 启动参数 |
 | `CYarpOptions:Client:KeepAliveInterval` | `00:00:40` | 服务端心跳周期 |
 | `CYarpOptions:HttpTunnel:MaxTunnelsPerClient` | `20` | 每个工作空间并发 HTTP 隧道（≈并发请求）上限 |
@@ -393,6 +385,8 @@ OpenAI 客户端接入时：`base_url = <base>/org/repo/v1`，`api_key = <PROXY_
 | `/{clientId}/v1/models` 返回 `503` | 服务端活着但该工作空间的隧道断了（假死） | cron 会自动 `stop + start`；也可手动重启工作空间 |
 | 上游返回 401/412 之类 | 上游鉴权/网络策略 | 412 表示请求不是从 CNB 工作空间内发出；401 多半是 `CNB_TOKEN` 过期，重启工作空间让平台重铸 |
 | 对话请求返回 `301 Moved Permanently` 且 `Location: https://cnb.cool`（响应体是一小段 HTML） | 服务端把**调用方的 Host**（你的公网域名/IP）转发给了上游；CNB 边缘按 Host 路由，认不出就重定向到官网。这是 2026-09 之前服务端版本的 bug | 更新服务端二进制到包含 Host 修复的版本（`CnbAiTransformer` 里清掉转发 Host）并重启服务；`/v1/models` 这类本地应答不受影响，所以「models 通、对话不通」正是这个症状 |
+| 调用带前缀仍返回 `404` | 路径形态不对：公网只发布 `/{org}/{repo}/v1/models` 与 `/{org}/{repo}/v1/chat/completions`，裸路径、单段前缀（如 `org~repo`）、三段前缀、其它 `/v1/*` 都是 404 | 用形如 `<base>/<org>/<repo>/v1/...` 的地址；`{org}`/`{repo}` 与工作空间在线时的 `clientId`（脚本打印的那行）必须逐字符一致（大小写敏感） |
+| 启动即报配置绑定错误（涉及 `ProxyModels`） | `ProxyModels` 现在必须是 JSON 数组 | 改成 `"ProxyModels": [ "m1", "m2" ]`；旧的逗号分隔字符串不再支持 |
 | 启动日志里 `CYarp options in effect` 显示的是库默认值（`00:00:50` / `10`） | appsettings 没被读到，或升级 CYarp 后配置绑定回退路径失效 | 确认 `appsettings.json` 在二进制同目录；见根 README 第七节「为什么 CYarpOptions 要在服务端项目里绑定」 |
 | `CYarpServer start` 报「系统已存在同名但不同路径的服务」 | 之前从别的目录安装过 | 在旧目录执行 `sudo ./CYarpServer stop`，或 `sudo systemctl disable --now CYarpServer && sudo rm /etc/systemd/system/CYarpServer.service` |
 | `start` 报「无法操作服务：没有root权限」 | 没用 root | 加 `sudo` |

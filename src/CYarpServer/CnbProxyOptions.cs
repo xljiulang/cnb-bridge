@@ -13,7 +13,7 @@ namespace CYarpServer
         /// /{repo}/-/ai/chat/completions), but OpenAI clients probe /v1/models on startup,
         /// so the server answers that request locally.
         /// </summary>
-        public const string DefaultModels = "deepseek-v4-flash,glm-5.3-flash,kimi-k3";
+        public static readonly string[] DefaultModels = ["deepseek-v4-flash", "glm-5.3-flash", "kimi-k3"];
 
         /// <summary>
         /// Gets or sets the bearer token required from public callers.
@@ -23,8 +23,11 @@ namespace CYarpServer
         public string? ProxyKey { get; set; }
 
         /// <summary>
-        /// Gets or sets the comma separated model ids advertised on /v1/models.
+        /// Gets or sets the model ids advertised on /v1/models, e.g.
+        /// <c>"ProxyModels": [ "deepseek-v4-flash", "glm-5.3-flash", "kimi-k3" ]</c>.
+        /// A comma separated string is not accepted: the configuration binder fails loudly
+        /// instead of advertising an empty list.
         /// </summary>
-        public string? ProxyModels { get; set; }
+        public string[]? ProxyModels { get; set; }
     }
 }

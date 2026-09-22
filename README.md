@@ -104,7 +104,7 @@ sudo ./CYarpServer stop            # 停止并删除服务
 ```jsonc
 {
   "ProxyKey": "CHANGE-ME-public-api-key",     // 为空则不校验（仅建议内网调试时）
-  "ProxyModels": "deepseek-v4-flash,glm-5.3-flash,kimi-k3",
+  "ProxyModels": [ "deepseek-v4-flash", "glm-5.3-flash", "kimi-k3" ],
   "CYarpOptions": {
     "Node": "node0",
     "Client": { "KeepAlive": true, "KeepAliveInterval": "00:00:40" },
@@ -171,33 +171,30 @@ sudo ./CYarpServer stop            # 停止并删除服务
 ## 五、公网调用
 
 ```bash
-# 服务存活探测（本地返回，不耗额度）
-curl http://ai.example.com/v1/models -H "Authorization: Bearer $PROXY_KEY"
+# 该工作空间的隧道状态（在线 200 / 离线 503；本地应答，不耗额度）
+curl http://ai.example.com/org/repo/v1/models -H "Authorization: Bearer $PROXY_KEY"
 
-# 单工作空间在线时，也可以不带前缀直接调
-curl http://ai.example.com/v1/chat/completions \
-  -H "Authorization: Bearer $PROXY_KEY" -H "Content-Type: application/json" \
-  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}'
-
-# 多工作空间：用 <org>/<repo> 前缀指定（OpenAI 客户端把 base_url 设成带前缀的地址即可）
+# 对话（OpenAI 客户端把 base_url 设成带 <org>/<repo> 前缀的地址即可）
 curl http://ai.example.com/org/repo/v1/chat/completions \
   -H "Authorization: Bearer $PROXY_KEY" -H "Content-Type: application/json" \
-  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true}'
 ```
 
 ### 路由与鉴权规则
 
+公网接口是一张**固定的路由表**，`clientId` 由路由参数 `{org}` 与 `{repo}` 拼成（即 `org/repo`）：
+
 | 请求 | 行为 |
 |---|---|
-| `/{clientId}/v1/...` | 转发到该工作空间；`/v1` 前缀剥掉，拼到该客户端的 `TargetUri` 上。`clientId` 就是仓库 slug，所以常见形态是 `/{org}/{repo}/v1/...` |
-| 多段前缀的匹配方式 | 与**已连接**的工作空间做最长匹配：同时在线 `org/repo` 与 `org/repo/sub` 时，`/org/repo/sub/v1/...` 命中后者，`/org/repo/v1/...` 命中前者；大小写敏感 |
-| `/v1/...`（无前缀） | **只有一个**工作空间在线时转发到它；多个在线时返回 `502`（避免打错人） |
-| 请求头 `X-CYarp-Client: <clientId>` | 覆盖路径前缀，适合只能改 header 的客户端 |
-| `/{clientId}/v1/models` | 该工作空间在线 `200`，**离线 `503`**（隧道假死信号，不耗额度） |
-| `/v1/models`（无前缀） | 恒 `200`（纯服务存活探测，与隧道状态无关） |
-| 前缀指向未连接的工作空间 | API 调用 `502`；该前缀下的 `/v1/models` 返回 `503`（隧道假死信号） |
+| `GET /{org}/{repo}/v1/models` | 该工作空间在线 `200`（返回 `ProxyModels` 配置的列表），**离线 `503`**（隧道假死信号，不耗额度） |
+| `POST /{org}/{repo}/v1/chat/completions` | 转发到该工作空间：上游收到 `/{org}/{repo}/-/ai/chat/completions`；离线 `502` |
+| 其它路径（含裸 `/v1/models`、`/v1/chat/completions`、单段/三段前缀、`/v1/embeddings`…） | `404`（路由表即接口清单） |
+| 方法不匹配（如 `POST .../v1/models`） | `405` |
 | `PROXY_KEY` 缺失/错误 | `401`，请求不会到达任何工作空间 |
 | `/cyarp`、`/cyarp/{tunnelId}`（隧道握手） | 不受 `PROXY_KEY` 约束，握手头里带的是 CNB token；形如 `/cyarp/<repo>/v1/...` 的公网路径仍要求 key |
+
+> 前缀固定为**两段** `{org}/{repo}`（大小写敏感）。旧的单段形态（如把 `/` 换成 `~` 的 `org~repo`）不再作为公网
+> 路由存在：`CYARP_CLIENT_ID` 若被改成非两段形态，隧道仍能注册，但公网侧没有对应路由，调用会得到 `404`。
 
 服务端收到请求后：**丢弃调用方的 `Authorization`（公网 key）**，换成该工作空间握手时报上来的
 `Authorization: Bearer <CNB_TOKEN>` 再发往上游，因此上游鉴权成立，公网 key 不会泄漏。
@@ -212,7 +209,7 @@ POST /orgA/repoA/v1/chat/completions
 > 上游会改写 `model` 字段：请求 `deepseek-v4-flash` 时响应里的 `model` 是
 > `deepseek-v4.1-flash`，`id` 是 32 位 hex（不是 `chatcmpl-` 前缀）。客户端若有严格校验需自行适配。
 > CNB 官方 OpenAPI 里 AI 标签只有 `/{repo}/-/ai/chat/completions`，没有 `/v1/models`，
-> 所以 `/v1/models` 由 CYarpServer 本地返回（`ProxyModels` 配置驱动），不占上游额度。
+> 所以 `/{org}/{repo}/v1/models` 由 CYarpServer 本地返回（`ProxyModels` 数组配置驱动），不占上游额度。
 
 ---
 
@@ -321,13 +318,12 @@ dotnet test cyarp-cnb.sln -c Release
 | 用例 | 断言 |
 |---|---|
 | 握手 claims | `IClient.User` 上有 `cnb:client-id` 与 `cnb:upstream-authorization` |
-| 单工作空间裸路径转发 | 上游收到 `/{org}/{repo}/-/ai/chat/completions`、`Authorization: Bearer <CNB token>`、query 与 body 保留、公网 key 未出现在任何请求头 |
-| 双工作空间路径前缀 | 各自打到各自 TargetUri 与各自 token，不串台 |
-| 双工作空间裸路径 | 返回 `502` |
-| 未知前缀 | 返回 `502` |
-| `X-CYarp-Client` 覆盖 | 按 header 路由 |
-| `/v1/models` | 裸路径（含尾斜杠）`200` 且不触达上游 |
-| `/{clientId}/v1/models` | 在线 `200`、离线 `503`，均不触达上游 |
+| 对话转发 | 上游收到 `/{org}/{repo}/-/ai/chat/completions`、`Authorization: Bearer <CNB token>`、query 与 body 保留、公网 key 未出现在任何请求头、Host 为目标地址 |
+| 双工作空间 | 各自打到各自 TargetUri 与各自 token，不串台 |
+| 离线工作空间对话 | 返回 `502` |
+| `GET /{org}/{repo}/v1/models` | 在线 `200`（内容为 `ProxyModels` 数组）、离线 `503`、含尾斜杠 `200`，均不触达上游 |
+| 裸 `/v1/...`、单段/三段前缀、其它 `/v1/*` | 返回 `404` |
+| 方法不匹配（`POST .../v1/models`） | 返回 `405` |
 | `PROXY_KEY` 错误/缺失 | `401` 且上游零请求 |
 | `stream=true` | SSE 分帧透传：假上游写第一帧后阻塞，直到测试读到第一帧才写第二帧（整体缓冲的实现会卡死失败） |
 

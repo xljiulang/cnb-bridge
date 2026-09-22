@@ -58,7 +58,7 @@ namespace CYarp.Cnb.Tests
         }
 
         [Fact]
-        public async Task ProxyKeyUnset_AllowsAnonymousAccess()
+        public async Task ProxyKeyUnset_AllowsAnonymousAccessToAnUnknownWorkspace()
         {
             await using var server = CYarpServerHost.Create(
                 [],
@@ -66,17 +66,17 @@ namespace CYarp.Cnb.Tests
                 {
                     ["Urls"] = "http://127.0.0.1:0",
                     ["ProxyKey"] = string.Empty,
-                    ["ProxyModels"] = "model-a",
                     ["Logging:LogLevel:Default"] = "Warning",
                 });
 
             await server.StartAsync();
 
             using var client = new System.Net.Http.HttpClient { BaseAddress = new System.Uri(StubUpstream.Address(server)) };
-            using var response = await client.GetAsync("/v1/models");
+            using var response = await client.GetAsync("/org/repo/v1/models");
 
-            Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
-            Assert.Contains("\"id\":\"model-a\"", await response.Content.ReadAsStringAsync());
+            // No ProxyKey configured and the route matched: the request reaches the handler,
+            // which reports the (unconnected) workspace as unavailable.
+            Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, response.StatusCode);
 
             await server.StopAsync();
         }

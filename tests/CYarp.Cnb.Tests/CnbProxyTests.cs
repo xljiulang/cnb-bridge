@@ -17,11 +17,12 @@ using Xunit;
 namespace CYarp.Cnb.Tests
 {
     /// <summary>
-    /// End to end tests: a real CYarp client tunnels to a real CYarp server, which
-    /// forwards the public OpenAI-compatible surface to a stub upstream.
+    /// End to end tests: a real CYarp client tunnels to a real CYarp server, which forwards
+    /// the public OpenAI-compatible surface to a stub upstream.
     /// <para>
-    /// The workspace id is the CNB repo slug, so the public base url is
-    /// <c>/{org}/{repo}/v1</c>.
+    /// The published surface is a literal route table: the workspace id is the CNB repo slug,
+    /// so the only routes are <c>/{org}/{repo}/v1/models</c> and
+    /// <c>/{org}/{repo}/v1/chat/completions</c>; everything else is 404.
     /// </para>
     /// </summary>
     public sealed class CnbProxyTests : IAsyncLifetime
@@ -47,7 +48,8 @@ namespace CYarp.Cnb.Tests
                 settings: new Dictionary<string, string?>
                 {
                     ["ProxyKey"] = ProxyKey,
-                    ["ProxyModels"] = "model-a,model-b",
+                    ["ProxyModels:0"] = "model-a",
+                    ["ProxyModels:1"] = "model-b",
                     ["Logging:LogLevel:Default"] = "Warning",
                 });
 
@@ -96,11 +98,11 @@ namespace CYarp.Cnb.Tests
         }
 
         [Fact]
-        public async Task SingleWorkspace_BarePath_IsForwardedWithTheCnbToken()
+        public async Task Chat_IsForwardedWithTheCnbToken()
         {
             await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
 
-            using var response = await this.PostAsync("/v1/chat/completions?stream=false", ProxyKey);
+            using var response = await this.PostChatAsync("/orgA/repoA/v1/chat/completions?stream=false");
 
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
@@ -119,13 +121,13 @@ namespace CYarp.Cnb.Tests
         }
 
         [Fact]
-        public async Task RepoSlugBaseUrl_RoutesToTheAddressedWorkspace()
+        public async Task TwoWorkspaces_RouteIndependently()
         {
             await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
             await this.ConnectAsync("orgB/repoB", "/orgB/repoB/-/ai", "cnb-token-B");
 
-            using var first = await this.PostAsync("/orgA/repoA/v1/chat/completions", ProxyKey);
-            using var second = await this.PostAsync("/orgB/repoB/v1/chat/completions", ProxyKey);
+            using var first = await this.PostChatAsync("/orgA/repoA/v1/chat/completions");
+            using var second = await this.PostChatAsync("/orgB/repoB/v1/chat/completions");
 
             Assert.Equal(HttpStatusCode.OK, first.StatusCode);
             Assert.Equal(HttpStatusCode.OK, second.StatusCode);
@@ -137,76 +139,12 @@ namespace CYarp.Cnb.Tests
         }
 
         [Fact]
-        public async Task LongestConnectedPrefix_Wins()
-        {
-            await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
-            await this.ConnectAsync("orgA/repoA/sub", "/orgA/repoA/sub/-/ai", "cnb-token-sub");
-
-            using var nested = await this.PostAsync("/orgA/repoA/sub/v1/chat/completions", ProxyKey);
-            using var parent = await this.PostAsync("/orgA/repoA/v1/chat/completions", ProxyKey);
-
-            Assert.Equal(HttpStatusCode.OK, nested.StatusCode);
-            Assert.Equal(HttpStatusCode.OK, parent.StatusCode);
-
-            var recorded = this.upstream.Requests;
-            Assert.Contains(recorded, request => request.Path == "/orgA/repoA/sub/-/ai/chat/completions" && request.Authorization == "Bearer cnb-token-sub");
-            Assert.Contains(recorded, request => request.Path == "/orgA/repoA/-/ai/chat/completions" && request.Authorization == "Bearer cnb-token-A");
-        }
-
-        [Fact]
-        public async Task SimilarPrefix_IsNotTreatedAsTheWorkspace()
+        public async Task Models_AreAnsweredLocallyFromConfiguration()
         {
             await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
 
-            // "orgA/repository" must not match the connected workspace "orgA/repoA".
-            using var response = await this.GetAsync("/orgA/repository/v1/models", ProxyKey);
-
-            Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
-            Assert.Empty(this.upstream.Requests);
-        }
-
-        [Fact]
-        public async Task TwoWorkspaces_BarePath_IsAmbiguousAndRejected()
-        {
-            await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
-            await this.ConnectAsync("orgB/repoB", "/orgB/repoB/-/ai", "cnb-token-B");
-
-            using var response = await this.PostAsync("/v1/chat/completions", ProxyKey);
-
-            Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
-            Assert.Empty(this.upstream.Requests);
-        }
-
-        [Fact]
-        public async Task UnknownWorkspacePrefix_IsRejectedAsBadGateway()
-        {
-            await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
-
-            using var response = await this.PostAsync("/ghost/repo/v1/chat/completions", ProxyKey);
-
-            Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
-            Assert.Empty(this.upstream.Requests);
-        }
-
-        [Fact]
-        public async Task ClientIdHeader_OverridesThePathPrefix()
-        {
-            await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
-            await this.ConnectAsync("orgB/repoB", "/orgB/repoB/-/ai", "cnb-token-B");
-
-            using var response = await this.PostAsync("/v1/chat/completions", ProxyKey, "orgB/repoB");
-
-            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-            var recorded = Assert.Single(this.upstream.Requests);
-            Assert.Equal("/orgB/repoB/-/ai/chat/completions", recorded.Path);
-            Assert.Equal("Bearer cnb-token-B", recorded.Authorization);
-        }
-
-        [Fact]
-        public async Task Models_BarePath_IsAnsweredLocallyWithoutAWorkspace()
-        {
-            using var response = await this.GetAsync("/v1/models", ProxyKey);
-            using var trailingSlash = await this.GetAsync("/v1/models/", ProxyKey);
+            using var response = await this.GetAsync("/orgA/repoA/v1/models");
+            using var trailingSlash = await this.GetAsync("/orgA/repoA/v1/models/");
 
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             Assert.Equal(HttpStatusCode.OK, trailingSlash.StatusCode);
@@ -214,65 +152,79 @@ namespace CYarp.Cnb.Tests
             var body = await response.Content.ReadAsStringAsync();
             Assert.Contains("\"object\":\"list\"", body);
             Assert.Contains("\"id\":\"model-a\"", body);
-            Assert.Contains("\"object\":\"model\"", body);
+            Assert.Contains("\"id\":\"model-b\"", body);
             Assert.Contains("\"owned_by\":\"cnb\"", body);
             Assert.Empty(this.upstream.Requests);
         }
 
         [Fact]
-        public async Task Models_WorkspacePrefix_ReflectsTheTunnelState()
+        public async Task Models_ReportOfflineWhileTheTunnelIsDown()
         {
-            await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
-
-            using var online = await this.GetAsync("/orgA/repoA/v1/models", ProxyKey);
-            using var offline = await this.GetAsync("/ghost/repo/v1/models", ProxyKey);
-
-            Assert.Equal(HttpStatusCode.OK, online.StatusCode);
-            Assert.Contains("\"id\":\"model-a\"", await online.Content.ReadAsStringAsync());
-
-            // Server up, tunnel dead: the signal the keepalive cron acts on.
+            // Never connected: the workspace is unknown, which is the same signal as a dead tunnel.
+            using var offline = await this.GetAsync("/ghost/repo/v1/models");
             Assert.Equal(HttpStatusCode.ServiceUnavailable, offline.StatusCode);
-            Assert.Empty(this.upstream.Requests);
-        }
 
-        [Fact]
-        public async Task Models_ReportsOfflineAfterTheTunnelCloses()
-        {
             await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
-
-            using (var online = await this.GetAsync("/orgA/repoA/v1/models", ProxyKey))
+            using (var online = await this.GetAsync("/orgA/repoA/v1/models"))
             {
                 Assert.Equal(HttpStatusCode.OK, online.StatusCode);
             }
 
             await this.DisconnectAsync("orgA/repoA");
 
-            using var offline = await this.GetAsync("/orgA/repoA/v1/models", ProxyKey);
-            Assert.Equal(HttpStatusCode.ServiceUnavailable, offline.StatusCode);
+            using var afterDisconnect = await this.GetAsync("/orgA/repoA/v1/models");
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, afterDisconnect.StatusCode);
+            Assert.Empty(this.upstream.Requests);
         }
 
         [Fact]
-        public async Task LegacyTildeClientId_StillRoutes()
+        public async Task Chat_OfAnOfflineWorkspace_IsBadGateway()
         {
-            await this.ConnectAsync("orgA~repoA", "/orgA/repoA/-/ai", "cnb-token-A");
+            await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
 
-            using var response = await this.PostAsync("/orgA~repoA/v1/chat/completions", ProxyKey);
+            using var response = await this.PostChatAsync("/ghost/repo/v1/chat/completions");
 
-            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-            var recorded = Assert.Single(this.upstream.Requests);
-            Assert.Equal("/orgA/repoA/-/ai/chat/completions", recorded.Path);
+            Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
+            Assert.Empty(this.upstream.Requests);
         }
 
         [Fact]
-        public async Task PublicPathUnderCyarpPrefix_StillRequiresTheProxyKey()
+        public async Task BareOpenAiPaths_AreNotPublished()
         {
-            // A workspace id may start with "cyarp" (an org named cyarp): its public path looks
-            // like "/cyarp/repo/v1/...", which must not be exempted from the ProxyKey check.
-            using var withoutKey = await this.publicClient.GetAsync("/cyarp/repo/v1/models");
-            Assert.Equal(HttpStatusCode.Unauthorized, withoutKey.StatusCode);
+            await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
 
-            using var withKey = await this.GetAsync("/cyarp/repo/v1/models", ProxyKey);
-            Assert.Equal(HttpStatusCode.ServiceUnavailable, withKey.StatusCode);
+            using var bareModels = await this.GetAsync("/v1/models");
+            using var bareChat = await this.PostChatAsync("/v1/chat/completions");
+
+            Assert.Equal(HttpStatusCode.NotFound, bareModels.StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, bareChat.StatusCode);
+            Assert.Empty(this.upstream.Requests);
+        }
+
+        [Fact]
+        public async Task UnsupportedPrefixShapes_AreNotFound()
+        {
+            await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
+
+            using var singleSegment = await this.GetAsync("/org~repoA/v1/models");
+            using var threeSegments = await this.GetAsync("/a/b/c/v1/models");
+            using var otherEndpoint = await this.PostChatAsync("/orgA/repoA/v1/embeddings");
+
+            Assert.Equal(HttpStatusCode.NotFound, singleSegment.StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, threeSegments.StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, otherEndpoint.StatusCode);
+            Assert.Empty(this.upstream.Requests);
+        }
+
+        [Fact]
+        public async Task WrongMethod_IsMethodNotAllowed() 
+        {
+            await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
+
+            using var postToModels = await this.PostChatAsync("/orgA/repoA/v1/models");
+
+            Assert.Equal(HttpStatusCode.MethodNotAllowed, postToModels.StatusCode);
+            Assert.Empty(this.upstream.Requests);
         }
 
         [Fact]
@@ -280,8 +232,8 @@ namespace CYarp.Cnb.Tests
         {
             await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
 
-            using var wrong = await this.PostAsync("/v1/chat/completions", "pk-wrong");
-            using var missing = await this.PostAsync("/v1/chat/completions", proxyKey: null);
+            using var wrong = await this.PostChatAsync("/orgA/repoA/v1/chat/completions", "pk-wrong");
+            using var missing = await this.PostChatAsync("/orgA/repoA/v1/chat/completions", proxyKey: null);
 
             Assert.Equal(HttpStatusCode.Unauthorized, wrong.StatusCode);
             Assert.Equal(HttpStatusCode.Unauthorized, missing.StatusCode);
@@ -315,7 +267,7 @@ namespace CYarp.Cnb.Tests
             Assert.Contains("data: {\"chunk\":2}", await reader.ReadToEndAsync());
         }
 
-        private Task<HttpResponseMessage> PostAsync(string path, string? proxyKey, string? clientIdHeader = null)
+        private Task<HttpResponseMessage> PostChatAsync(string path, string? proxyKey = ProxyKey)
         {
             var request = new HttpRequestMessage(HttpMethod.Post, path)
             {
@@ -327,18 +279,13 @@ namespace CYarp.Cnb.Tests
                 request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {proxyKey}");
             }
 
-            if (clientIdHeader != null)
-            {
-                request.Headers.TryAddWithoutValidation(CYarpServerHost.ClientIdHeader, clientIdHeader);
-            }
-
-            return this.publicClient.SendAsync(request);
+            return this.publicClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
         }
 
-        private Task<HttpResponseMessage> GetAsync(string path, string proxyKey)
+        private Task<HttpResponseMessage> GetAsync(string path)
         {
             var request = new HttpRequestMessage(HttpMethod.Get, path);
-            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {proxyKey}");
+            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {ProxyKey}");
             return this.publicClient.SendAsync(request);
         }
 

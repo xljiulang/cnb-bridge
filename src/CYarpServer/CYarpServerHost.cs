@@ -107,9 +107,15 @@ namespace CYarpServer
 
             app.MapCYarp(context => context.User.FindFirstValue(CnbClaims.ClientId) ?? DefaultClientId);
 
-            // Explicit RequestDelegate mapping: a delegate with injected complex types
-            // would make the Request Delegate Generator treat them as JSON bodies.
-            app.Map("/{**catchall}", (RequestDelegate)HttpForwardHandler.HandleAsync);
+            // The public surface is a literal route table: the workspace id is the CNB repo
+            // slug, so "{org}/{repo}" are two real route parameters instead of a catch-all
+            // prefix to parse. Everything not listed here is answered 404 by the framework,
+            // which keeps the route table equal to the published API.
+            //
+            // Handlers are mapped as explicit RequestDelegate: a delegate with injected
+            // complex types would make the Request Delegate Generator treat them as JSON bodies.
+            app.MapMethods("/{org}/{repo}/v1/models", [HttpMethods.Get], (RequestDelegate)HttpForwardHandler.HandleModelsAsync);
+            app.MapMethods("/{org}/{repo}/v1/chat/completions", [HttpMethods.Post], (RequestDelegate)HttpForwardHandler.HandleChatAsync);
 
             return app;
         }

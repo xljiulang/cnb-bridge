@@ -9,19 +9,23 @@ using Yarp.ReverseProxy.Forwarder;
 namespace CYarpServer
 {
     /// <summary>
-    /// Rewrites the public OpenAI-compatible request into the CNB AI request:
+    /// Rewrites the public request into the CNB AI request:
     /// <list type="bullet">
-    /// <item>strips the leading "/v1" segment (the client's target Uri already carries
-    /// "/{org}/{repo}/-/ai", so "/v1/chat/completions" must become "/chat/completions"
-    /// relative to it)</item>
-    /// <item>replaces the caller's Authorization (the public ProxyKey) with the CNB token
-    /// that the CYarp client reported during its handshake</item>
+    /// <item>maps the public path to <c>/chat/completions</c> (the client's target Uri already
+    /// carries <c>/{org}/{repo}/-/ai</c>, and the only forwarded route is
+    /// <c>/{org}/{repo}/v1/chat/completions</c>)</item>
+    /// <item>replaces the caller's Authorization (the public ProxyKey) with the CNB token that
+    /// the CYarp client reported during its handshake</item>
+    /// <item>drops the caller's Host so the upstream edge sees the host it actually serves</item>
     /// </list>
-    /// The workspace path prefix (if any) has already been stripped from
-    /// <see cref="HttpContext.Request"/> by the caller.
     /// </summary>
     internal sealed class CnbAiTransformer(string? upstreamAuthorization) : HttpTransformer
     {
+        /// <summary>
+        /// Upstream path served by this transformer, relative to the client's target Uri.
+        /// </summary>
+        private const string UpstreamPath = "/chat/completions";
+
         public override async ValueTask TransformRequestAsync(
             HttpContext httpContext,
             HttpRequestMessage proxyRequest,
@@ -38,17 +42,7 @@ namespace CYarpServer
                 proxyRequest.Headers.TryAddWithoutValidation(HeaderNames.Authorization, upstreamAuthorization);
             }
 
-            var path = httpContext.Request.Path.Value ?? string.Empty;
-            if (path.StartsWith("/v1/", StringComparison.OrdinalIgnoreCase))
-            {
-                path = path[3..];
-            }
-            else if (path.Equals("/v1", StringComparison.OrdinalIgnoreCase))
-            {
-                path = "/";
-            }
-
-            proxyRequest.RequestUri = new Uri(destinationPrefix.TrimEnd('/') + path + httpContext.Request.QueryString.Value);
+            proxyRequest.RequestUri = new Uri(destinationPrefix.TrimEnd('/') + UpstreamPath + httpContext.Request.QueryString.Value);
 
             // Never forward the caller's Host (our public domain / IP): upstream edges route by
             // Host, and CNB's edge answers the wrong host with
