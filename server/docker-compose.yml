@@ -1,0 +1,34 @@
+# CYarpServer + Caddy (automatic HTTPS) on your public VPS.
+#   docker compose up -d
+# Point ai.example.com's DNS A record at this VPS before starting.
+services:
+  cyarpserver:
+    build:
+      # Parent of the CYarp source tree (with cyarp-cnb-token.patch applied).
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "8080"
+    volumes:
+      # Overrides the image's appsettings.json: sets ProxyKey + HTTP-only Kestrel.
+      - ./appsettings.json:/app/appsettings.json:ro
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - cyarpserver
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

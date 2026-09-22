@@ -1,0 +1,40 @@
+# 操作系统
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# JetBrains / IntelliJ（IDEA、PyCharm、WebStorm、GoLand 等）
+.idea/
+*.iml
+
+# Eclipse
+.classpath
+.project
+.settings/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.opendb
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Xcode
+xcuserdata/
+DerivedData/
+*.xcuserstate
+
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+target/
+bin/
+obj/
+*.log
