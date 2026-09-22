@@ -13,7 +13,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\CYarp.Client\CYarp.Client.csproj" />
+    <PackageReference Include="CYarp.Client" Version="2.0.3" />
     <ProjectReference Include="..\..\src\CYarpServer\CYarpServer.csproj" />
   </ItemGroup>
 

@@ -9,6 +9,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Security.Claims;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -75,6 +76,19 @@ namespace CYarp.Cnb.Tests
             await this.server.DisposeAsync();
             await this.upstream.DisposeAsync();
             this.stopping.Dispose();
+        }
+
+        [Fact]
+        public async Task TunnelHandshakeClaims_AreExposedOnIClientUser()
+        {
+            await this.ConnectAsync("orgA~repoA", "/orgA/repoA/-/ai", "cnb-token-A");
+
+            var viewer = this.server.Services.GetRequiredService<IClientViewer>();
+            Assert.True(viewer.TryGetValue("orgA~repoA", out var client));
+
+            Assert.Equal("orgA~repoA", client.User.FindFirstValue(CnbClaims.ClientId));
+            Assert.Equal("Bearer cnb-token-A", client.User.FindFirstValue(CnbClaims.UpstreamAuthorization));
+            Assert.Equal(this.upstream.BaseAddress + "/orgA/repoA/-/ai", client.User.FindFirstValue(CnbClaims.TargetUri));
         }
 
         [Fact]

@@ -1,12 +1,15 @@
 using CYarp.Server;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System;
 using System.Collections.Generic;
+using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
@@ -67,10 +70,23 @@ namespace CYarpServer
             // "Urls" entry in appsettings.json would otherwise shadow ASPNETCORE_URLS.
             builder.WebHost.UseUrls(ResolveUrls(builder.Configuration));
 
-            // CYarp server components. Redis backed client state storage is intentionally
-            // not registered: this deployment is a single node and StackExchange.Redis is
-            // not Native AOT friendly.
-            builder.Services.AddCYarp().Configure(builder.Configuration.GetSection(nameof(CYarpOptions)));
+            // CYarp server components.
+            //
+            // The options are bound here, in this assembly, on purpose: the configuration
+            // binding source generator only intercepts calls it compiles, so
+            // "AddCYarp().Configure(section)" (the package's own IConfiguration overload) ends
+            // up as the reflection binder, which is silently a no-op in the trimmed publish
+            // (measured: Node=..., Protocols=All, KeepAliveInterval=00:00:50, MaxTunnels=10
+            // instead of the configured values). Calling Configure<CYarpOptions> from our own
+            // project makes the generator emit the binding code and every value binds.
+            builder.Services.AddCYarp();
+            builder.Services.Configure<CYarpOptions>(builder.Configuration.GetSection(nameof(CYarpOptions)));
+
+            // The CYarp handshake carries the workspace identity and the CNB token as headers;
+            // this scheme turns them into the ClaimsPrincipal that CYarp keeps on IClient.User.
+            builder.Services
+                .AddAuthentication(CYarpTunnelAuthenticationHandler.SchemeName)
+                .AddScheme<AuthenticationSchemeOptions, CYarpTunnelAuthenticationHandler>(CYarpTunnelAuthenticationHandler.SchemeName, null);
 
             // Strongly typed public surface options, bound with the source generated binder.
             builder.Services.Configure<CnbProxyOptions>(builder.Configuration);
@@ -78,6 +94,9 @@ namespace CYarpServer
             var app = builder.Build();
 
             app.UseCYarp();
+            app.UseAuthentication();
+
+            LogCYarpOptions(app.Services);
 
             // Optional inbound gate for the public OpenAI-compatible API.
             var proxyKey = app.Services.GetRequiredService<IOptions<CnbProxyOptions>>().Value.ProxyKey;
@@ -86,14 +105,31 @@ namespace CYarpServer
                 app.Use(CreateProxyKeyGate(proxyKey));
             }
 
-            app.MapCYarp(GetClientId);
+            app.MapCYarp(context => context.User.FindFirstValue(CnbClaims.ClientId) ?? DefaultClientId);
 
             // Explicit RequestDelegate mapping: a delegate with injected complex types
-            // makes the Request Delegate Generator treat them as JSON bodies, which
-            // fails at runtime under Native AOT.
+            // would make the Request Delegate Generator treat them as JSON bodies.
             app.Map("/{**catchall}", (RequestDelegate)HttpForwardHandler.HandleAsync);
 
             return app;
+        }
+
+        /// <summary>
+        /// Logs the CYarp options that actually took effect. If a future CYarp release or
+        /// trimmer change makes the generated binding fall back to the library defaults, this
+        /// line shows it immediately instead of failing silently.
+        /// </summary>
+        private static void LogCYarpOptions(IServiceProvider services)
+        {
+            var options = services.GetRequiredService<IOptions<CYarpOptions>>().Value;
+            var logger = services.GetRequiredService<ILoggerFactory>().CreateLogger("CYarpServer");
+
+            logger.LogInformation(
+                "CYarp options in effect: KeepAlive={keepAlive}, KeepAliveInterval={keepAliveInterval}, MaxTunnelsPerClient={maxTunnelsPerClient}, CreationTimeout={creationTimeout}",
+                options.Client.KeepAlive,
+                options.Client.KeepAliveInterval,
+                options.HttpTunnel.MaxTunnelsPerClient,
+                options.HttpTunnel.CreationTimeout);
         }
 
         private static string ResolveUrls(IConfiguration configuration)
@@ -109,16 +145,6 @@ namespace CYarpServer
             }
 
             return string.IsNullOrWhiteSpace(configured) ? DefaultUrls : configured;
-        }
-
-        /// <summary>
-        /// Resolves the client id from the handshake header, falling back to the shared
-        /// default used by a single-workspace deployment.
-        /// </summary>
-        public static string GetClientId(HttpContext context)
-        {
-            var clientId = context.Request.Headers[ClientIdHeader].ToString();
-            return string.IsNullOrEmpty(clientId) ? DefaultClientId : clientId;
         }
 
         private static Func<HttpContext, RequestDelegate, Task> CreateProxyKeyGate(string proxyKey)

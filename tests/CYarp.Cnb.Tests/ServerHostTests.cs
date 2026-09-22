@@ -1,4 +1,8 @@
+using CYarp.Server;
 using CYarpServer;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Xunit;
@@ -10,6 +14,33 @@ namespace CYarp.Cnb.Tests
     /// </summary>
     public sealed class ServerHostTests
     {
+        [Fact]
+        public async Task CYarpOptions_AreBoundFromConfiguration()
+        {
+            // Guards the binding call in CYarpServerHost: the package's own IConfiguration
+            // overload is a silent no-op once trimmed, so the binding has to happen in our
+            // own assembly, where the source generator can intercept it.
+            await using var server = CYarpServerHost.Create(
+                [],
+                settings: new Dictionary<string, string?>
+                {
+                    ["Urls"] = "http://127.0.0.1:0",
+                    ["CYarpOptions:HttpTunnel:MaxTunnelsPerClient"] = "42",
+                    ["CYarpOptions:HttpTunnel:CreationTimeout"] = "00:00:03",
+                    ["CYarpOptions:Client:KeepAliveInterval"] = "00:00:07",
+                    ["Logging:LogLevel:Default"] = "Warning",
+                });
+
+            await server.StartAsync();
+
+            var options = server.Services.GetRequiredService<IOptions<CYarpOptions>>().Value;
+            Assert.Equal(42, options.HttpTunnel.MaxTunnelsPerClient);
+            Assert.Equal(TimeSpan.FromSeconds(3d), options.HttpTunnel.CreationTimeout);
+            Assert.Equal(TimeSpan.FromSeconds(7d), options.Client.KeepAliveInterval);
+
+            await server.StopAsync();
+        }
+
         [Fact]
         public async Task ListenAddress_IsTakenFromConfiguration()
         {

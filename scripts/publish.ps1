@@ -1,21 +1,23 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Publishes the CYarpServer and CYarpClient linux-x64 Native AOT binaries.
+    Publishes the CYarpServer and CYarpClient linux-x64 binaries.
 
 .DESCRIPTION
-    Cross compiles from Windows with PublishAotClang (bundled zig/clang toolchain), so
-    neither Docker nor a .NET runtime on the target machine is required.
+    CYarpClient : Native AOT (cross compiled from Windows with PublishAotClang, which
+                  bundles the zig/clang toolchain). ~8 MB, runs on glibc 2.17+.
+    CYarpServer : self contained single file + trimmed. ~16 MB, no .NET runtime needed
+                  on the VPS. Native AOT is not used: the CYarp.Server package maps its
+                  endpoints with Map(pattern, Delegate), which needs the runtime request
+                  delegate factory (expression trees) and therefore cannot run under AOT.
 
-    The glibc target is pinned to 2.17 in the project files, so the produced binaries run
-    on CentOS 7 / Ubuntu 18.04 and everything newer (the zig default needs glibc 2.29).
-
-    The first run downloads the ILCompiler runtime pack and the zig toolchain into the
+    Neither output needs Docker, a .NET runtime on the target, or a separate web server.
+    The first AOT run downloads the ILCompiler runtime pack and the zig toolchain into the
     NuGet cache; later runs are offline reproducible.
 
 .EXAMPLE
-    pwsh ./scripts/publish-aot.ps1
-    pwsh ./scripts/publish-aot.ps1 -RuntimeIdentifier linux-arm64
+    pwsh ./scripts/publish.ps1
+    pwsh ./scripts/publish.ps1 -RuntimeIdentifier linux-arm64
 #>
 [CmdletBinding()]
 param(
@@ -33,12 +35,12 @@ if (-not $ClientOutput) { $ClientOutput = Join-Path $root 'deploy\cyarp' }
 
 Write-Host "==> publishing CYarpClient ($RuntimeIdentifier, Native AOT)" -ForegroundColor Cyan
 dotnet publish (Join-Path $root 'src\CYarpClient\CYarpClient.csproj') `
-    -c $Configuration -r $RuntimeIdentifier -o $ClientOutput --nologo
+    -c $Configuration -r $RuntimeIdentifier --self-contained -o $ClientOutput --nologo
 if ($LASTEXITCODE -ne 0) { throw 'CYarpClient publish failed' }
 
-Write-Host "==> publishing CYarpServer ($RuntimeIdentifier, Native AOT)" -ForegroundColor Cyan
+Write-Host "==> publishing CYarpServer ($RuntimeIdentifier, self contained + trimmed)" -ForegroundColor Cyan
 dotnet publish (Join-Path $root 'src\CYarpServer\CYarpServer.csproj') `
-    -c $Configuration -r $RuntimeIdentifier -o $ServerOutput --nologo
+    -c $Configuration -r $RuntimeIdentifier --self-contained -o $ServerOutput --nologo
 if ($LASTEXITCODE -ne 0) { throw 'CYarpServer publish failed' }
 
 # Debug symbols are large and stay out of both the repository and the deployment.

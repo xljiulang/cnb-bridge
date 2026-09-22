@@ -8,7 +8,11 @@
     <EnableConfigurationBindingGenerator>true</EnableConfigurationBindingGenerator>
   </PropertyGroup>
 
-  <!-- Native AOT whenever a runtime identifier is given: dotnet publish -c Release -r linux-x64 -->
+  <!--
+    Native AOT whenever a runtime identifier is given: dotnet publish -c Release -r linux-x64
+    GLibcVersion pins the zig/clang target to glibc 2.17 so the binary also runs on older
+    distributions (the zig default requires glibc 2.29).
+  -->
   <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
     <PublishAot>true</PublishAot>
     <InvariantGlobalization>true</InvariantGlobalization>
@@ -17,9 +21,9 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="CYarp.Client" Version="2.0.3" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
     <PackageReference Include="PublishAotClang" Version="1.0.5" />
-    <ProjectReference Include="..\CYarp.Client\CYarp.Client.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -60,9 +60,10 @@ echo "===== target     : https://api.cnb.cool/${REPO}/-/ai ====="
 echo "===== clientId   : $CLIENT_ID ====="
 echo "===== public base: <your-domain>/${CLIENT_ID}/v1/   (http:// now, https:// once TLS is enabled) ====="
 
-# Self-check: the client logs "Connected to server" once the tunnel is up.
+# Self-check: the client logs a "connected" line once the tunnel is up. CYarp 2.0.3 logs
+# in Chinese ("连接到服务器...成功"), newer builds log "Connected to server"; accept both.
 for i in $(seq 1 30); do
-  if grep -q "Connected to server" cyarp.log 2>/dev/null; then
+  if grep -qE "连接到服务器|Connected to server" cyarp.log 2>/dev/null; then
     echo "===== cyarp client: tunnel established ====="
     exit 0
   fi

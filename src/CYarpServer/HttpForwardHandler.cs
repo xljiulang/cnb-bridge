@@ -6,6 +6,7 @@ using Microsoft.Extensions.Options;
 using System;
 using System.Diagnostics;
 using System.Linq;
+using System.Security.Claims;
 using System.Threading.Tasks;
 
 namespace CYarpServer
@@ -65,8 +66,11 @@ namespace CYarpServer
             // deal with the OpenAI "/v1" prefix.
             context.Request.Path = target.Path;
 
+            // The CNB token travels in the handshake principal that CYarp keeps on IClient.User.
+            var upstreamAuthorization = target.Client.User.FindFirstValue(CnbClaims.UpstreamAuthorization);
+
             var stopwatch = Stopwatch.StartNew();
-            var error = await target.Client.ForwardHttpAsync(context, new CnbAiTransformer(target.Client.UpstreamAuthorization));
+            var error = await target.Client.ForwardHttpAsync(context, new CnbAiTransformer(upstreamAuthorization));
             stopwatch.Stop();
 
             if (error == Yarp.ReverseProxy.Forwarder.ForwarderError.None)
