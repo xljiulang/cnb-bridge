@@ -153,7 +153,7 @@ namespace CYarpServer
             {
                 // The CYarp handshake carries the CNB token in its Authorization header,
                 // never the public ProxyKey.
-                if (context.Request.Path.StartsWithSegments("/cyarp"))
+                if (IsCYarpEndpoint(context.Request.Path))
                 {
                     await next(context);
                     return;
@@ -170,6 +170,22 @@ namespace CYarpServer
 
                 await next(context);
             };
+        }
+
+        /// <summary>
+        /// Gets whether the path addresses a CYarp endpoint: "/cyarp" or "/cyarp/" (the client
+        /// handshake) and "/cyarp/{tunnelId}" (the tunnel). tunnelId is a GUID, so a path with
+        /// another segment below "/cyarp/" is a public API path whose workspace id happens to
+        /// start with "cyarp" (e.g. "/cyarp/repo/v1/models") and must still present the ProxyKey.
+        /// </summary>
+        private static bool IsCYarpEndpoint(PathString path)
+        {
+            if (path.StartsWithSegments("/cyarp", out var remainder) == false)
+            {
+                return false;
+            }
+
+            return remainder.HasValue == false || remainder.Value!.AsSpan(1).IndexOf('/') < 0;
         }
 
         private static bool FixedTimeEquals(string left, string right)

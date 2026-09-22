@@ -21,7 +21,7 @@
 被解析成 claims 放进 `HttpContext.User`；CYarp 库会把该 principal 存到 `IClient.User`，服务端转发时
 从那里取出 token 注入——因此 `IClient` 接口不需要任何扩展。
 
-一个 VPS 可以同时接**多个工作空间**：每个工作空间有自己的 `clientId`（默认 `<org>~<repo>`），
+一个 VPS 可以同时接**多个工作空间**：每个工作空间有自己的 `clientId`（默认就是仓库 slug `<org>/<repo>`），
 公网用路径前缀区分。
 
 ---
@@ -37,9 +37,11 @@ src/
   CYarpClient/             客户端进程：环境变量注入 + 自动重连 + 内置文件日志（Native AOT）
 tests/CYarp.Cnb.Tests/     端到端集成测试（进程内起 server/client/假上游）
 deploy/
-  cyarp-start.sh           CNB 工作空间启动脚本
-  cnb.yml.example          .cnb.yml 示例（含保活 cron）
+  README.md                部署指南（VPS 服务端 + CNB 工作空间逐步操作）
+  .cnb.yml                 CNB 流水线配置（含保活 cron）——本目录即 CNB 仓库根内容
+  cyarp-start.sh           CNB 工作空间启动脚本（按自身目录找 cyarp/CYarpClient）
   cyarp/CYarpClient        已编译好的 linux-x64 Native AOT 客户端（入库）
+  cyarp/appsettings.json   客户端非敏感默认配置
 scripts/
   publish.ps1              一键发布客户端(AOT) + 服务端(自包含 trimmed)
   verify-endpoint.sh       验证「必须从工作空间内部发出请求」的前提
@@ -121,16 +123,20 @@ sudo ./CYarpServer stop            # 停止并删除服务
 
 1. 在 `appsettings.json` 增加 Kestrel 的 HTTPS 端点与证书（或再加一层你熟悉的 TLS 终结）；
 2. 客户端 `CYARP_SERVER_URI` 从 `ws://` 改成 `wss://`；
-3. `deploy/cnb.yml.example` 的 `FIXED_URL` 从 `http://` 改成 `https://`。
+3. `deploy/.cnb.yml` 的 `FIXED_URL` 从 `http://` 改成 `https://`。
 
 ---
 
 ## 四、CNB 工作空间侧接入
 
-**第 1 步**：把 `deploy/` 目录放进你的仓库（`cyarp-start.sh` + `cyarp/CYarpClient` 必带）。
+**第 1 步**：把 `deploy/` 的**内容**放到 CNB 仓库根目录（`.cnb.yml`、`cyarp-start.sh`、`cyarp/CYarpClient`
+三样必带），例如 `rsync -a --delete deploy/ /path/to/cnb-some-repo/` 后提交推送。
 
-**第 2 步**：把 `deploy/cyarp-start.sh` 里的域名换成你的，然后复制 `deploy/cnb.yml.example` 为仓库
-根目录的 `.cnb.yml`（注意 cron 必须放在 `main:` 键下，否则永不触发）。
+> 要放进**你想暴露其 AI 端点**的那个仓库：隧道出口是 `https://api.cnb.cool/$CNB_REPO_SLUG/-/ai`，
+> 而 `CNB_REPO_SLUG` 与 `CNB_TOKEN` 的作用域都是「工作空间所在仓库」。
+
+**第 2 步**：改 `.cnb.yml` 里标了「改这里」的三处：`CYARP_SERVER_URI`（workspace）、`PROXY_KEY` 与
+`FIXED_URL`（keepalive cron）。保活 cron 必须在 `main:` 键下（对应默认分支），否则永不触发。
 
 **第 3 步**：仓库页面点「云开发」启动工作空间，构建日志出现下面两行即隧道已通：
 
@@ -153,7 +159,7 @@ sudo ./CYarpServer stop            # 停止并删除服务
 | `CYarpClientOptions__ServerUri` | `ws://ai.example.com` | 你的 CYarpServer 地址（加 TLS 后改 `wss://`） |
 | `CYarpClientOptions__TargetUri` | `https://api.cnb.cool/$CNB_REPO_SLUG/-/ai` | 隧道出口指向 CNB 内网 AI |
 | `CYarpClientOptions__ConnectHeaders__Authorization` | `Bearer $CNB_TOKEN` | 握手时把 CNB token 交给 Server |
-| `CYarpClientOptions__ConnectHeaders__X-CYarp-Client` | `<org>~<repo>` | 工作空间 id，同时是公网路径前缀 |
+| `CYarpClientOptions__ConnectHeaders__X-CYarp-Client` | `<org>/<repo>` | 工作空间 id（仓库 slug 原样），同时是公网路径前缀 |
 | `CYarpClientOptions__KeepAliveInterval` | `00:00:30` | 心跳，同时也是工作空间保活信号 |
 
 > 两个坑已在脚本里处理：① `X-CYarp-Client` 这种**带连字符的变量名不能用 `export`**（bash 报
@@ -173,8 +179,8 @@ curl http://ai.example.com/v1/chat/completions \
   -H "Authorization: Bearer $PROXY_KEY" -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}'
 
-# 多工作空间：用 <org>~<repo> 前缀指定（OpenAI 客户端把 base_url 设成带前缀的地址即可）
-curl http://ai.example.com/org~repo/v1/chat/completions \
+# 多工作空间：用 <org>/<repo> 前缀指定（OpenAI 客户端把 base_url 设成带前缀的地址即可）
+curl http://ai.example.com/org/repo/v1/chat/completions \
   -H "Authorization: Bearer $PROXY_KEY" -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}'
 ```
@@ -183,21 +189,22 @@ curl http://ai.example.com/org~repo/v1/chat/completions \
 
 | 请求 | 行为 |
 |---|---|
-| `/{clientId}/v1/...` | 转发到该工作空间；`/v1` 前缀剥掉，拼到该客户端的 `TargetUri` 上 |
+| `/{clientId}/v1/...` | 转发到该工作空间；`/v1` 前缀剥掉，拼到该客户端的 `TargetUri` 上。`clientId` 就是仓库 slug，所以常见形态是 `/{org}/{repo}/v1/...` |
+| 多段前缀的匹配方式 | 与**已连接**的工作空间做最长匹配：同时在线 `org/repo` 与 `org/repo/sub` 时，`/org/repo/sub/v1/...` 命中后者，`/org/repo/v1/...` 命中前者；大小写敏感 |
 | `/v1/...`（无前缀） | **只有一个**工作空间在线时转发到它；多个在线时返回 `502`（避免打错人） |
 | 请求头 `X-CYarp-Client: <clientId>` | 覆盖路径前缀，适合只能改 header 的客户端 |
 | `/{clientId}/v1/models` | 该工作空间在线 `200`，**离线 `503`**（隧道假死信号，不耗额度） |
 | `/v1/models`（无前缀） | 恒 `200`（纯服务存活探测，与隧道状态无关） |
-| 前缀指向未连接的工作空间 | `502` |
+| 前缀指向未连接的工作空间 | API 调用 `502`；该前缀下的 `/v1/models` 返回 `503`（隧道假死信号） |
 | `PROXY_KEY` 缺失/错误 | `401`，请求不会到达任何工作空间 |
-| `/cyarp/*`（隧道握手） | 不受 `PROXY_KEY` 约束，握手头里带的是 CNB token |
+| `/cyarp`、`/cyarp/{tunnelId}`（隧道握手） | 不受 `PROXY_KEY` 约束，握手头里带的是 CNB token；形如 `/cyarp/<repo>/v1/...` 的公网路径仍要求 key |
 
 服务端收到请求后：**丢弃调用方的 `Authorization`（公网 key）**，换成该工作空间握手时报上来的
 `Authorization: Bearer <CNB_TOKEN>` 再发往上游，因此上游鉴权成立，公网 key 不会泄漏。
 实际效果（集成测试断言的行为）：
 
 ```
-POST /orgA~repoA/v1/chat/completions
+POST /orgA/repoA/v1/chat/completions
   → 上游收到 POST /orgA/repoA/-/ai/chat/completions
     Authorization: Bearer <CNB_TOKEN>
 ```

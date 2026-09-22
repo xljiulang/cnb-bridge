@@ -17,7 +17,8 @@ namespace CYarpServer
     /// <para>
     /// Public request shapes:
     /// <list type="bullet">
-    /// <item><c>/{clientId}/v1/chat/completions</c> - addresses one workspace explicitly</item>
+    /// <item><c>/{clientId}/v1/chat/completions</c> - addresses one workspace explicitly;
+    /// the id is the CNB repo slug, so the common shape is <c>/{org}/{repo}/v1/...</c></item>
     /// <item><c>/v1/chat/completions</c> - works while exactly one workspace is connected</item>
     /// <item>header <c>X-CYarp-Client: {clientId}</c> - overrides the path prefix</item>
     /// </list>
@@ -109,6 +110,8 @@ namespace CYarpServer
 
         /// <summary>
         /// Resolves which client serves the request and which path has to be sent to it.
+        /// The workspace prefix may contain slashes (the CNB repo slug is "org/repo"), so the
+        /// prefix is matched against the connected workspaces, longest id first.
         /// </summary>
         private static RouteTarget Resolve(HttpContext context, IClientViewer viewer)
         {
@@ -124,32 +127,106 @@ namespace CYarpServer
                     path: rawPath);
             }
 
-            // 2. Path prefix: /{clientId}/v1/...
-            var (first, rest) = SplitFirstSegment(rawPath);
-            if (first.Length > 0 && string.Equals(first, "v1", StringComparison.OrdinalIgnoreCase) == false)
+            // 2. Path prefix: /{clientId}/v1/... (clientId may be "org/repo" or "org/repo/sub").
+            var matchedId = FindLongestConnectedPrefix(rawPath, viewer);
+            if (matchedId != null)
             {
+                var remaining = rawPath.Length == matchedId.Length + 1 ? "/" : rawPath[(matchedId.Length + 1)..];
                 return new RouteTarget(
-                    client: viewer.TryGetValue(first, out var byPath) ? byPath : null,
-                    prefix: first,
-                    path: rest);
+                    client: viewer.TryGetValue(matchedId, out var byPath) ? byPath : null,
+                    prefix: matchedId,
+                    path: remaining);
             }
 
             // 3. Bare OpenAI path: served while exactly one workspace is connected.
-            return new RouteTarget(
-                client: viewer.Count == 1 ? viewer.First() : null,
-                prefix: null,
-                path: rawPath);
+            if (IsOpenAiPath(rawPath))
+            {
+                return new RouteTarget(
+                    client: viewer.Count == 1 ? viewer.First() : null,
+                    prefix: null,
+                    path: rawPath);
+            }
+
+            // 4. No connected workspace matches: treat everything before the OpenAI "/v1"
+            //    marker as an (offline) workspace prefix, so that /{org}/{repo}/v1/models
+            //    still reports 503 (server up, tunnel down) instead of a generic 502.
+            var (prefix, path) = SplitOfflinePrefix(rawPath);
+            return new RouteTarget(client: null, prefix: prefix, path: path);
         }
 
         /// <summary>
-        /// Splits "/org~repo/v1/models" into "org~repo" and "/v1/models".
+        /// Finds the longest connected client id that is a path prefix of the request, so
+        /// that "/org/repo/v1/models" resolves to the workspace "org/repo" (and
+        /// "/org/repo/sub/v1/models" to "org/repo/sub" when both are connected).
+        /// Comparison is ordinal (case sensitive), matching CYarp's own client id lookup.
         /// </summary>
-        private static (string First, string Remaining) SplitFirstSegment(string path)
+        private static string? FindLongestConnectedPrefix(string path, IClientViewer viewer)
         {
-            var next = path.IndexOf('/', 1);
-            return next < 0
-                ? (path.TrimStart('/'), "/")
-                : (path[1..next], path[next..]);
+            if (path.Length < 2 || path[0] != '/')
+            {
+                return null;
+            }
+
+            string? matched = null;
+            var matchedLength = 0;
+
+            foreach (var candidate in viewer)
+            {
+                var id = candidate.Id;
+                if (id.Length == 0 || id.Length <= matchedLength)
+                {
+                    continue;
+                }
+
+                // id occupies path[1 .. id.Length]; the path must be exactly "/{id}" or continue
+                // with another segment, i.e. "/{id}/...".
+                if (path.Length <= id.Length || string.CompareOrdinal(path, 1, id, 0, id.Length) != 0)
+                {
+                    continue;
+                }
+
+                if (path.Length > id.Length + 1 && path[id.Length + 1] != '/')
+                {
+                    continue;
+                }
+
+                matched = id;
+                matchedLength = id.Length;
+            }
+
+            return matched;
+        }
+
+        private static bool IsOpenAiPath(string path)
+        {
+            return path.Equals("/v1", StringComparison.OrdinalIgnoreCase)
+                || path.StartsWith("/v1/", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Splits an unmatched path like "/org/repo/v1/models" into the (offline) workspace
+        /// prefix "org/repo" and the API path "/v1/models". A path without the "/v1" marker
+        /// keeps its whole leading part as the prefix.
+        /// </summary>
+        private static (string Prefix, string Path) SplitOfflinePrefix(string path)
+        {
+            var marker = path.LastIndexOf("/v1/", StringComparison.OrdinalIgnoreCase);
+            if (marker > 0)
+            {
+                return (path[1..marker], path[marker..]);
+            }
+
+            var trimmed = path.TrimEnd('/');
+            if (trimmed.EndsWith("/v1", StringComparison.OrdinalIgnoreCase))
+            {
+                var end = trimmed.Length - 3;
+                if (end > 0)
+                {
+                    return (path[1..end], "/v1");
+                }
+            }
+
+            return (path.TrimStart('/'), path);
         }
 
         private const string LogCategory = "CYarpServer.HttpForward";

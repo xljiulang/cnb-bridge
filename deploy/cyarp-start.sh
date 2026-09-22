@@ -3,22 +3,30 @@
 # your public CYarpServer, forwarding the workspace-internal CNB AI endpoint.
 # Invoked by the `$: vscode` stage in .cnb.yml.
 #
+# Layout contract: this script and the client binary live in the same directory, i.e.
+#   <payload>/cyarp-start.sh
+#   <payload>/cyarp/CYarpClient
+# where <payload> is the CNB repository root (the contents of this deploy/ directory).
+#
 # Injected by the CNB pipeline (do not set these yourself):
 #   CNB_TOKEN      temporary CNB credential, auto-issued per pipeline run
 #   CNB_REPO_SLUG  built-in org/repo
 # You must provide (via .cnb.yml env: or a secrets repo import):
 #   CYARP_SERVER_URI  e.g. ws://ai.example.com
 # Optional:
-#   CYARP_CLIENT_ID   default: CNB_REPO_SLUG with "/" replaced by "~".
-#                     This id is the public path prefix: https://<domain>/<client_id>/v1/...
+#   CYARP_CLIENT_ID   default: CNB_REPO_SLUG as-is (e.g. "org/repo").
+#                     This id is the public path prefix:
+#                       https://<domain>/<org>/<repo>/v1/...
 set -euo pipefail
 
 SERVER_URI="${CYARP_SERVER_URI:?CYARP_SERVER_URI is required, e.g. ws://ai.example.com}"
 REPO="${CNB_REPO_SLUG:?CNB_REPO_SLUG is missing}"
-CLIENT_ID="${CYARP_CLIENT_ID:-${REPO//\//~}}"
+# The client id is the repo slug verbatim, so it may contain "/" (org/repo). The server
+# matches it as a multi segment path prefix.
+CLIENT_ID="${CYARP_CLIENT_ID:-$REPO}"
 RUN_DIR="${CYARP_RUN_DIR:-/workspace/cyarp}"
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="${CYARP_BIN:-$SRC_DIR/deploy/cyarp/CYarpClient}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN="${CYARP_BIN:-$SCRIPT_DIR/cyarp/CYarpClient}"
 
 if [ -z "${CNB_TOKEN:-}" ]; then
   echo "===== CNB_TOKEN is missing, refusing to start ====="

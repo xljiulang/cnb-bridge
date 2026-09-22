@@ -1,0 +1,116 @@
+# 这个文件是 CNB 仓库的流水线配置，必须位于仓库根目录。
+#
+# 本文件来自工具仓库的 deploy/ 目录（在那里它叫 deploy/.cnb.yml），同步到 CNB 仓库后位于仓库根。
+# 也就是说：deploy/ 的内容就是「CNB 仓库根内容」的镜像，放到仓库根后应得到这样的结构：
+#
+#   <CNB 仓库>/
+#     .cnb.yml            <- 本文件
+#     cyarp-start.sh      <- 启动脚本（按自身目录找 cyarp/CYarpClient）
+#     cyarp/CYarpClient   <- Native AOT 客户端
+#     cyarp/appsettings.json
+#     README.md
+#
+# 数据流：
+#   公网客户端 -> http://<你的域名>/<clientId>/v1/...   （CYarpServer，要带 PROXY_KEY）
+#              -> 隧道
+#              -> CYarpClient（本工作空间）
+#              -> https://api.cnb.cool/$CNB_REPO_SLUG/-/ai/...
+#
+# 不涉及 <subdomain>-9001.cnb.run：隧道是工作空间主动向外拨号，工作空间子域名怎么变都无所谓。
+#
+# <clientId> 默认就是 CNB_REPO_SLUG 原样（例如 org/repo），所以一个服务端可以同时接多个
+# 工作空间，公网用路径前缀区分：http://<你的域名>/<org>/<repo>/v1/...
+#
+# 需要你改的只有 3 处，都已标出「改这里」：
+#   1) workspace 的 CYARP_SERVER_URI  —— 你的 CYarpServer 地址
+#   2) cron 的 PROXY_KEY              —— 公网调用的 key（和服务端 appsettings.json 的 ProxyKey 一致）
+#   3) cron 的 FIXED_URL              —— 你的 CYarpServer 公网基址（留空则只做状态检查）
+#
+# 可选：
+#   CYARP_CLIENT_ID   工作空间 id，默认 "<org>~<repo>"，会作为公网路径前缀
+#
+# CNB_TOKEN / CNB_REPO_SLUG 由平台每次运行自动注入，永远不要硬编码。
+
+# ---------------------------------------------------------------------------
+# 平台回收规则（docs.cnb.cool/zh/workspaces/workspace-recycling）：
+#   - 关闭 VS Code 页面后 10 分钟无操作即回收（keepAliveTimeout 默认 600000ms）；
+#   - 单会话上限约 18h；使用超过 8h 时凌晨 4:00-06:00 强制回收；
+#   -> 下面的 keepAliveTimeout: 18h 加上这个 cron 覆盖以上全部情况。
+# 每次 cron 触发都会拿到新铸的 CNB_TOKEN（作用域为本仓库）。
+# ---------------------------------------------------------------------------
+main:
+  "crontab: */5 * * * *":
+    - name: keepalive
+      docker:
+        image: cnbcool/default-dev-env:latest
+      env:
+        REPO: $CNB_REPO_SLUG
+        PROXY_KEY: "CHANGE-ME-your-public-api-key"     # 改这里(2/3)：与服务端 ProxyKey 一致
+        FIXED_URL: "http://ai.example.com"             # 改这里(3/3)：你的 CYarpServer 基址；留空=只做状态检查
+        #CYARP_CLIENT_ID: "org/repo"                   # 改过 workspace 的 CYARP_CLIENT_ID 时这里要一致
+      stages:
+        - name: ensure-workspace
+          script: |
+            set -uo pipefail
+            API="https://api.cnb.cool"
+            # clientId 就是仓库 slug 原样（可含 "/"），与 workspace 脚本里的算法保持一致。
+            CLIENT_ID="${CYARP_CLIENT_ID:-$REPO}"
+
+            # ---- L1: 工作空间状态检查 --------------------------------------
+            CODE=$(curl -s --max-time 20 -o /tmp/l.json -w '%{http_code}' "$API/workspace/list?slug=$REPO" -H "Authorization: Bearer $CNB_TOKEN")
+            echo "list http=$CODE"
+            if [ "$CODE" != "200" ]; then echo "DEGRADED: list http $CODE"; exit 0; fi
+            RUNNING=$(jq -r '[(.list // .data // [])[]? | select(.status=="running")][0].sn // empty' /tmp/l.json 2>/dev/null || true)
+            if [ -z "$RUNNING" ]; then
+              echo "no running workspace -> start"
+              curl -s --max-time 60 -X POST "$API/$REPO/-/workspace/start" \
+                -H "Authorization: Bearer $CNB_TOKEN" -H "Content-Type: application/json" \
+                -d '{"branch":"main"}' | head -c 200; echo
+              exit 0
+            fi
+            echo "workspace running sn=$RUNNING"
+
+            # ---- L2: 公网端点探活（识别假死） ------------------------------
+            # /<clientId>/v1/models 由 CYarpServer 本地应答（不耗 AI 额度），
+            # 隧道断了会返回 503，因此能识别「workspace 显示 running 但隧道已死」。
+            # 连续两次失败 -> 强制重建：stop + start。
+            if [ -z "${FIXED_URL:-}" ]; then echo "no FIXED_URL, status check done"; exit 0; fi
+            H1=$(curl -s --max-time 15 -o /dev/null -w '%{http_code}' "$FIXED_URL/$CLIENT_ID/v1/models" -H "Authorization: Bearer $PROXY_KEY" || true)
+            if [ "$H1" = "200" ]; then echo "endpoint healthy"; exit 0; fi
+            echo "endpoint probe failed ($H1), rechecking in 60s"
+            sleep 60
+            H2=$(curl -s --max-time 15 -o /dev/null -w '%{http_code}' "$FIXED_URL/$CLIENT_ID/v1/models" -H "Authorization: Bearer $PROXY_KEY" || true)
+            if [ "$H2" = "200" ]; then echo "recovered on retry, nothing to do"; exit 0; fi
+            echo "still failing ($H2) -> fake-death recovery: stop + start $RUNNING"
+            curl -s --max-time 30 -X POST "$API/workspace/stop" \
+              -H "Authorization: Bearer $CNB_TOKEN" -H "Content-Type: application/json" \
+              -d "{\"sn\":\"$RUNNING\"}" | head -c 120; echo
+            sleep 5
+            curl -s --max-time 60 -X POST "$API/$REPO/-/workspace/start" \
+              -H "Authorization: Bearer $CNB_TOKEN" -H "Content-Type: application/json" \
+              -d '{"branch":"main"}' | head -c 200; echo
+
+# ---------------------------------------------------------------------------
+# 工作空间本身：拉起 CYarpClient 并用长连接把它钉住。
+# ---------------------------------------------------------------------------
+$:
+  vscode:
+    - docker:
+        image: cnbcool/default-dev-env:latest
+      env:
+        CYARP_SERVER_URI: "ws://ai.example.com"        # 改这里(1/3)：你的 CYarpServer；加 TLS 后改 wss://
+        #CYARP_CLIENT_ID: "org/repo"
+      runner:
+        cpus: 2
+      services:
+        - name: vscode
+          # 平台默认「10 分钟无 in-env http/ssh 连接就回收」，抬到会话上限，
+          # 让隧道长连接成为保活依据。
+          options:
+            keepAliveTimeout: 18h
+        - docker
+      stages:
+        - name: start-cyarp-client
+          script: |
+            set -euo pipefail
+            bash "$(pwd)/cyarp-start.sh"
