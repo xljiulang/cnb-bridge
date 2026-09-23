@@ -9,23 +9,30 @@ using Yarp.ReverseProxy.Forwarder;
 namespace CYarpServer.Forwarding
 {
     /// <summary>
-    /// Rewrites the public request into the CNB AI request:
+    /// 把公网请求改写成 CNB AI 请求：
     /// <list type="bullet">
-    /// <item>maps the public path to <c>/chat/completions</c> (the client's target Uri already
-    /// carries <c>/{org}/{repo}/-/ai</c>, and the only forwarded route is
-    /// <c>/{org}/{repo}/v1/chat/completions</c>)</item>
-    /// <item>replaces the caller's Authorization (the public ApiKey) with the CNB token that
-    /// the CYarp client reported during its handshake</item>
-    /// <item>drops the caller's Host so the upstream edge sees the host it actually serves</item>
+    /// <item>把公网路径映射为 <c>/chat/completions</c>（客户端的目标 Uri 本身已经带有
+    /// <c>/{org}/{repo}/-/ai</c>，而唯一被转发的路由是
+    /// <c>/{org}/{repo}/v1/chat/completions</c>）</item>
+    /// <item>把调用方的 Authorization（公网 ApiKey）替换成 CYarp 客户端在握手时报上来的 CNB token</item>
+    /// <item>丢弃调用方的 Host，让上游边缘看到它实际服务的那个主机名</item>
     /// </list>
     /// </summary>
     internal sealed class CnbAiTransformer(string? upstreamAuthorization) : HttpTransformer
     {
         /// <summary>
-        /// Upstream path served by this transformer, relative to the client's target Uri.
+        /// 本转换器请求的上游路径，相对于客户端的目标 Uri。
         /// </summary>
         private const string UpstreamPath = "/chat/completions";
 
+        /// <summary>
+        /// 改写请求：重写路径、替换凭据、清掉 Host。
+        /// </summary>
+        /// <param name="httpContext">当前请求上下文。</param>
+        /// <param name="proxyRequest">即将发往上游的请求。</param>
+        /// <param name="destinationPrefix">客户端目标 Uri 作为目的前缀。</param>
+        /// <param name="cancellationToken">取消令牌。</param>
+        /// <returns>表示异步操作的任务。</returns>
         public override async ValueTask TransformRequestAsync(
             HttpContext httpContext,
             HttpRequestMessage proxyRequest,
@@ -34,8 +41,8 @@ namespace CYarpServer.Forwarding
         {
             await base.TransformRequestAsync(httpContext, proxyRequest, destinationPrefix, cancellationToken);
 
-            // Never let the caller's own credential (the public ApiKey) reach the upstream:
-            // drop it, then inject the CNB token reported by the CYarp client handshake.
+            // 绝不让调用方自己的凭据（公网 ApiKey）到达上游：先丢掉，再注入
+            // CYarp 客户端握手时报上来的 CNB token。
             proxyRequest.Headers.Remove(HeaderNames.Authorization);
             if (string.IsNullOrEmpty(upstreamAuthorization) == false)
             {
@@ -44,10 +51,9 @@ namespace CYarpServer.Forwarding
 
             proxyRequest.RequestUri = new Uri(destinationPrefix.TrimEnd('/') + UpstreamPath + httpContext.Request.QueryString.Value);
 
-            // Never forward the caller's Host (our public domain / IP): upstream edges route by
-            // Host, and CNB's edge answers the wrong host with
-            // "301 Moved Permanently -> https://cnb.cool" instead of serving the AI endpoint.
-            // Clearing it makes HttpClient derive Host from the target Uri.
+            // 绝不转发调用方的 Host（我们的公网域名 / IP）：上游边缘按 Host 路由，
+            // CNB 边缘遇到不认识的主机会回 "301 Moved Permanently -> https://cnb.cool"，
+            // 而不是正常提供 AI 端点。清空它之后，HttpClient 会从目标 Uri 推导出 Host。
             proxyRequest.Headers.Host = null;
         }
     }

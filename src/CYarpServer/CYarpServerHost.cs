@@ -21,36 +21,36 @@ using System.Threading.Tasks;
 namespace CYarpServer
 {
     /// <summary>
-    /// Builds the CYarp server pipeline. Kept free of process level concerns
-    /// (ServiceSelf, console host) so integration tests can start it in-process.
+    /// 构建 CYarp 服务端的请求管道。刻意不涉及进程级的事务（ServiceSelf、控制台宿主），
+    /// 这样集成测试可以在进程内把它起起来。
     /// </summary>
     public static class CYarpServerHost
     {
         /// <summary>
-        /// Listen address used when nothing else is configured. Change it by passing
-        /// <c>--urls http://+:8080</c>, by setting ASPNETCORE_URLS, or by adding a
-        /// Kestrel:Endpoints section (which is also where TLS is configured later).
+        /// 无任何配置时的监听地址。要改可以传 <c>--urls http://+:8080</c>、设置 ASPNETCORE_URLS，
+        /// 或添加 Kestrel:Endpoints 配置节（将来配 TLS 也是在这里）。
         /// </summary>
         public const string DefaultUrls = "http://+:80";
 
         /// <summary>
-        /// Header the CYarp client uses to report its client id during the handshake.
-        /// Public callers may also use it to address a workspace explicitly.
+        /// CYarp 客户端在握手时报上自己 client id 用的头。
+        /// 公网调用方也可以用它来显式指定某个工作空间。
         /// </summary>
         public const string ClientIdHeader = "X-CYarp-Client";
 
         /// <summary>
-        /// Client id used when the handshake omits the header. A single workspace
-        /// deployment runs a single CYarpClient, so one shared id is enough.
+        /// 握手未带该头时使用的 client id。单工作空间部署只跑一个 CYarpClient，
+        /// 因此共用一个 id 就够了。
         /// </summary>
         public const string DefaultClientId = "cnb";
 
         /// <summary>
-        /// Creates the server application.
+        /// 创建服务端应用。
         /// </summary>
-        /// <param name="args">Command line arguments.</param>
-        /// <param name="configureBuilder">Optional extra builder configuration (used by the process host).</param>
-        /// <param name="settings">Optional configuration overrides (used by tests).</param>
+        /// <param name="args">命令行参数。</param>
+        /// <param name="configureBuilder">可选的额外 builder 配置（进程宿主会用到）。</param>
+        /// <param name="settings">可选的配置覆盖（测试会用到）。</param>
+        /// <returns>构建好的应用。</returns>
         public static WebApplication Create(
             string[] args,
             Action<WebApplicationBuilder>? configureBuilder = null,
@@ -65,38 +65,35 @@ namespace CYarpServer
 
             configureBuilder?.Invoke(builder);
 
-            // appsettings.json lives next to the binary, also when the service is started
-            // from another working directory.
+            // appsettings.json 与二进制同目录；即使服务是从别的工作目录启动的，这一点也要成立。
             builder.WebHost.UseContentRoot(AppContext.BaseDirectory);
 
-            // Listen address precedence: configuration (command line "--urls", "Urls" key),
-            // then ASPNETCORE_URLS, then the built-in default. Resolved explicitly because a
-            // "Urls" entry in appsettings.json would otherwise shadow ASPNETCORE_URLS.
+            // 监听地址的优先级：配置（命令行 "--urls"、"Urls" 键）> ASPNETCORE_URLS > 内置默认值。
+            // 这里显式解析，是因为 appsettings.json 里的 "Urls" 项否则会把 ASPNETCORE_URLS 遮住。
             builder.WebHost.UseUrls(ResolveUrls(builder.Configuration));
 
-            // CYarp server components.
+            // CYarp 服务端组件。
             //
-            // The options are bound here, in this assembly, on purpose: the configuration
-            // binding source generator only intercepts calls it compiles, so
-            // "AddCYarp().Configure(section)" (the package's own IConfiguration overload) ends
-            // up as the reflection binder, which is silently a no-op in the trimmed publish
-            // (measured: Node=..., Protocols=All, KeepAliveInterval=00:00:50, MaxTunnels=10
-            // instead of the configured values). Calling Configure<CYarpOptions> from our own
-            // project makes the generator emit the binding code and every value binds.
+            // 配置刻意绑在「本程序集」里：配置绑定的源生成器只拦截它参与编译的调用点，
+            // 所以 "AddCYarp().Configure(section)"（包自带的 IConfiguration 重载）会落到反射绑定，
+            // 而反射绑定在裁剪后的发布产物里会静默失效
+            // （实测：Node=...、Protocols=All、KeepAliveInterval=00:00:50、MaxTunnels=10，
+            // 而不是配置里的值）。在我们自己的项目里调用 Configure<CYarpOptions>，
+            // 生成器就会生成绑定代码，每个值都能绑上。
             builder.Services.AddCYarp();
             builder.Services.Configure<CYarpOptions>(builder.Configuration.GetSection(nameof(CYarpOptions)));
 
-            // The CYarp handshake carries the workspace identity and the CNB token as headers;
-            // this scheme turns them into the ClaimsPrincipal that CYarp keeps on IClient.User.
+            // CYarp 握手用请求头携带工作空间身份与 CNB token；
+            // 这个方案把它们转成 CYarp 保存在 IClient.User 上的 ClaimsPrincipal。
             builder.Services
                 .AddAuthentication(CYarpTunnelAuthenticationHandler.SchemeName)
                 .AddScheme<AuthenticationSchemeOptions, CYarpTunnelAuthenticationHandler>(CYarpTunnelAuthenticationHandler.SchemeName, null);
 
-            // Strongly typed public surface options, bound with the source generated binder.
+            // 公网接口的强类型配置，用源生成绑定器绑定。
             builder.Services.Configure<CnbProxyOptions>(builder.Configuration);
 
-            // AI quota probing: the routing of the bare chat route prefers the workspace with the
-            // most remaining credits, and GET / reports what was read. Both share this store.
+            // AI 额度探测：裸 chat 路由优先选择剩余额度最多的工作空间，GET / 负责报告读到的结果。
+            // 两者共用这个 store。
             builder.Services.Configure<AiQuotaOptions>(builder.Configuration.GetSection(AiQuotaOptions.SectionName));
             builder.Services.AddSingleton<AiQuotaStore>();
             builder.Services.AddHostedService<AiQuotaProbeService>();
@@ -108,9 +105,8 @@ namespace CYarpServer
 
             LogCYarpOptions(app.Services);
 
-            // Optional inbound gate for the public OpenAI-compatible API. It only covers the
-            // chat endpoint: models is answered locally from configuration (a static list with
-            // no upstream call), so it stays open for the workspace keepalive probe.
+            // 公网 OpenAI 兼容 API 的可选入站闸门。它只覆盖 chat 端点：models 由配置本地应答
+            // （一份静态列表、不触上游），因此保持开放，好让工作空间的保活探活不带密钥。
             var apiKey = app.Services.GetRequiredService<IOptions<CnbProxyOptions>>().Value.ApiKey;
             if (string.IsNullOrEmpty(apiKey) == false)
             {
@@ -119,21 +115,20 @@ namespace CYarpServer
 
             app.MapCYarp(context => context.User.FindFirstValue(CnbClaims.ClientId) ?? DefaultClientId);
 
-            // The public surface is a literal route table: the workspace id is the CNB repo
-            // slug, so "{org}/{repo}" are two real route parameters instead of a catch-all
-            // prefix to parse. Everything not listed here is answered 404 by the framework,
-            // which keeps the route table equal to the published API.
+            // 公网接口是一张字面路由表：工作空间 id 就是 CNB 仓库 slug，因此 "{org}/{repo}"
+            // 是两个真正的路由参数，而不是要去解析的 catch-all 前缀。这里没列出的路径都由框架
+            // 回 404，从而保证路由表与已发布的 API 一一对应。
             //
-            // Handlers are mapped as explicit RequestDelegate: a delegate with injected
-            // complex types would make the Request Delegate Generator treat them as JSON bodies.
+            // 处理器显式映射为 RequestDelegate：若委托带有注入的复杂类型，
+            // Request Delegate Generator 会把它们当成 JSON 请求体。
             app.MapMethods("/{org}/{repo}/v1/models", [HttpMethods.Get], (RequestDelegate)HttpForwardHandler.HandleModelsAsync);
             app.MapMethods("/{org}/{repo}/v1/chat/completions", [HttpMethods.Post], (RequestDelegate)HttpForwardHandler.HandleChatAsync);
 
-            // Bare routes: the "unified base_url" surface. A caller that does not know (or does
-            // not want to hardcode) the workspace slug points base_url at the server root:
-            //   GET  /                     -> connected workspace ids, e.g. ["org/repo"]
-            //   GET  /v1/models            -> the configured model list (never forwarded)
-            //   POST /v1/chat/completions  -> forwarded to one connected workspace at random
+            // 裸路径：即「统一 base_url」形态。不知道（或不想硬编码）工作空间 slug 的调用方，
+            // 把 base_url 指向服务端根即可：
+            //   GET  /                     -> 在线工作空间及其额度
+            //   GET  /v1/models            -> 配置的模型列表（从不转发）
+            //   POST /v1/chat/completions  -> 转发给剩余额度最多的在线工作空间
             app.MapMethods("/", [HttpMethods.Get], (RequestDelegate)HttpForwardHandler.HandleClientsAsync);
             app.MapMethods("/v1/models", [HttpMethods.Get], (RequestDelegate)HttpForwardHandler.HandleModelsAsync);
             app.MapMethods("/v1/chat/completions", [HttpMethods.Post], (RequestDelegate)HttpForwardHandler.HandleChatAsync);
@@ -142,9 +137,8 @@ namespace CYarpServer
         }
 
         /// <summary>
-        /// Logs the CYarp options that actually took effect. If a future CYarp release or
-        /// trimmer change makes the generated binding fall back to the library defaults, this
-        /// line shows it immediately instead of failing silently.
+        /// 打印真正生效的 CYarp 配置。将来若某个 CYarp 版本或裁剪器改动让生成的绑定回退到
+        /// 库默认值，这一行会立刻暴露出来，而不是静默出错。
         /// </summary>
         private static void LogCYarpOptions(IServiceProvider services)
         {
@@ -159,6 +153,12 @@ namespace CYarpServer
                 options.HttpTunnel.CreationTimeout);
         }
 
+        /// <summary>
+        /// 解析监听地址：命令行 <c>--urls</c> / 配置里的 <c>Urls</c> 优先，
+        /// 其次是 ASPNETCORE_URLS 与 DOTNET_URLS，最后回落到 <see cref="DefaultUrls"/>。
+        /// </summary>
+        /// <param name="configuration">应用配置。</param>
+        /// <returns>要监听的地址。</returns>
         private static string ResolveUrls(IConfiguration configuration)
         {
             var configured = configuration["urls"];
@@ -174,17 +174,20 @@ namespace CYarpServer
             return string.IsNullOrWhiteSpace(configured) ? DefaultUrls : configured;
         }
 
+        /// <summary>
+        /// 构造 ApiKey 入站闸门：chat 端点必须带正确的 Bearer key，其余免鉴权端点直接放行。
+        /// </summary>
+        /// <param name="apiKey">配置的公网 key。</param>
+        /// <returns>中间件委托。</returns>
         private static Func<HttpContext, RequestDelegate, Task> CreateApiKeyGate(string apiKey)
         {
             return async (context, next) =>
             {
-                // Not behind the ApiKey:
-                // - the CYarp endpoints: their Authorization header carries the CNB token,
-                //   never the public ApiKey;
-                // - GET .../v1/models (both the bare and the workspace-addressed route): answered
-                //   locally from configuration, needs no credential, and the workspace keepalive
-                //   cron probes it without one;
-                // - GET / (the connected workspace list): a local discovery helper.
+                // 不归 ApiKey 管的：
+                // - CYarp 端点：它们的 Authorization 头带的是 CNB token，从来不是公网 ApiKey；
+                // - GET .../v1/models（裸路径与带前缀两种）：由配置本地应答、不需要凭据，
+                //   工作空间的保活 cron 会不带密钥地探它；
+                // - GET /（在线工作空间列表）：本地发现用的辅助接口。
                 if (IsCYarpEndpoint(context.Request.Path) || IsModelsEndpoint(context) || IsClientsEndpoint(context))
                 {
                     await next(context);
@@ -205,12 +208,13 @@ namespace CYarpServer
         }
 
         /// <summary>
-        /// Gets whether the path addresses a CYarp endpoint: "/cyarp" or "/cyarp/" (the client
-        /// handshake) and "/cyarp/{tunnelId}" (the tunnel). tunnelId is a GUID, so a path with
-        /// another segment below "/cyarp/" is a public API path whose workspace id happens to
-        /// start with "cyarp" (e.g. "/cyarp/repo/v1/chat/completions") and must still present
-        /// the ApiKey.
+        /// 获取该路径是否指向 CYarp 端点："/cyarp" 或 "/cyarp/"（客户端握手）与
+        /// "/cyarp/{tunnelId}"（隧道）。tunnelId 是 GUID，因此 "/cyarp/" 之下还有别的段的路径
+        /// 是公网 API 路径 —— 只是它的工作空间 id 恰好以 "cyarp" 开头（例如
+        /// "/cyarp/repo/v1/chat/completions"）—— 这类路径仍然必须带上 ApiKey。
         /// </summary>
+        /// <param name="path">请求路径。</param>
+        /// <returns>是 CYarp 端点时返回 true。</returns>
         private static bool IsCYarpEndpoint(PathString path)
         {
             if (path.StartsWithSegments("/cyarp", out var remainder) == false)
@@ -222,10 +226,12 @@ namespace CYarpServer
         }
 
         /// <summary>
-        /// Gets whether the request is <c>GET .../v1/models</c> - either the bare
-        /// <c>/v1/models</c> or the workspace-addressed <c>/{org}/{repo}/v1/models</c>. That list
-        /// is answered locally, so it is deliberately open (see <see cref="CreateApiKeyGate"/>).
+        /// 获取该请求是否为 <c>GET .../v1/models</c> —— 裸 <c>/v1/models</c> 或带工作空间前缀的
+        /// <c>/{org}/{repo}/v1/models</c>。这份列表由本地应答，因此刻意开放
+        /// （见 <see cref="CreateApiKeyGate"/>）。
         /// </summary>
+        /// <param name="context">当前请求上下文。</param>
+        /// <returns>是 models 端点时返回 true。</returns>
         private static bool IsModelsEndpoint(HttpContext context)
         {
             return HttpMethods.IsGet(context.Request.Method)
@@ -234,15 +240,23 @@ namespace CYarpServer
         }
 
         /// <summary>
-        /// Gets whether the request is <c>GET /</c>, the connected workspace list. Deliberately
-        /// open, like the model list: it exposes only which workspaces are online.
+        /// 获取该请求是否为 <c>GET /</c>，即在线工作空间列表。与模型列表一样刻意开放：
+        /// 它只暴露有哪些工作空间在线。
         /// </summary>
+        /// <param name="context">当前请求上下文。</param>
+        /// <returns>是列表端点时返回 true。</returns>
         private static bool IsClientsEndpoint(HttpContext context)
         {
             return HttpMethods.IsGet(context.Request.Method)
                 && (context.Request.Path.Value is null or "/" or "");
         }
 
+        /// <summary>
+        /// 以固定耗时比较两个字符串，避免因逐字符短路比较而泄漏时序信息。
+        /// </summary>
+        /// <param name="left">左侧字符串。</param>
+        /// <param name="right">右侧字符串。</param>
+        /// <returns>两者相等时返回 true。</returns>
         private static bool FixedTimeEquals(string left, string right)
         {
             var leftBytes = Encoding.UTF8.GetBytes(left);

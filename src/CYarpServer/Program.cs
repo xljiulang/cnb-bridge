@@ -5,22 +5,24 @@ using System;
 namespace CYarpServer
 {
     /// <summary>
-    /// CYarpServer process entry point.
+    /// CYarpServer 进程入口。
     /// <para>
-    /// ServiceSelf turns this single binary into a system service, so the server is
-    /// deployed without Docker or a reverse proxy:
-    /// <c>sudo ./CYarpServer start</c> installs and starts it (systemd on Linux, SCM on
-    /// Windows), <c>./CYarpServer stop</c> stops and removes it, <c>./CYarpServer logs</c>
-    /// streams its log.
+    /// ServiceSelf 把这个单文件变成系统服务，因此服务端不依赖 Docker、也不需要反向代理：
+    /// <c>sudo ./CYarpServer start</c> 安装并启动（Linux 用 systemd，Windows 用 SCM），
+    /// <c>./CYarpServer stop</c> 停止并删除，<c>./CYarpServer logs</c> 订阅它的日志。
     /// </para>
     /// </summary>
     public static class Program
     {
         private const string ServiceName = "CYarpServer";
 
+        /// <summary>
+        /// 进程主入口：先让 ServiceSelf 处理服务子命令（start/stop/logs），否则前台运行 Web 应用。
+        /// </summary>
+        /// <param name="args">命令行参数。</param>
         public static void Main(string[] args)
         {
-            // Returns false when a service command (start/stop/logs) was handled.
+            // 处理了服务子命令（start/stop/logs）时返回 false。
             if (Service.UseServiceSelf(args, ServiceName, CreateServiceOptions()) == false)
             {
                 return;
@@ -30,6 +32,10 @@ namespace CYarpServer
             app.Run();
         }
 
+        /// <summary>
+        /// 构造 ServiceSelf 的服务选项（描述与重启策略）。
+        /// </summary>
+        /// <returns>服务选项。</returns>
         private static ServiceOptions CreateServiceOptions()
         {
             var options = new ServiceOptions
@@ -37,7 +43,7 @@ namespace CYarpServer
                 Description = "Exposes the CNB workspace AI endpoint as a fixed domain OpenAI-compatible API over a CYarp tunnel.",
             };
 
-            // Keep the tunnel up, and start from the directory that holds appsettings.json.
+            // 保持隧道常在线，并从存放 appsettings.json 的目录启动。
             options.Linux.Service.Restart = "always";
             options.Linux.Service.RestartSec = "5";
             options.Linux.Service.WorkingDirectory = AppContext.BaseDirectory;

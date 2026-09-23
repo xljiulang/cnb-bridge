@@ -34,6 +34,13 @@ global.json                SDK 固定到 .NET 10（rollForward latestFeature）
 Directory.Build.props      net10.0 / Nullable / LangVersion 等公共属性
 src/
   CYarpServer/             服务端进程：Kestrel + 认证 handler + 多工作空间路由 + ServiceSelf
+    Program.cs             进程入口（ServiceSelf 子命令 + 前台运行）
+    CYarpServerHost.cs     请求管道装配：DI、路由表、鉴权闸门
+    Quota/                 额度探测与择优选路（探测服务、选路、快照、存储）
+    Options/               强类型配置（ApiKey/ProxyModels、额度探测参数）
+    Contracts/             对外接口的 JSON 契约与源生成序列化上下文
+    Authentication/        握手 claim 常量与隧道认证方案 handler
+    Forwarding/            公网请求到 CNB AI 的转发与改写
     Readme.md              服务端部署指南（唯一源，发布时复制到 artifacts/server/）
   CYarpClient/             客户端进程：环境变量注入 + 自动重连 + 内置文件日志（Native AOT）
     .cnb.yml               CNB 流水线配置（唯一源，发布时复制到 artifacts/client/）

@@ -3,41 +3,39 @@ using System;
 namespace CYarpServer.Options
 {
     /// <summary>
-    /// Options of the AI quota probe. The server periodically reads the CNB organization quota
-    /// of every connected workspace through that workspace's own tunnel, and the bare
-    /// <c>POST /v1/chat/completions</c> route then prefers the workspace that has the most
-    /// remaining credits.
+    /// AI 额度探测的配置。
+    /// <para>
+    /// 服务端周期性地经每个在线工作空间自己的隧道读取其 CNB 组织额度，
+    /// 裸 <c>POST /v1/chat/completions</c> 随后优先选择剩余额度最多的工作空间。
+    /// </para>
     /// </summary>
     public sealed class AiQuotaOptions
     {
         /// <summary>
-        /// The configuration section these options are bound from.
+        /// 该配置项所绑定的配置节名。
         /// </summary>
         public const string SectionName = "AiQuota";
 
         /// <summary>
-        /// Gets or sets whether the probe runs. Read once at startup, so switching it off in
-        /// appsettings.json needs a restart. While it is off the quota of <c>GET /</c> stays
-        /// unknown and the bare chat route keeps picking a workspace uniformly at random.
+        /// 获取或设置是否运行额度探测。只在启动时读取一次，因此改 appsettings.json 后需要重启。
+        /// 关闭时 <c>GET /</c> 的额度始终为未知，裸 chat 路由回到等概率随机挑选。
         /// </summary>
         public bool Enabled { get; set; } = true;
 
         /// <summary>
-        /// Gets or sets the probe period, 2 minutes by default. A tick whose previous round is
-        /// still running is skipped instead of being queued.
+        /// 获取或设置探测周期，默认 2 分钟。若上一轮还没跑完，本次触发会被跳过而不是排队。
         /// </summary>
         public TimeSpan Interval { get; set; } = TimeSpan.FromMinutes(2d);
 
         /// <summary>
-        /// Gets or sets how long a reading may be reused, 6 minutes by default - three probe
-        /// rounds, so a couple of consecutive failures do not drop a workspace out of routing.
-        /// An older snapshot - including one that never succeeded - counts as unknown, which only
-        /// deprioritises the workspace: an outdated value is never mistaken for a used up quota.
+        /// 获取或设置一次读数可以被复用的时长，默认 6 分钟 —— 相当于三个探测周期，
+        /// 这样连续失败几次也不会把工作空间踢出路由。更旧的快照（含从未成功过的）
+        /// 一律视为未知，其唯一后果是该工作空间的优先级下降：过期值绝不会被误当成额度已耗尽。
         /// </summary>
         public TimeSpan StaleAfter { get; set; } = TimeSpan.FromMinutes(6d);
 
         /// <summary>
-        /// Gets or sets the timeout of the two charge requests of a single workspace, together.
+        /// 获取或设置单个工作空间那一轮探测的超时（两个 charge 请求合计）。
         /// </summary>
         public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(10d);
     }

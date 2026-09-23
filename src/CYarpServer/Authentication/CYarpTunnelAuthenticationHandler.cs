@@ -9,19 +9,17 @@ using System.Threading.Tasks;
 namespace CYarpServer.Authentication
 {
     /// <summary>
-    /// Authentication scheme of the CYarp client handshake.
+    /// CYarp 客户端握手的认证方案。
     /// <para>
-    /// The CYarp client reports its identity and its upstream credential as handshake
-    /// headers (ConnectHeaders). This handler turns them into claims, and CYarp itself
-    /// stores the resulting <see cref="ClaimsPrincipal"/> on
-    /// <see cref="CYarp.Server.IClient.User"/> - which is why the upstream credential can be
-    /// delivered without extending the CYarp API.
+    /// CYarp 客户端把自己的身份与上游凭据作为握手头（ConnectHeaders）报上来。本处理器把它们
+    /// 转成 claims，再由 CYarp 自己把由此得到的 <see cref="ClaimsPrincipal"/> 存到
+    /// <see cref="CYarp.Server.IClient.User"/> —— 这就是上游凭据无需扩展 CYarp API
+    /// 就能送到的原因。
     /// </para>
     /// <para>
-    /// Deliberately permissive: the handshake is never rejected. Any client that can reach this
-    /// server may register a tunnel (and therefore claim any workspace id), which is an accepted
-    /// trade-off for this deployment; see the security section of the README before exposing the
-    /// server more widely.
+    /// 刻意宽松：握手从不被拒绝。任何能访问到本服务端的客户端都可以注册隧道（也就可以冒用
+    /// 任意工作空间 id），这是本次部署接受的取舍；在把服务端暴露给更大范围之前，
+    /// 请先读 README 的安全说明。
     /// </para>
     /// </summary>
     internal sealed class CYarpTunnelAuthenticationHandler(
@@ -32,17 +30,21 @@ namespace CYarpServer.Authentication
         public const string SchemeName = "CYarpTunnel";
 
         /// <summary>
-        /// Header the CYarp client sends with the Uri it tunnels to. Only a CYarp handshake
-        /// carries it, so it distinguishes a tunnel handshake from a public API call.
+        /// CYarp 客户端在握手时携带的、表示隧道目标 Uri 的头。只有 CYarp 握手会带它，
+        /// 因此可以用它把隧道握手与公网 API 调用区分开。
         /// </summary>
         private const string TargetUriHeader = "CYarp-TargetUri";
 
+        /// <summary>
+        /// 处理握手请求的认证：把 CYarp 上报的握手头转成 claims。
+        /// </summary>
+        /// <returns>认证结果；公网 API 调用返回 NoResult（交给后面的 ApiKey 中间件）。</returns>
         protected override Task<AuthenticateResult> HandleAuthenticateAsync()
         {
             var targetUri = Request.Headers[TargetUriHeader].ToString();
             if (string.IsNullOrEmpty(targetUri))
             {
-                // A public API call: leave it anonymous, the ApiKey middleware handles it.
+                // 公网 API 调用：保持匿名，由 ApiKey 中间件处理。
                 return Task.FromResult(AuthenticateResult.NoResult());
             }
 

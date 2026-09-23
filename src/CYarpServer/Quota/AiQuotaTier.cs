@@ -1,20 +1,20 @@
 namespace CYarpServer.Quota
 {
     /// <summary>
-    /// The rule that decided which workspace serves a bare (unified base_url) chat request.
+    /// 裸（统一 base_url）chat 请求最终按哪条规则选中了工作空间。
     /// </summary>
     public enum AiQuotaTier
     {
-        /// <summary>Quota routing is switched off: a uniform pick, exactly as before this feature.</summary>
+        /// <summary>额度路由已关闭：等概率随机挑选，与本特性之前完全一致。</summary>
         Disabled,
 
-        /// <summary>Picked among the workspaces with the highest remaining credits.</summary>
+        /// <summary>在剩余额度最高（且并列）的工作空间中挑选。</summary>
         Known,
 
-        /// <summary>No usable quota (never probed, or too old): picked uniformly among those.</summary>
+        /// <summary>没有可用的额度（从未探测过，或读数已过期）：在这些工作空间中等概率挑选。</summary>
         Unknown,
 
-        /// <summary>Every candidate is known to be out of credits: picked uniformly among those.</summary>
+        /// <summary>所有候选都已知额度耗尽：在这些工作空间中等概率挑选。</summary>
         Exhausted,
     }
 }

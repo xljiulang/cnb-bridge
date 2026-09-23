@@ -19,23 +19,22 @@ using System.Threading.Tasks;
 namespace CYarpServer.Quota
 {
     /// <summary>
-    /// Reads the CNB AI quota of every connected workspace, periodically.
+    /// 周期性地读取每个在线工作空间的 CNB AI 额度。
     /// <para>
-    /// The charge endpoints only answer requests that originate inside the CNB network, so the
-    /// probe does not call them from the server: it asks each workspace for a TCP tunnel
-    /// (<see cref="IClient.CreateTcpTunnelAsync"/>) and runs a plain HTTPS request over that
-    /// tunnel. TLS and HTTP are handled by <see cref="SocketsHttpHandler"/> on top of the tunnel
-    /// stream, exactly the way CYarp itself forwards HTTP requests.
+    /// charge 端点只应答来自 CNB 网络内部的请求，所以探测不是由服务端直接调用它们：
+    /// 而是向每个工作空间要一条 TCP 隧道（<see cref="IClient.CreateTcpTunnelAsync"/>），
+    /// 再在这条隧道上发一个普通的 HTTPS 请求。TLS 与 HTTP 都由
+    /// <see cref="SocketsHttpHandler"/> 在隧道流之上完成，与 CYarp 自己转发 HTTP 请求的方式一致。
     /// </para>
     /// <para>
-    /// Nothing here is allowed to affect the tunnel: a failure is stored as the snapshot error and
-    /// the previous value is kept, so the worst case is a workspace whose quota stays unknown.
+    /// 这里的一切都不允许影响隧道本身：失败只会被记进快照的错误字段，并保留上一次的值，
+    /// 因此最坏的情况也不过是某个工作空间的额度一直是未知。
     /// </para>
     /// </summary>
     public sealed partial class AiQuotaProbeService : BackgroundService
     {
         /// <summary>
-        /// Media type of the CNB OpenAPI; the charge endpoints do not advertise <c>application/json</c>.
+        /// CNB OpenAPI 的媒体类型；charge 端点并不声明支持 <c>application/json</c>。
         /// </summary>
         private const string AcceptMediaType = "application/vnd.cnb.api+json";
 
@@ -45,12 +44,12 @@ namespace CYarpServer.Quota
         private readonly ILogger<AiQuotaProbeService> _logger;
 
         /// <summary>
-        /// Creates the probe.
+        /// 创建探测器。
         /// </summary>
-        /// <param name="viewer">The connected workspaces.</param>
-        /// <param name="store">Where the readings are kept for the routing and for <c>GET /</c>.</param>
-        /// <param name="options">Probe settings.</param>
-        /// <param name="logger">Logger.</param>
+        /// <param name="viewer">在线工作空间。</param>
+        /// <param name="store">存放读数的地方，供路由与 <c>GET /</c> 使用。</param>
+        /// <param name="options">探测配置。</param>
+        /// <param name="logger">日志组件。</param>
         public AiQuotaProbeService(
             IClientViewer viewer,
             AiQuotaStore store,
@@ -64,11 +63,10 @@ namespace CYarpServer.Quota
         }
 
         /// <summary>
-        /// Probing loop: one round immediately, then one per <see cref="AiQuotaOptions.Interval"/>.
-        /// A round is awaited before the next tick, so rounds never overlap and a slow workspace
-        /// cannot pile up work.
+        /// 探测循环：启动后立刻跑一轮，之后每个 <see cref="AiQuotaOptions.Interval"/> 一轮。
+        /// 下一拍之前会先把当前轮 await 完，因此两轮永不重叠，慢的工作空间也不会堆积任务。
         /// </summary>
-        /// <param name="stoppingToken">Signalled when the host shuts down.</param>
+        /// <param name="stoppingToken">主机关闭时触发。</param>
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             if (this._options.Enabled == false)
@@ -95,22 +93,20 @@ namespace CYarpServer.Quota
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
-                // Shutting down.
+                // 正在关闭。
             }
         }
 
         /// <summary>
-        /// Probes every connected workspace once, sequentially.
+        /// 顺序地探测每个在线工作空间一次。
         /// <para>
-        /// Sequential on purpose: workspaces of the same organization share one quota, so probing
-        /// them in parallel would only multiply the load on the same endpoint.
+        /// 刻意串行：同一组织下的工作空间共享同一份额度，并行探测只会让同一个端点承受成倍的负载。
         /// </para>
         /// </summary>
-        /// <param name="cancellationToken">Signalled when the host shuts down.</param>
+        /// <param name="cancellationToken">主机关闭时触发。</param>
         private async Task ProbeAllAsync(CancellationToken cancellationToken)
         {
-            // The viewer is a concurrent collection; snapshot it so one probe round sees a stable
-            // set of workspaces.
+            // viewer 是并发集合；先快照一份，好让同一轮探测看到稳定的工作空间集合。
             var candidates = new List<IClient>(this._viewer.Count);
             foreach (var client in this._viewer)
             {
@@ -125,18 +121,16 @@ namespace CYarpServer.Quota
         }
 
         /// <summary>
-        /// Probes one workspace. Every failure is recorded on the snapshot instead of being
-        /// thrown, so one broken workspace cannot stop the round.
+        /// 探测一个工作空间。所有失败都记进快照而不是抛出去，因此单个坏掉的工作空间不会中断整轮。
         /// </summary>
-        /// <param name="client">The workspace to probe.</param>
-        /// <param name="cancellationToken">Signalled when the host shuts down.</param>
+        /// <param name="client">要探测的工作空间。</param>
+        /// <param name="cancellationToken">主机关闭时触发。</param>
         private async Task ProbeOneAsync(IClient client, CancellationToken cancellationToken)
         {
             var clientId = client.Id;
 
-            // The organization is the first segment of the repo slug. A client id without a
-            // slash (the single workspace default) carries no organization, so there is nothing
-            // to ask for.
+            // 组织名就是仓库 slug 的第一段。不含斜杠的 client id（单工作空间的默认值）
+            // 没有组织可言，也就无从问起。
             var separator = clientId.IndexOf('/');
             if (separator <= 0)
             {
@@ -144,8 +138,7 @@ namespace CYarpServer.Quota
                 return;
             }
 
-            // Without the CNB token there is no way to authenticate the charge call, and the
-            // server never invents one.
+            // 没有 CNB token 就无法认证这次 charge 调用，而服务端绝不会自己造一个。
             var authorization = client.User.FindFirstValue(CnbClaims.UpstreamAuthorization);
             if (string.IsNullOrEmpty(authorization))
             {
@@ -179,22 +172,21 @@ namespace CYarpServer.Quota
         }
 
         /// <summary>
-        /// Reads the AI credits of one organization over the workspace's own tunnel: the allowance
-        /// of the month and what is left of it.
+        /// 经工作空间自己的隧道读取某个组织的 AI 额度：当月总额度，以及其中剩余的部分。
         /// </summary>
-        /// <param name="client">The workspace that provides the tunnel.</param>
-        /// <param name="organization">The organization slug (first segment of the client id).</param>
-        /// <param name="authorization">The CNB token reported during the handshake.</param>
-        /// <param name="cancellationToken">Timeout of the two requests together.</param>
-        /// <returns>The month's allowance and the remaining credits, both in milli-credits.</returns>
+        /// <param name="client">提供隧道的工作空间。</param>
+        /// <param name="organization">组织 slug（client id 的第一段）。</param>
+        /// <param name="authorization">握手时报上来的 CNB token。</param>
+        /// <param name="cancellationToken">两个请求合计的超时。</param>
+        /// <returns>当月总额度与剩余额度，单位均为 milli-credit。</returns>
         private static async Task<(long Total, long Remaining)> ReadQuotaAsync(
             IClient client,
             string organization,
             string authorization,
             CancellationToken cancellationToken)
         {
-            // The target Uri of the tunnel is the CNB AI base (https://api.cnb.cool/{org}/{repo}/-/ai);
-            // the charge endpoints live on the same host, so no extra address is configured.
+            // 隧道的目标 Uri 是 CNB AI 基址（https://api.cnb.cool/{org}/{repo}/-/ai）；
+            // charge 端点与它同主机，因此不需要额外配置地址。
             var target = client.TargetUri;
             var baseAddress = new Uri($"{target.Scheme}://{target.Authority}");
 
@@ -204,14 +196,13 @@ namespace CYarpServer.Quota
                 UseProxy = false,
                 UseCookies = false,
                 AllowAutoRedirect = false,
-                // One connection is enough for the two requests, and keeping it at one means the
-                // round holds a single tunnel instead of one per request.
+                // 两个请求共用一条连接就够了，把上限压在 1 意味着这一轮只占一条隧道，而不是每个请求一条。
                 MaxConnectionsPerServer = 1,
                 ConnectCallback = (_, token) => new ValueTask<Stream>(client.CreateTcpTunnelAsync(token)),
             };
 
-            // The invoker is created per workspace and per round: it must never be shared, or a
-            // pooled connection would be reused for the tunnel of another workspace.
+            // invoker 按「每个工作空间、每一轮」创建：它绝不能被共享，否则连接池里的连接
+            // 会被复用到另一个工作空间的隧道上。
             using var invoker = new HttpMessageInvoker(handler, disposeHandler: true);
 
             var escapedOrganization = Uri.EscapeDataString(organization);
@@ -249,18 +240,17 @@ namespace CYarpServer.Quota
         }
 
         /// <summary>
-        /// Sends one authenticated GET over the tunnel and reads its JSON body. A non success
-        /// status, an unreadable body or a missing body is reported as an exception, which the
-        /// caller turns into the snapshot error.
+        /// 经隧道发一个带认证的 GET 并读取其 JSON 响应体。非成功状态码、读不出的响应体、
+        /// 或空的响应体都会以异常形式抛出，由调用方转成快照里的错误。
         /// </summary>
-        /// <typeparam name="TResponse">The part of the response this server reads.</typeparam>
-        /// <param name="invoker">The per workspace invoker that owns the tunnel.</param>
-        /// <param name="requestUri">Absolute request Uri.</param>
-        /// <param name="path">Path, used in error messages.</param>
-        /// <param name="authorization">The CNB token reported during the handshake.</param>
-        /// <param name="typeInfo">Source generated JSON metadata (the publish is trimmed).</param>
-        /// <param name="cancellationToken">Request timeout.</param>
-        /// <returns>The deserialized response.</returns>
+        /// <typeparam name="TResponse">本服务端读取的响应部分。</typeparam>
+        /// <param name="invoker">承载隧道的、按工作空间创建的 invoker。</param>
+        /// <param name="requestUri">请求的绝对 Uri。</param>
+        /// <param name="path">路径，用于错误信息。</param>
+        /// <param name="authorization">握手时报上来的 CNB token。</param>
+        /// <param name="typeInfo">源生成的 JSON 元数据（发布产物经过裁剪）。</param>
+        /// <param name="cancellationToken">请求超时。</param>
+        /// <returns>反序列化后的响应。</returns>
         private static async Task<TResponse> GetAsync<TResponse>(
             HttpMessageInvoker invoker,
             Uri requestUri,
@@ -294,10 +284,10 @@ namespace CYarpServer.Quota
         }
 
         /// <summary>
-        /// Renders an exception as a single line error message for the snapshot.
+        /// 把异常渲染成快照用的单行错误信息。
         /// </summary>
-        /// <param name="exception">The failure.</param>
-        /// <returns>A short description, including the HTTP status when there is one.</returns>
+        /// <param name="exception">异常。</param>
+        /// <returns>简短描述；有 HTTP 状态码时会带上。</returns>
         private static string Describe(Exception exception)
         {
             if (exception is HttpRequestException httpException && httpException.StatusCode is { } statusCode)

@@ -5,31 +5,28 @@ using System.Collections.Generic;
 namespace CYarpServer.Quota
 {
     /// <summary>
-    /// Picks the workspace of a bare (unified base_url) chat request from the quota the server
-    /// has probed: the workspace with the most remaining credits wins, and only when no usable
-    /// quota is known does the choice fall back to a uniform pick among the unknown ones.
+    /// 依据服务端探测到的额度，为裸（统一 base_url）chat 请求挑选工作空间：剩余额度最多的
+    /// 胜出；只有在没有任何可用额度时，才退化为在「未知」的那些之间等概率随机挑选。
     /// </summary>
     public static class AiQuotaRouter
     {
         /// <summary>
-        /// Picks a workspace, or null when there is no candidate at all.
+        /// 挑选一个工作空间；完全没有候选时返回 null。
         /// <para>
-        /// Candidates are grouped into three tiers: <see cref="AiQuotaTier.Known"/> (fresh quota
-        /// above zero, the highest value wins), <see cref="AiQuotaTier.Unknown"/> (never probed
-        /// or too old) and <see cref="AiQuotaTier.Exhausted"/> (fresh quota at or below zero).
-        /// The first non empty tier decides, and within a tier the pick is uniform - so
-        /// workspaces that tie, and the fallback tiers, still share the traffic. With quota
-        /// routing switched off every candidate is one uniform tier, which reproduces the
-        /// behaviour that existed before this feature.
+        /// 候选被分成三档：<see cref="AiQuotaTier.Known"/>（额度新且大于 0，取最大值）、
+        /// <see cref="AiQuotaTier.Unknown"/>（从未探测过或读数过期）、
+        /// <see cref="AiQuotaTier.Exhausted"/>（额度新且小于等于 0）。
+        /// 第一个非空的档位说了算，且档内等概率挑选 —— 因此并列的工作空间、以及兜底档位
+        /// 之间，仍然能分摊流量。关闭额度路由时所有候选同属一档，等价于本特性之前的行为。
         /// </para>
         /// </summary>
-        /// <param name="clients">The connected workspaces (a snapshot; the viewer mutates concurrently).</param>
-        /// <param name="store">The probed quota.</param>
-        /// <param name="quotaRoutingEnabled">Whether quota routing is switched on.</param>
-        /// <param name="now">Current time.</param>
-        /// <param name="staleAfter">Maximum age of a usable snapshot.</param>
-        /// <param name="random">The random source, so tests can seed it.</param>
-        /// <returns>The selection, or null when <paramref name="clients"/> is empty.</returns>
+        /// <param name="clients">在线工作空间（快照；viewer 会并发变动）。</param>
+        /// <param name="store">探测到的额度。</param>
+        /// <param name="quotaRoutingEnabled">额度路由是否开启。</param>
+        /// <param name="now">当前时刻。</param>
+        /// <param name="staleAfter">可用快照的最大年龄。</param>
+        /// <param name="random">随机源，便于测试固定种子。</param>
+        /// <returns>选中结果；<paramref name="clients"/> 为空时返回 null。</returns>
         public static AiQuotaSelection? Pick(
             IReadOnlyList<IClient> clients,
             AiQuotaStore store,
@@ -48,7 +45,7 @@ namespace CYarpServer.Quota
                 return new AiQuotaSelection(clients[random.Next(clients.Count)], AiQuotaTier.Disabled, null);
             }
 
-            // First pass: classify every candidate and remember the highest usable quota.
+            // 第一趟：给每个候选分档，并记下最高的一档可用额度。
             var knownCount = 0;
             var unknownCount = 0;
             var highestRemaining = long.MinValue;
@@ -82,9 +79,8 @@ namespace CYarpServer.Quota
                 tier = AiQuotaTier.Unknown;
             }
 
-            // Second pass: a uniform reservoir pick within the winning tier. Candidates of the
-            // other tiers are skipped, so an exhausted or unknown workspace can never win over
-            // one that is known to have credits left.
+            // 第二趟：在胜出档位内做等概率蓄水池抽样。其它档位的候选会被跳过，
+            // 因此已耗尽或未知的工作空间，绝不会胜过已知还有额度的工作空间。
             IClient? selected = null;
             long? selectedRemaining = null;
             var seen = 0;
@@ -129,7 +125,7 @@ namespace CYarpServer.Quota
         }
 
         /// <summary>
-        /// Gets the remaining credits of a workspace when the probed value may still be used.
+        /// 在探测值仍可用时，取出某个工作空间的剩余额度。
         /// </summary>
         private static bool TryGetRemaining(
             AiQuotaStore store,

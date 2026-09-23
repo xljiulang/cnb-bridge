@@ -3,23 +3,21 @@ using System;
 namespace CYarpServer.Quota
 {
     /// <summary>
-    /// What the server knows about the AI quota of one workspace: the last quota it read
-    /// successfully (the organization's allowance and what is left of it), when that happened, and
-    /// the reason of the most recent failure.
+    /// 服务端关于某个工作空间 AI 额度的已知信息：最后一次成功读到的额度（组织总额度与
+    /// 其中剩余的部分）、读到的时间，以及最近一次失败的原因。
     /// </summary>
-    /// <param name="TotalMilliCredits">The organization's allowance for the month in milli-credits (free + paid + privilege); null until a probe succeeds.</param>
-    /// <param name="RemainingMilliCredits">Remaining credits in milli-credits (1000 = 1 credit); null until a probe succeeds.</param>
-    /// <param name="UpdatedAt">When the quota was last read successfully; null if that never happened.</param>
-    /// <param name="Error">Reason of the most recent failed probe; null after a success.</param>
+    /// <param name="TotalMilliCredits">该组织当月总额度，单位 milli-credit（免费 + 付费 + 特权）；探测成功前为 null。</param>
+    /// <param name="RemainingMilliCredits">剩余额度，单位 milli-credit（1000 = 1 credit）；探测成功前为 null。</param>
+    /// <param name="UpdatedAt">最后一次成功读到额度的时刻；从未成功过则为 null。</param>
+    /// <param name="Error">最近一次探测失败的原因；成功后为 null。</param>
     public sealed record AiQuotaSnapshot(long? TotalMilliCredits, long? RemainingMilliCredits, DateTimeOffset? UpdatedAt, string? Error)
     {
         /// <summary>
-        /// Gets whether this snapshot is too old to be trusted for routing. A snapshot that
-        /// never succeeded is always stale.
+        /// 获取该快照是否已旧到不能用于路由。从未成功过的快照恒为过期。
         /// </summary>
-        /// <param name="now">Current time.</param>
-        /// <param name="staleAfter">Maximum age of a usable snapshot.</param>
-        /// <returns>true when the snapshot has to be treated as unknown.</returns>
+        /// <param name="now">当前时刻。</param>
+        /// <param name="staleAfter">可用快照的最大年龄。</param>
+        /// <returns>当该快照必须按「未知」处理时返回 true。</returns>
         public bool IsStale(DateTimeOffset now, TimeSpan staleAfter)
         {
             if (this.UpdatedAt is not { } updatedAt)
@@ -31,14 +29,13 @@ namespace CYarpServer.Quota
         }
 
         /// <summary>
-        /// Tries to get the remaining credits for routing. Succeeds only for a value that is
-        /// known and fresh enough; a failed probe keeps the previous value but also its
-        /// timestamp, so an outdated value is reported as unknown instead of being reused.
+        /// 尝试取出可用于路由的剩余额度。只有已知且足够新的值才会成功；探测失败时保留上一次的
+        /// 值、但也保留它的时间戳，因此过期值会被报成未知，而不会被继续复用。
         /// </summary>
-        /// <param name="now">Current time.</param>
-        /// <param name="staleAfter">Maximum age of a usable snapshot.</param>
-        /// <param name="remainingMilliCredits">The remaining credits in milli-credits when the method returns true.</param>
-        /// <returns>true when a usable remaining credit value is available.</returns>
+        /// <param name="now">当前时刻。</param>
+        /// <param name="staleAfter">可用快照的最大年龄。</param>
+        /// <param name="remainingMilliCredits">方法返回 true 时，为剩余额度（单位 milli-credit）。</param>
+        /// <returns>存在可用的剩余额度时返回 true。</returns>
         public bool TryGetRemaining(DateTimeOffset now, TimeSpan staleAfter, out long remainingMilliCredits)
         {
             if (this.RemainingMilliCredits is { } remaining && this.IsStale(now, staleAfter) == false)

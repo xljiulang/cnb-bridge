@@ -5,11 +5,10 @@ using System.Diagnostics.CodeAnalysis;
 namespace CYarpServer.Quota
 {
     /// <summary>
-    /// In memory quota snapshots of every workspace that has been probed.
+    /// 所有被探测过的工作空间的额度快照，保存在内存里。
     /// <para>
-    /// A failed probe keeps the value of the last success together with its timestamp and only
-    /// records the reason, so a transient error can neither hide a healthy workspace nor make an
-    /// exhausted one look healthy.
+    /// 探测失败时保留上次成功的值及其时间戳，只记录失败原因，因此一次瞬时错误既不会让一个
+    /// 健康的工作空间消失，也不会让一个额度耗尽的工作空间看起来健康。
     /// </para>
     /// </summary>
     public sealed class AiQuotaStore
@@ -17,22 +16,22 @@ namespace CYarpServer.Quota
         private readonly ConcurrentDictionary<string, AiQuotaSnapshot> _snapshots = new(StringComparer.Ordinal);
 
         /// <summary>
-        /// Records a successful probe.
+        /// 记录一次成功的探测。
         /// </summary>
-        /// <param name="clientId">The workspace id (the CNB repo slug).</param>
-        /// <param name="totalMilliCredits">The organization's allowance for the month, in milli-credits.</param>
-        /// <param name="remainingMilliCredits">Remaining credits in milli-credits.</param>
-        /// <param name="now">When the quota was read.</param>
+        /// <param name="clientId">工作空间 id，即 CNB 仓库 slug。</param>
+        /// <param name="totalMilliCredits">该组织当月总额度，单位 milli-credit。</param>
+        /// <param name="remainingMilliCredits">剩余额度，单位 milli-credit。</param>
+        /// <param name="now">读到额度的时刻。</param>
         public void ReportSuccess(string clientId, long totalMilliCredits, long remainingMilliCredits, DateTimeOffset now)
         {
             this._snapshots[clientId] = new AiQuotaSnapshot(totalMilliCredits, remainingMilliCredits, now, null);
         }
 
         /// <summary>
-        /// Records a failed probe without discarding the value of the last success.
+        /// 记录一次失败的探测，且不丢弃上次成功的值。
         /// </summary>
-        /// <param name="clientId">The workspace id (the CNB repo slug).</param>
-        /// <param name="error">Reason of the failure.</param>
+        /// <param name="clientId">工作空间 id，即 CNB 仓库 slug。</param>
+        /// <param name="error">失败原因。</param>
         public void ReportFailure(string clientId, string error)
         {
             this._snapshots.AddOrUpdate(
@@ -42,11 +41,11 @@ namespace CYarpServer.Quota
         }
 
         /// <summary>
-        /// Tries to get the snapshot of a workspace.
+        /// 尝试取出某个工作空间的快照。
         /// </summary>
-        /// <param name="clientId">The workspace id (the CNB repo slug).</param>
-        /// <param name="snapshot">The snapshot when the method returns true.</param>
-        /// <returns>true when the workspace has been probed at least once.</returns>
+        /// <param name="clientId">工作空间 id，即 CNB 仓库 slug。</param>
+        /// <param name="snapshot">方法返回 true 时为该快照。</param>
+        /// <returns>该工作空间至少被探测过一次时返回 true。</returns>
         public bool TryGet(string clientId, [NotNullWhen(true)] out AiQuotaSnapshot? snapshot)
         {
             return this._snapshots.TryGetValue(clientId, out snapshot);

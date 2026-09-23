@@ -17,57 +17,50 @@ using System.Threading.Tasks;
 namespace CYarpServer.Forwarding
 {
     /// <summary>
-    /// Handlers of the public OpenAI-compatible surface. The routes live in
-    /// <see cref="CYarpServerHost"/> and come in two flavours:
+    /// 公网 OpenAI 兼容接口的处理器。路由在 <see cref="CYarpServerHost"/> 里注册，分两种形态：
     /// <list type="bullet">
-    /// <item>workspace-addressed: <c>/{org}/{repo}/v1/models</c> and
-    /// <c>/{org}/{repo}/v1/chat/completions</c> - the workspace id is the CNB repo slug, built
-    /// from the two route values, so no path parsing happens here;</item>
-    /// <item>bare (unified base_url): <c>GET /</c> lists the connected workspaces and their AI
-    /// quota,
-    /// <c>GET /v1/models</c> answers from configuration and
-    /// <c>POST /v1/chat/completions</c> picks the connected workspace with the most remaining
-    /// AI credits.</item>
+    /// <item>带工作空间前缀：<c>/{org}/{repo}/v1/models</c> 与
+    /// <c>/{org}/{repo}/v1/chat/completions</c> —— 工作空间 id 就是 CNB 仓库 slug，
+    /// 由两个路由参数拼成，因此这里不做任何路径解析；</item>
+    /// <item>裸路径（统一 base_url）：<c>GET /</c> 列出在线工作空间及其 AI 额度，
+    /// <c>GET /v1/models</c> 由配置应答，
+    /// <c>POST /v1/chat/completions</c> 挑选剩余 AI 额度最多的在线工作空间。</item>
     /// </list>
     /// </summary>
     public static partial class HttpForwardHandler
     {
         /// <summary>
-        /// Offset every timestamp of the response is rendered in (<see cref="ClientInfo.ConnectedAt"/>
-        /// and <see cref="ClientInfo.UpdatedAt"/>). Fixed on purpose: the host's local zone differs
-        /// between a Windows machine in UTC+8 and a minimal Linux image that defaults to UTC, so
-        /// following the host would make the same field mean different wall clocks per deployment.
+        /// 响应里所有时间戳统一使用的偏移（<see cref="ClientInfo.ConnectedAt"/> 与
+        /// <see cref="ClientInfo.UpdatedAt"/>）。刻意固定：主机本地时区在 UTC+8 的 Windows 机器
+        /// 与默认 UTC 的精简 Linux 镜像之间并不相同，若跟随主机，同一字段在不同部署下
+        /// 就会表示不同的墙上时间。
         /// </summary>
         private static readonly TimeSpan ResponseTimeOffset = TimeSpan.FromHours(8d);
 
         /// <summary>
-        /// Normalises a timestamp of this response to its fixed <c>+08:00</c> offset, keeping the
-        /// instant unchanged. Applied to every time the response carries, so a caller never has to
-        /// reconcile two different offsets in one payload.
+        /// 把响应里的时间戳规整到固定的 <c>+08:00</c> 偏移，同时保持时刻本身不变。
+        /// 响应携带的每个时间都会过这里，因此调用方不必在一条载荷里去调和两种偏移。
         /// <para>
-        /// Kept as its own method because the distinction it makes is invisible on a UTC+8 host and
-        /// only shows up elsewhere: <see cref="DateTimeOffset.ToOffset"/> moves the wall clock along
-        /// with the suffix (03:29Z becomes 11:29+08:00), whereas rebuilding the value from its
-        /// <c>DateTime</c> would relabel the same wall clock and silently shift the instant by the
-        /// difference between the host zone and the target zone.
+        /// 之所以单独抽成一个方法，是因为它区分的那件事实在 UTC+8 主机上看不出来，
+        /// 只有换到别处才暴露：<see cref="DateTimeOffset.ToOffset"/> 会连墙上时间一起搬
+        /// （03:29Z 变成 11:29+08:00），而用 <c>DateTime</c> 重建则只是给同一个墙上时间换标签，
+        /// 会悄悄把时刻平移掉「主机时区与目标时区之差」那么多。
         /// </para>
         /// </summary>
-        /// <param name="time">The timestamp, in whatever offset it carries.</param>
-        /// <returns>The same instant, expressed in +08:00.</returns>
+        /// <param name="time">时间戳，其偏移任意。</param>
+        /// <returns>同一个时刻，改以 +08:00 表示。</returns>
         internal static DateTimeOffset ToResponseTime(DateTimeOffset time)
         {
             return time.ToOffset(ResponseTimeOffset);
         }
 
         /// <summary>
-        /// <c>GET /</c> - the connected workspaces with the AI quota last read for each of them,
-        /// as a JSON array of <see cref="ClientInfo"/>, or <c>[]</c> when none is connected.
-        /// Answered locally and without a credential: it is a discovery helper, not a proxy
-        /// endpoint.
+        /// <c>GET /</c> —— 在线工作空间，以及各自最后一次读到的 AI 额度，
+        /// 以 <see cref="ClientInfo"/> 的 JSON 数组返回；无在线时为 <c>[]</c>。
+        /// 本地应答、无需凭据：它是发现用的辅助接口，不是代理端点。
         /// <para>
-        /// Only connected workspaces are listed, and the quota value is the last one the probe
-        /// managed to read: <see cref="ClientInfo.Stale"/> and <see cref="ClientInfo.Error"/>
-        /// describe whether routing still trusts it.
+        /// 只列在线的工作空间；额度值是探测最后一次成功读到的那个：
+        /// <see cref="ClientInfo.Stale"/> 与 <see cref="ClientInfo.Error"/> 说明路由是否仍然采信它。
         /// </para>
         /// </summary>
         public static Task HandleClientsAsync(HttpContext context)
@@ -87,15 +80,14 @@ namespace CYarpServer.Forwarding
         }
 
         /// <summary>
-        /// Projects one connected workspace and the quota probed for it into the response object.
-        /// The tunnel is live by definition here - only connected workspaces are listed - so the
-        /// connection is reported as the moment it was established.
+        /// 把一个在线工作空间及其探测到的额度投影成响应对象。到这里隧道按定义就是活的
+        /// —— 只有在线工作空间才会被列出 —— 因此「在线」这件事以隧道建立的时刻来表示。
         /// </summary>
-        /// <param name="client">The connected workspace.</param>
-        /// <param name="store">The probed quota.</param>
-        /// <param name="options">Probe settings, for the staleness threshold.</param>
-        /// <param name="now">Current time.</param>
-        /// <returns>The response object of that workspace.</returns>
+        /// <param name="client">在线工作空间。</param>
+        /// <param name="store">探测到的额度。</param>
+        /// <param name="options">探测配置，用于过期阈值。</param>
+        /// <param name="now">当前时刻。</param>
+        /// <returns>该工作空间的响应对象。</returns>
         internal static ClientInfo ToClientInfo(IClient client, AiQuotaStore store, AiQuotaOptions options, DateTimeOffset now)
         {
             var clientId = client.Id;
@@ -129,13 +121,12 @@ namespace CYarpServer.Forwarding
         }
 
         /// <summary>
-        /// <c>GET /{org}/{repo}/v1/models</c> - answered locally from configuration, never
-        /// forwarded. While that workspace's tunnel is down it answers 503, which is the
-        /// keepalive cron's "fake alive" signal; either way it costs no AI quota.
+        /// <c>GET /{org}/{repo}/v1/models</c> —— 由配置本地应答，从不转发。
+        /// 该工作空间隧道断开时返回 503，这正是保活 cron 用来识别「假死」的信号；
+        /// 两种情况都不消耗 AI 额度。
         /// <para>
-        /// The bare <c>GET /v1/models</c> shares this handler but deliberately does NOT look at
-        /// the tunnel state: without a workspace prefix it is a static "what can this server
-        /// serve" list, so it always answers 200.
+        /// 裸 <c>GET /v1/models</c> 复用同一个处理器，但刻意不检查隧道状态：没有工作空间前缀时，
+        /// 它是一份静态的「本服务端能提供什么」的列表，因此恒返回 200。
         /// </para>
         /// </summary>
         public static Task HandleModelsAsync(HttpContext context)
@@ -169,13 +160,12 @@ namespace CYarpServer.Forwarding
         }
 
         /// <summary>
-        /// <c>POST /{org}/{repo}/v1/chat/completions</c> - forwarded through the tunnel of that
-        /// workspace. The caller's credential (the public ApiKey) is dropped and replaced with
-        /// the CNB token the CYarp client reported during its handshake.
+        /// <c>POST /{org}/{repo}/v1/chat/completions</c> —— 经该工作空间的隧道转发。
+        /// 调用方的凭据（公网 ApiKey）会被丢弃，替换成 CYarp 客户端握手时报上来的 CNB token。
         /// <para>
-        /// The bare <c>POST /v1/chat/completions</c> shares this handler but has no workspace
-        /// prefix: it picks the connected workspace with the most remaining AI credits (see
-        /// <see cref="AiQuotaRouter.Pick"/>), and answers 502 when none is connected.
+        /// 裸 <c>POST /v1/chat/completions</c> 复用同一个处理器，但没有工作空间前缀：
+        /// 它挑选剩余 AI 额度最多的在线工作空间（见 <see cref="AiQuotaRouter.Pick"/>），
+        /// 无在线工作空间时返回 502。
         /// </para>
         /// </summary>
         public static async Task HandleChatAsync(HttpContext context)
@@ -217,7 +207,7 @@ namespace CYarpServer.Forwarding
                 LogRouted(logger, picked.Client.Id, picked.Tier, picked.RemainingMilliCredits, viewer.Count);
             }
 
-            // The CNB token travels in the handshake principal that CYarp keeps on IClient.User.
+            // CNB token 就放在 CYarp 保存在 IClient.User 上的握手身份里。
             var upstreamAuthorization = client.User.FindFirstValue(CnbClaims.UpstreamAuthorization);
 
             var stopwatch = Stopwatch.StartNew();
@@ -235,11 +225,11 @@ namespace CYarpServer.Forwarding
         }
 
         /// <summary>
-        /// Copies the connected workspaces into a list, so the routing decision works on a stable
-        /// set even though the viewer is a collection that mutates as tunnels come and go.
+        /// 把在线工作空间复制进一个列表，好让路由决策基于一个稳定的集合，
+        /// 因为 viewer 这个集合会随隧道的来去而变动。
         /// </summary>
-        /// <param name="viewer">The connected workspaces.</param>
-        /// <returns>The workspace snapshot.</returns>
+        /// <param name="viewer">在线工作空间。</param>
+        /// <returns>工作空间快照。</returns>
         private static IReadOnlyList<IClient> Snapshot(IClientViewer viewer)
         {
             var clients = new List<IClient>(viewer.Count);
@@ -252,8 +242,8 @@ namespace CYarpServer.Forwarding
         }
 
         /// <summary>
-        /// Reads the workspace id from the <c>/{org}/{repo}</c> route values. Returns false for
-        /// the bare (unified base_url) routes, which carry no workspace prefix.
+        /// 从 <c>/{org}/{repo}</c> 路由参数里读出工作空间 id。对裸（统一 base_url）路由返回
+        /// false，因为它们没有工作空间前缀。
         /// </summary>
         private static bool TryGetClientId(HttpContext context, out string clientId)
         {
