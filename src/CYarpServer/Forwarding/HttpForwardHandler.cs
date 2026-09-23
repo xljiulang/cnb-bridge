@@ -61,6 +61,7 @@ namespace CYarpServer.Forwarding
         /// <para>
         /// 只列在线的工作空间；额度值是探测最后一次成功读到的那个：
         /// <see cref="ClientInfo.Stale"/> 与 <see cref="ClientInfo.Error"/> 说明路由是否仍然采信它。
+        /// 列表按剩余额度倒序，额度多的在前。
         /// </para>
         /// </summary>
         public static Task HandleClientsAsync(HttpContext context)
@@ -69,12 +70,8 @@ namespace CYarpServer.Forwarding
             var viewer = services.GetRequiredService<IClientViewer>();
             var store = services.GetRequiredService<AiQuotaStore>();
             var options = services.GetRequiredService<IOptions<AiQuotaOptions>>().Value;
-            var now = DateTimeOffset.UtcNow;
 
-            var clients = viewer
-                .OrderBy(client => client.Id, StringComparer.Ordinal)
-                .Select(client => ToClientInfo(client, store, options, now))
-                .ToArray();
+            var clients = ProjectClients(Snapshot(viewer), store, options, DateTimeOffset.UtcNow);
 
             return context.Response.WriteAsJsonAsync(clients, CnbJsonContext.Default.ClientInfoArray);
         }
@@ -118,6 +115,39 @@ namespace CYarpServer.Forwarding
                 UpdatedAt = snapshot.UpdatedAt is { } updatedAt ? ToResponseTime(updatedAt) : null,
                 Error = snapshot.Error,
             };
+        }
+
+        /// <summary>
+        /// 把在线工作空间投影成 <c>GET /</c> 的响应对象，并按剩余额度倒序排列。
+        /// <para>
+        /// 顺序键是「剩余额度降序 → clientId 升序」。<see cref="decimal"/> 的默认比较器把
+        /// <c>null</c> 视为最小值，因此降序时从未读到额度（或只探测失败过）的那些自然落到最后
+        /// —— 这是刻意依赖比较器语义，并非漏了兜底。过期的旧读数不做特殊对待、照常按数值参与排序：
+        /// 这份列表表达的是「账面上的数字从大到小」，读数是否还值得采信由
+        /// <see cref="ClientInfo.Stale"/> 与 <see cref="ClientInfo.Error"/> 自行表达。
+        /// 额度为负（组织已超额）时自然排在 0 之后、<c>null</c> 之前。
+        /// </para>
+        /// <para>
+        /// 次键取 clientId 是为了输出稳定：同一组织下的多个工作空间额度必然相同，而「全部未知」时
+        /// 更是所有项都并列，没有次键的话这些常见情形的顺序将无法预期。
+        /// </para>
+        /// </summary>
+        /// <param name="clients">在线工作空间。</param>
+        /// <param name="store">探测到的额度。</param>
+        /// <param name="options">探测配置，用于过期阈值。</param>
+        /// <param name="now">当前时刻。</param>
+        /// <returns>排序后的响应对象数组。</returns>
+        internal static ClientInfo[] ProjectClients(
+            IReadOnlyList<IClient> clients,
+            AiQuotaStore store,
+            AiQuotaOptions options,
+            DateTimeOffset now)
+        {
+            return clients
+                .Select(client => ToClientInfo(client, store, options, now))
+                .OrderByDescending(client => client.RemainingCredits)
+                .ThenBy(client => client.ClientId, StringComparer.Ordinal)
+                .ToArray();
         }
 
         /// <summary>

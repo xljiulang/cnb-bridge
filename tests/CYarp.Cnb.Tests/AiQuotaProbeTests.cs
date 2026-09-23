@@ -202,5 +202,34 @@ namespace CYarp.Cnb.Tests
                 (DateTimeOffset.UtcNow - connectedAt).Duration() < TimeSpan.FromMinutes(1d),
                 $"connectedAt {connectedAt:O} should be the time this test's tunnel was established");
         }
+
+        [Fact]
+        public async Task ClientList_IsOrderedByRemainingCreditsDescending()
+        {
+            // The workspace with the smaller id gets the smaller quota, so an accidental
+            // clientId-ordered list would produce the opposite order: only the new sort can pass.
+            this.Upstream.SetQuota("orgA", totalMilliCredits: 1_000L, usedMilliCredits: 0L);
+            this.Upstream.SetQuota("orgB", totalMilliCredits: 900_000L, usedMilliCredits: 0L);
+
+            await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
+            await this.ConnectAsync("orgB/repoB", "/orgB/repoB/-/ai", "cnb-token-B");
+            await this.WaitForQuotaAsync("orgA/repoA");
+            await this.WaitForQuotaAsync("orgB/repoB");
+
+            using var response = await this.GetAsync("/", apiKey: null);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+            using var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var entries = payload.RootElement.EnumerateArray().ToArray();
+
+            Assert.Equal(2, entries.Length);
+            Assert.Equal("orgB/repoB", entries[0].GetProperty("clientId").GetString());
+            Assert.Equal("orgA/repoA", entries[1].GetProperty("clientId").GetString());
+
+            // The order follows the numbers, not the ids.
+            Assert.True(
+                entries[0].GetProperty("remainingCredits").GetDecimal() > entries[1].GetProperty("remainingCredits").GetDecimal(),
+                "the first entry should hold the larger remaining quota");
+        }
     }
 }

@@ -207,7 +207,9 @@ namespace CYarp.Cnb.Tests
 
                 // Objects, not ids: this list carries the probed AI quota of every workspace now.
                 // The quota itself is covered by the AI quota tests; here only the shape and the
-                // ordering matter.
+                // ordering matter. Neither workspace has been probed in this test, so both quotas
+                // are unknown and the tie falls back to the clientId order - which is why orgA
+                // comes first rather than by any luck of the quota sort.
                 var body = await both.Content.ReadAsStringAsync();
                 Assert.StartsWith("""[{"clientId":"orgA/repoA","connectedAt":""", body);
                 Assert.Contains("""{"clientId":"orgB/repoB","connectedAt":""", body);

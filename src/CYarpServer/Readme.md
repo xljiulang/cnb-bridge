@@ -175,6 +175,8 @@ curl -i http://<你的域名或IP>/<org>/<repo>/v1/models  # 某个工作空间�
 `totalCredits` 是组织当月总额度、`remainingCredits` 是剩余额度（单位都是 credit，已用 = 两者之差）。
 `remainingCredits` 为 `null` 说明服务端还没读到额度（`stale` 会是 `true`，`error` 里是原因）。
 两个时间字段都固定用 **`+08:00`** 输出，不跟随主机时区。
+该数组**按剩余额度倒序**：额度多的在前，`remainingCredits` 为 `null` 的排最后，并列时按 `clientId` 升序；
+这只是列表顺序，`stale` 的旧值仍按数字参与排序。
 额度是经**该工作空间自己的隧道**向 `api.cnb.cool` 读的（`/{org}/-/charge/quota` 与 `/-/charge/volume`），
 因此工作空间的 `CNB_TOKEN` 需要有 `group-resource:r` 权限；没有该权限时读不到，`GET /` 里会显示 `403`，
 路由退回随机——功能不受影响。详见第 6 节的接口说明。

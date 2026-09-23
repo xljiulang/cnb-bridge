@@ -152,6 +152,8 @@ FIXED_URL: "http://ai.example.com"
 > `GET /` 里的 `connectedAt` 是**当前这条隧道**建立的时刻（`+08:00`，重连后刷新），
 > 它来回跳说明本工作空间的隧道在反复重建；`updatedAt` 是额度读数的时间，同一个 `+08:00` 偏移。
 > `totalCredits` 是该组织当月总额度、`remainingCredits` 是剩余，已用 = 两者之差（单位 credit）。
+> 该数组按**剩余额度倒序**排列（额度多的在前，读不到额度的排最后，并列按 clientId 升序），
+> 所以谁在前面一眼就能看出谁剩得多。
 > 2026-09 实测：工作空间里的 `CNB_TOKEN` **有** `group-resource:r` 权限，两个接口都返回 `200`
 > （用 `bash scripts/verify-endpoint.sh` 第 5 节可以自己复现，它会打印完整响应体并算出剩余额度）。
 > 万一读不到（接口 401/403、隧道抖动、超时），`GET /` 里该工作空间的 `remainingCredits` 是 `null`
