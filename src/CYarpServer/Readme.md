@@ -112,8 +112,9 @@ chmod +x /opt/cyarp/CYarpServer
 
 `CYarpOptions` 的生效值会在启动日志里回显（`CYarp options in effect: ...`）；如果这里与文件不一致，说明配置没被读到。
 
-`AiQuota` 是**可选**的：整段删掉就用默认值（即开启、2 分钟一轮）。服务端会在启动后立刻探测一次，
-之后每个 `Interval` 一轮，日志里能看到 `AI quota of workspace '...' (organization ...): N milli-credits remaining`；
+`AiQuota` 是**可选**的：整段删掉就用默认值（即开启、2 分钟一轮）。探测有两个触发源：**工作空间一连上就立刻探一次**
+（经由 CYarp 的客户端状态监听），以及启动后立刻一轮 + 之后每个 `Interval` 一轮的节拍。
+日志里能看到 `AI quota of workspace '...' (organization ...): N milli-credits remaining`；
 读不到时是 `AI quota probe of workspace '...' failed: ...`（**不影响转发**，只是该工作空间在路由里算「未知」）。
 一轮是**顺序**探所有工作空间、每个最多占 `Timeout`，所以最坏耗时约为「工作空间数 × 10s」；探测漏拍不补跑，
 超时只表现为下一轮被推迟（当前规模下远小于 2 分钟）。
@@ -318,7 +319,7 @@ curl -s -H "Authorization: Bearer $CNB_TOKEN" -H 'Accept: application/vnd.cnb.ap
 | `/{org}/{repo}/v1/models` 返回 `503` | 服务端活着但该工作空间的隧道断了（假死） | 工作空间的保活 cron 会自动 `stop + start`；也可手动重启工作空间 |
 | 调用返回 `404` | 路径形态不对：已发布的只有 `/{org}/{repo}/v1/models`、`/{org}/{repo}/v1/chat/completions`、`GET /`、`GET /v1/models`、`POST /v1/chat/completions` | 单段前缀（如 `org~repo`）、三段前缀、其它 `/v1/*` 都是 404；想要"不指定工作空间"就用裸 `/v1/chat/completions` |
 | 裸 `/v1/chat/completions` 返回 `502` | 当前没有任何工作空间在线（无可挑选的候选） | `curl http://<你的域名>/` 看在线列表；确认工作空间已启动且隧道建立 |
-| `GET /` 里某个工作空间的 `remainingCredits` 一直是 `null` | 服务端读不到额度：`error` 里会写明原因（`401/403` = 该 `CNB_TOKEN` 无 `group-resource:r` 权限；`403/404` = 仓库在子组织下；超时 = 隧道慢或 `AiQuota:Timeout` 太小）；也可能是刚连上还没到下一个探测周期（最多等一个 `Interval`） | 用 `sudo ./CYarpServer logs filter=AI` 看探测日志；在工作空间里跑 `scripts/verify-endpoint.sh` 第 5 节直连验证权限。**这是退化不是故障**：chat 照常可用，只是不做额度优选 |
+| `GET /` 里某个工作空间的 `remainingCredits` 一直是 `null` | 服务端读不到额度：`error` 里会写明原因（`401/403` = 该 `CNB_TOKEN` 无 `group-resource:r` 权限；`403/404` = 仓库在子组织下；超时 = 隧道慢或 `AiQuota:Timeout` 太小）。工作空间一连上就会立刻探一次，因此正常情况不该长期为空——长期为空只能是每次都失败 | 用 `sudo ./CYarpServer logs filter=AI` 看探测日志；在工作空间里跑 `scripts/verify-endpoint.sh` 第 5 节直连验证权限。**这是退化不是故障**：chat 照常可用，只是不做额度优选 |
 | 想确认选路是否按额度生效 | 日志级别是 `Information` 时每条裸 chat 会打印 `Routed to workspace '...' (Known/Unknown/Exhausted, ... milli-credits remaining) out of N connected` | `Known` = 按额度最大值挑；`Unknown` = 该轮没有可用额度、退回随机；`Disabled` = `AiQuota:Enabled=false` |
 | 对话请求返回 `301 Moved Permanently` 且 `Location: https://cnb.cool`（响应体是一小段 HTML） | 服务端把**调用方的 Host**（你的公网域名/IP）转发给了上游；CNB 边缘按 Host 路由，认不出就重定向到官网。这是 2026-09 之前服务端版本的 bug | 更新服务端二进制到包含 Host 修复的版本（`CnbAiTransformer` 里清掉转发 Host）并重启服务；`/v1/models` 这类本地应答不受影响，所以「models 通、对话不通」正是这个症状 |
 | 上游返回 401/412 之类 | 上游鉴权/网络策略 | 412 表示请求不是从 CNB 工作空间内发出；401 多半是 `CNB_TOKEN` 过期，重启工作空间让平台重铸 |

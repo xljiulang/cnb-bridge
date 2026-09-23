@@ -6,6 +6,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
@@ -30,6 +31,11 @@ namespace CYarpServer.Quota
     /// 这里的一切都不允许影响隧道本身：失败只会被记进快照的错误字段，并保留上一次的值，
     /// 因此最坏的情况也不过是某个工作空间的额度一直是未知。
     /// </para>
+    /// <para>
+    /// 探测有两个触发源：一是「启动后立刻 + 每 <see cref="AiQuotaOptions.Interval"/> 一轮」的节拍，
+    /// 二是 <see cref="AiQuotaProbeSignal"/> 送来的「某工作空间刚上线」事件。后者让新连上的工作空间
+    /// 不必等一整个周期就能出现在 <c>GET /</c> 里并参与额度优选；前者继续作为兜底。
+    /// </para>
     /// </summary>
     public sealed partial class AiQuotaProbeService : BackgroundService
     {
@@ -40,31 +46,45 @@ namespace CYarpServer.Quota
 
         private readonly IClientViewer _viewer;
         private readonly AiQuotaStore _store;
+        private readonly AiQuotaProbeSignal _signal;
         private readonly AiQuotaOptions _options;
         private readonly ILogger<AiQuotaProbeService> _logger;
+
+        /// <summary>
+        /// 正在被探测的工作空间 id。节拍轮次与上线事件可能同时盯上同一个工作空间，若不去重就会
+        /// 白占两条隧道（<c>MaxTunnelsPerClient</c> 默认 20）。键的存在即「正在探测」。
+        /// </summary>
+        private readonly ConcurrentDictionary<string, byte> _probing = new(StringComparer.Ordinal);
 
         /// <summary>
         /// 创建探测器。
         /// </summary>
         /// <param name="viewer">在线工作空间。</param>
         /// <param name="store">存放读数的地方，供路由与 <c>GET /</c> 使用。</param>
+        /// <param name="signal">工作空间上线事件。</param>
         /// <param name="options">探测配置。</param>
         /// <param name="logger">日志组件。</param>
         public AiQuotaProbeService(
             IClientViewer viewer,
             AiQuotaStore store,
+            AiQuotaProbeSignal signal,
             IOptions<AiQuotaOptions> options,
             ILogger<AiQuotaProbeService> logger)
         {
             this._viewer = viewer;
             this._store = store;
+            this._signal = signal;
             this._options = options.Value;
             this._logger = logger;
         }
 
         /// <summary>
-        /// 探测循环：启动后立刻跑一轮，之后每个 <see cref="AiQuotaOptions.Interval"/> 一轮。
-        /// 下一拍之前会先把当前轮 await 完，因此两轮永不重叠，慢的工作空间也不会堆积任务。
+        /// 跑两条互不干扰的循环：节拍循环（启动后立刻一轮 + 每个
+        /// <see cref="AiQuotaOptions.Interval"/> 一轮）与上线事件循环。
+        /// <para>
+        /// 刻意分成两条而不是合成一条：若共用一条，持续到来的上线事件会把节拍轮次饿死，
+        /// 反过来一次慢的节拍轮次也会推迟事件探测。两条循环各管一件事，谁也拖不住谁。
+        /// </para>
         /// </summary>
         /// <param name="stoppingToken">主机关闭时触发。</param>
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -81,6 +101,18 @@ namespace CYarpServer.Quota
                 return;
             }
 
+            await Task.WhenAll(
+                this.RunIntervalLoopAsync(stoppingToken),
+                this.ConsumeConnectedSignalsAsync(stoppingToken));
+        }
+
+        /// <summary>
+        /// 节拍循环：启动后立刻跑一轮，之后每个 <see cref="AiQuotaOptions.Interval"/> 一轮。
+        /// 下一拍之前会先把当前轮 await 完，因此两轮永不重叠，慢的工作空间也不会堆积任务。
+        /// </summary>
+        /// <param name="stoppingToken">主机关闭时触发。</param>
+        private async Task RunIntervalLoopAsync(CancellationToken stoppingToken)
+        {
             try
             {
                 using var timer = new PeriodicTimer(this._options.Interval);
@@ -89,6 +121,45 @@ namespace CYarpServer.Quota
                 while (await timer.WaitForNextTickAsync(stoppingToken))
                 {
                     await this.ProbeAllAsync(stoppingToken);
+                }
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                // 正在关闭。
+            }
+        }
+
+        /// <summary>
+        /// 上线事件循环：某个工作空间刚连上，就立刻探它一次，好让额度立即可见而不必等一整个周期。
+        /// <para>
+        /// 顺序处理，与节拍轮次口径一致（同组织的工作空间共享额度，没必要并发压同一端点）。
+        /// 某个慢探测会推迟后面的事件探测，但既不影响隧道转发，也不会堵住 CYarp 的状态管道
+        /// —— 投递与探测是分开的，这正是 <see cref="AiQuotaProbeSignal"/> 存在的理由。
+        /// </para>
+        /// </summary>
+        /// <param name="stoppingToken">主机关闭时触发。</param>
+        private async Task ConsumeConnectedSignalsAsync(CancellationToken stoppingToken)
+        {
+            try
+            {
+                await foreach (var clientId in this._signal.ReadAllAsync(stoppingToken))
+                {
+                    // 与节拍循环同口径：关掉探测时事件也不该触发任何动作。
+                    if (this._options.Enabled == false)
+                    {
+                        return;
+                    }
+
+                    // 事件里只有 id，真实实例得回 viewer 取：CYarp 交给状态监听的是
+                    // ReadOnlyClient 包装，它建不了隧道。查不到说明客户端已经断线或被替换。
+                    if (this._viewer.TryGetValue(clientId, out var client) == false)
+                    {
+                        LogProbeSkipped(this._logger, clientId, "the workspace is no longer connected");
+                        continue;
+                    }
+
+                    LogProbeOnConnected(this._logger, clientId);
+                    await this.ProbeOneAsync(client, stoppingToken);
                 }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -122,6 +193,10 @@ namespace CYarpServer.Quota
 
         /// <summary>
         /// 探测一个工作空间。所有失败都记进快照而不是抛出去，因此单个坏掉的工作空间不会中断整轮。
+        /// <para>
+        /// 若同一个工作空间已经在被探测（节拍轮次与上线事件撞上），本次直接跳过：与其白占两条隧道，
+        /// 不如让先来的那次把结果写进快照。
+        /// </para>
         /// </summary>
         /// <param name="client">要探测的工作空间。</param>
         /// <param name="cancellationToken">主机关闭时触发。</param>
@@ -129,6 +204,30 @@ namespace CYarpServer.Quota
         {
             var clientId = client.Id;
 
+            if (this._probing.TryAdd(clientId, 0) == false)
+            {
+                LogProbeSkipped(this._logger, clientId, "a probe of this workspace is already running");
+                return;
+            }
+
+            try
+            {
+                await this.ProbeOneCoreAsync(client, clientId, cancellationToken);
+            }
+            finally
+            {
+                this._probing.TryRemove(clientId, out _);
+            }
+        }
+
+        /// <summary>
+        /// 探测的实际内容。调用前必须已用 <see cref="ProbeOneAsync"/> 取得该工作空间的探测权。
+        /// </summary>
+        /// <param name="client">要探测的工作空间。</param>
+        /// <param name="clientId">该工作空间的 id（调用方已取出，避免重复读取）。</param>
+        /// <param name="cancellationToken">主机关闭时触发。</param>
+        private async Task ProbeOneCoreAsync(IClient client, string clientId, CancellationToken cancellationToken)
+        {
             // 组织名就是仓库 slug 的第一段。不含斜杠的 client id（单工作空间的默认值）
             // 没有组织可言，也就无从问起。
             var separator = clientId.IndexOf('/');
@@ -311,6 +410,9 @@ namespace CYarpServer.Quota
 
         [LoggerMessage(Level = LogLevel.Debug, Message = "AI quota probe skipped workspace '{clientId}': {reason}")]
         private static partial void LogProbeSkipped(ILogger logger, string clientId, string reason);
+
+        [LoggerMessage(Level = LogLevel.Debug, Message = "AI quota probe of workspace '{clientId}' triggered by its connect event")]
+        private static partial void LogProbeOnConnected(ILogger logger, string clientId);
 
         [LoggerMessage(Level = LogLevel.Information, Message = "AI quota of workspace '{clientId}' (organization {organization}): {remainingMilliCredits} of {totalMilliCredits} milli-credits remaining")]
         private static partial void LogProbeSucceeded(ILogger logger, string clientId, string organization, long remainingMilliCredits, long totalMilliCredits);

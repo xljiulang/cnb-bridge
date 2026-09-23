@@ -188,10 +188,12 @@ namespace CYarp.Cnb.Tests
         /// Waits until the server has read the quota of a workspace.
         /// </summary>
         /// <param name="clientId">The workspace id.</param>
+        /// <param name="timeout">How long to wait. The default suits the periodic probe; a test that
+        /// asserts an immediate (connect-triggered) probe passes a short one on purpose.</param>
         /// <returns>The snapshot that carries the reading.</returns>
-        protected async Task<AiQuotaSnapshot> WaitForQuotaAsync(string clientId)
+        protected async Task<AiQuotaSnapshot> WaitForQuotaAsync(string clientId, TimeSpan? timeout = null)
         {
-            var deadline = DateTime.UtcNow.AddSeconds(30d);
+            var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(30d));
 
             while (DateTime.UtcNow < deadline)
             {
@@ -203,7 +205,7 @@ namespace CYarp.Cnb.Tests
                 await Task.Delay(50);
             }
 
-            Assert.Fail($"The quota of workspace '{clientId}' was expected to be read within 30s.");
+            Assert.Fail($"The quota of workspace '{clientId}' was expected to be read within {timeout ?? TimeSpan.FromSeconds(30d)}.");
             return null!;
         }
 

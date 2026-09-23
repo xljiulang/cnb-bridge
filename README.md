@@ -140,8 +140,8 @@ sudo ./CYarpServer stop            # 停止并删除服务
 > `CYarp options in effect: KeepAlive=True, KeepAliveInterval=00:00:40, MaxTunnelsPerClient=20, CreationTimeout=00:00:10`。
 > 升级 CYarp 或调整裁剪设置后，先看这一行确认配置确实生效（原因见第七节）。
 
-`AiQuota` 控制**按剩余额度择优选路**（见第五节）：服务端每 `Interval` 经各工作空间自己的隧道
-去读一次 CNB 组织额度，裸 `POST /v1/chat/completions` 就发给剩余额度最多的那个工作空间。
+`AiQuota` 控制**按剩余额度择优选路**（见第五节）：服务端**在每个工作空间一连上时就立刻**经它自己的隧道
+读一次 CNB 组织额度，之后每 `Interval` 再刷新一次，裸 `POST /v1/chat/completions` 就发给剩余额度最多的那个工作空间。
 `Enabled` 为 `false`（或额度一直读不到）时，行为回到本特性之前的**等概率随机**。
 
 ### 以后要加 HTTPS
@@ -241,8 +241,10 @@ curl http://ai.example.com/v1/chat/completions \
 
 ### 剩余额度从哪来 / `GET /` 的形状
 
-服务端起一个后台任务（`AiQuota:Interval`，默认 2 分钟），对每个在线工作空间**经它自己的隧道**
-（也就是服务工作端向工作空间要一条 TCP 隧道，再在隧道里发普通 HTTPS 请求）读一次 CNB 组织额度：
+服务端起一个后台任务，对每个在线工作空间**经它自己的隧道**
+（也就是服务工作端向工作空间要一条 TCP 隧道，再在隧道里发普通 HTTPS 请求）读一次 CNB 组织额度。
+触发时机有两个：**工作空间一连上就立刻探一次**（借 CYarp 的客户端状态监听），之后每 `AiQuota:Interval`
+（默认 2 分钟）再刷新一轮：
 
 ```
 GET https://api.cnb.cool/{org}/-/charge/quota    → credit_in_milli.total

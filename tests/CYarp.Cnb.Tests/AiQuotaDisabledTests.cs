@@ -20,7 +20,9 @@ namespace CYarp.Cnb.Tests
             await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
             await this.ConnectAsync("orgB/repoB", "/orgB/repoB/-/ai", "cnb-token-B");
 
-            // Give the (absent) probe ample time to leave a trace.
+            // Connecting now raises a probe signal, so this also covers "disabled means no probe on
+            // connect": the events are delivered, yet nothing is read. Give them ample time to leave
+            // a trace if they were ever acted upon.
             await Task.Delay(2_000);
             Assert.False(this.Store.TryGet("orgA/repoA", out _));
             Assert.False(this.Store.TryGet("orgB/repoB", out _));

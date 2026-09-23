@@ -80,7 +80,12 @@ namespace CYarpServer
             // （实测：Node=...、Protocols=All、KeepAliveInterval=00:00:50、MaxTunnels=10，
             // 而不是配置里的值）。在我们自己的项目里调用 Configure<CYarpOptions>，
             // 生成器就会生成绑定代码，每个值都能绑上。
-            builder.Services.AddCYarp();
+            // 状态监听只为「工作空间上线」这个事件：AddClientStateStorage 一旦注册，
+            // ClientStateChannel 就会开始把每次上下线投递给它（内含一个 ReadOnlyClient 包装），
+            // 这点固定开销换来新连上的工作空间不必等一整个探测周期。
+            builder.Services
+                .AddCYarp()
+                .AddClientStateStorage<AiQuotaProbeTrigger>();
             builder.Services.Configure<CYarpOptions>(builder.Configuration.GetSection(nameof(CYarpOptions)));
 
             // CYarp 握手用请求头携带工作空间身份与 CNB token；
@@ -96,6 +101,7 @@ namespace CYarpServer
             // 两者共用这个 store。
             builder.Services.Configure<AiQuotaOptions>(builder.Configuration.GetSection(AiQuotaOptions.SectionName));
             builder.Services.AddSingleton<AiQuotaStore>();
+            builder.Services.AddSingleton<AiQuotaProbeSignal>();
             builder.Services.AddHostedService<AiQuotaProbeService>();
 
             var app = builder.Build();
