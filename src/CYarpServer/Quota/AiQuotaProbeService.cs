@@ -1,4 +1,7 @@
 using CYarp.Server;
+using CYarpServer.Authentication;
+using CYarpServer.Contracts;
+using CYarpServer.Options;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -13,7 +16,7 @@ using System.Text.Json.Serialization.Metadata;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace CYarpServer
+namespace CYarpServer.Quota
 {
     /// <summary>
     /// Reads the CNB AI quota of every connected workspace, periodically.

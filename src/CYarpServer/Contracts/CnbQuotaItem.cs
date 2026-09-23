@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace CYarpServer
+namespace CYarpServer.Contracts
 {
     /// <summary>
     /// A quota item of the CNB charge API: the free allowance and the total (free + paid +

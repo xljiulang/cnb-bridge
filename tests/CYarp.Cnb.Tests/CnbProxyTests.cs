@@ -1,6 +1,7 @@
 using CYarp.Client;
 using CYarp.Server;
 using CYarpServer;
+using CYarpServer.Authentication;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using System;

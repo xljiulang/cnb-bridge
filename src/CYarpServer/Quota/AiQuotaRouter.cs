@@ -2,7 +2,7 @@ using CYarp.Server;
 using System;
 using System.Collections.Generic;
 
-namespace CYarpServer
+namespace CYarpServer.Quota
 {
     /// <summary>
     /// Picks the workspace of a bare (unified base_url) chat request from the quota the server

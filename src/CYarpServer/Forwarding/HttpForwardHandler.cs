@@ -1,4 +1,8 @@
 using CYarp.Server;
+using CYarpServer.Authentication;
+using CYarpServer.Contracts;
+using CYarpServer.Options;
+using CYarpServer.Quota;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -10,7 +14,7 @@ using System.Linq;
 using System.Security.Claims;
 using System.Threading.Tasks;
 
-namespace CYarpServer
+namespace CYarpServer.Forwarding
 {
     /// <summary>
     /// Handlers of the public OpenAI-compatible surface. The routes live in

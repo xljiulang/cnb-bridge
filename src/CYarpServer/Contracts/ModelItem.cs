@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace CYarpServer
+namespace CYarpServer.Contracts
 {
     /// <summary>
     /// A single entry of <see cref="ModelListResponse"/>.

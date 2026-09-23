@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace CYarpServer
+namespace CYarpServer.Contracts
 {
     /// <summary>
     /// Source generated JSON metadata. Required for Native AOT: reflection based

@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace CYarpServer
+namespace CYarpServer.Contracts
 {
     /// <summary>
     /// The part of <c>GET /{org}/-/charge/quota</c> that this server reads: the organization's

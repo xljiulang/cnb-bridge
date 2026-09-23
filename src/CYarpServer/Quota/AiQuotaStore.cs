@@ -2,7 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 
-namespace CYarpServer
+namespace CYarpServer.Quota
 {
     /// <summary>
     /// In memory quota snapshots of every workspace that has been probed.

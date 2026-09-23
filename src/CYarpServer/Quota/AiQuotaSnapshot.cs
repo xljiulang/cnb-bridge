@@ -1,6 +1,6 @@
 using System;
 
-namespace CYarpServer
+namespace CYarpServer.Quota
 {
     /// <summary>
     /// What the server knows about the AI quota of one workspace: the last quota it read

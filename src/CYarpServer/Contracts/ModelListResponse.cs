@@ -1,4 +1,4 @@
-namespace CYarpServer
+namespace CYarpServer.Contracts
 {
     /// <summary>
     /// Response of the locally served /v1/models endpoint.

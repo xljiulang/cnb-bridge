@@ -1,4 +1,4 @@
-namespace CYarpServer
+namespace CYarpServer.Authentication
 {
     /// <summary>
     /// Claims carried by the CYarp tunnel handshake principal. CYarp stores the

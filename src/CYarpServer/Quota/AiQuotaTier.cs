@@ -1,4 +1,4 @@
-namespace CYarpServer
+namespace CYarpServer.Quota
 {
     /// <summary>
     /// The rule that decided which workspace serves a bare (unified base_url) chat request.

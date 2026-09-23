@@ -1,6 +1,6 @@
 using CYarp.Server;
 
-namespace CYarpServer
+namespace CYarpServer.Quota
 {
     /// <summary>
     /// The workspace a bare chat request was routed to, the rule that picked it, and the

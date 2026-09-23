@@ -6,7 +6,7 @@ using System.Security.Claims;
 using System.Text.Encodings.Web;
 using System.Threading.Tasks;
 
-namespace CYarpServer
+namespace CYarpServer.Authentication
 {
     /// <summary>
     /// Authentication scheme of the CYarp client handshake.

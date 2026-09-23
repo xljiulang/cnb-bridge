@@ -1,6 +1,6 @@
 using System;
 
-namespace CYarpServer
+namespace CYarpServer.Contracts
 {
     /// <summary>
     /// One entry of the <c>GET /</c> response: a connected workspace and what the server knows

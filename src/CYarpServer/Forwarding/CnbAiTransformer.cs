@@ -6,7 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Yarp.ReverseProxy.Forwarder;
 
-namespace CYarpServer
+namespace CYarpServer.Forwarding
 {
     /// <summary>
     /// Rewrites the public request into the CNB AI request:

@@ -1,4 +1,7 @@
 using CYarpServer;
+using CYarpServer.Forwarding;
+using CYarpServer.Options;
+using CYarpServer.Quota;
 using System;
 using Xunit;
 

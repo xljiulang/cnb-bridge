@@ -1,6 +1,6 @@
 using System;
 
-namespace CYarpServer
+namespace CYarpServer.Options
 {
     /// <summary>
     /// Options of the AI quota probe. The server periodically reads the CNB organization quota

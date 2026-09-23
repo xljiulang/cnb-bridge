@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace CYarpServer
+namespace CYarpServer.Contracts
 {
     /// <summary>
     /// The parts of <c>GET /{org}/-/charge/volume</c> that this server reads: how many credits

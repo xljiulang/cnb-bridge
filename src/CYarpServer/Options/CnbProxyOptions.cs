@@ -1,4 +1,4 @@
-namespace CYarpServer
+namespace CYarpServer.Options
 {
     /// <summary>
     /// Options of the public OpenAI-compatible surface published by this server.
