@@ -6,7 +6,8 @@ namespace CYarpServer.Options
     /// AI 额度探测的配置。
     /// <para>
     /// 服务端周期性地经每个在线工作空间自己的隧道读取其 CNB 组织额度，
-    /// 裸 <c>POST /v1/chat/completions</c> 随后优先选择剩余额度最多的工作空间。
+    /// 裸 <c>POST /v1/chat/completions</c> 随后在剩余额度超过
+    /// <see cref="MinRemainingCredits"/> 的那些工作空间之间随机挑选。
     /// </para>
     /// </summary>
     public sealed class AiQuotaOptions
@@ -35,8 +36,22 @@ namespace CYarpServer.Options
         public TimeSpan StaleAfter { get; set; } = TimeSpan.FromMinutes(6d);
 
         /// <summary>
+        /// 获取或设置裸 chat 选路要求的最小剩余额度，单位 credit，默认 1 —— 判定为严格大于，
+        /// 因此剩余恰好等于该值的工作空间不参与择优，只会留在「额度不足」的兜底档。
+        /// 设为 0 即「只要还有正额度就算可用」。
+        /// </summary>
+        public decimal MinRemainingCredits { get; set; } = 1m;
+
+        /// <summary>
         /// 获取或设置单个工作空间那一轮探测的超时（两个 charge 请求合计）。
         /// </summary>
         public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(10d);
+
+        /// <summary>
+        /// 获取 <see cref="MinRemainingCredits"/> 换算成 milli-credit 后的阈值，用于和快照里的
+        /// 原始读数直接比较（1000 milli-credit = 1 credit）。换算只在这里做一次，
+        /// 避免选路与文档各写一份。
+        /// </summary>
+        public long MinRemainingMilliCredits => (long)(this.MinRemainingCredits * 1000m);
     }
 }

@@ -147,7 +147,7 @@ FIXED_URL: "http://47.107.49.72"
 | `POST /{org}/{repo}/v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；经隧道转发，上游不支持非流式（必须 `stream:true`） |
 | `GET /` | **免鉴权**：在线工作空间的**对象数组**，每个对象含 `clientId`、`connectedAt`、`totalCredits`、`remainingCredits`、`stale`、`updatedAt`、`error`；无在线时为 `[]` |
 | `GET /v1/models` | **免鉴权**：`ProxyModels` 配置的模型列表；**不检查在线状态**（恒 `200`），与带前缀版本的「离线 503」刻意区分 |
-| `POST /v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；在当前在线的工作空间里挑**剩余 AI 额度最多**的那个转发（额度未知时退回随机）；无在线则 `502` |
+| `POST /v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；在**剩余 AI 额度超过阈值**（`AiQuota:MinRemainingCredits`，默认 1 credit）的在线工作空间里随机挑一个转发；没有这样的工作空间时退回随机；无在线则 `502` |
 | 其它路径（单段/三段前缀、`/v1/embeddings`…） | `404` |
 | 方法不匹配（如 `POST .../v1/models`） | `405` |
 | chat 的 `ApiKey` 缺失/错误 | `401` |
@@ -157,7 +157,7 @@ FIXED_URL: "http://47.107.49.72"
 
 调用方有两种接法：
 
-- **统一 base_url**（不必知道 workpace slug）：`base_url = <base>/v1`、`api_key = <ApiKey>`。请求会发给剩余额度最多的那个在线工作空间；额度读不到时退回随机。
+- **统一 base_url**（不必知道 workpace slug）：`base_url = <base>/v1`、`api_key = <ApiKey>`。请求会发给某个剩余额度超过阈值的在线工作空间（额度充足的那些一起分摊流量）；额度读不到时退回随机。
 - **固定工作空间**：`base_url = <base>/org/repo/v1`。
 - 查看当前有哪些工作空间在线、各自剩多少额度：`curl <base>/`。
 
@@ -169,6 +169,9 @@ FIXED_URL: "http://47.107.49.72"
 > `totalCredits` 是该组织当月总额度、`remainingCredits` 是剩余，已用 = 两者之差（单位 credit）。
 > 该数组按**剩余额度倒序**排列（额度多的在前，读不到额度的排最后，并列按 clientId 升序），
 > 所以谁在前面一眼就能看出谁剩得多。
+> 注意**列表顺序与选路规则是两件事**：倒序只是方便肉眼比较，裸 chat 会把流量随机摊给所有
+> **剩余额度超过阈值**（服务端 `AiQuota:MinRemainingCredits`，默认 1 credit）的工作空间，
+> 不再是谁多就给谁、也不再是等概率的全体随机。
 > 2026-09 实测：工作空间里的 `CNB_TOKEN` **有** `group-resource:r` 权限，两个接口都返回 `200`
 > （用 `bash scripts/verify-endpoint.sh` 第 5 节可以自己复现，它会打印完整响应体并算出剩余额度）。
 > 万一读不到（接口 401/403、隧道抖动、超时），`GET /` 里该工作空间的 `remainingCredits` 是 `null`
@@ -185,7 +188,7 @@ curl -s $BASE/
 curl -s -o /dev/null -w '%{http_code}\n' $BASE/org/repo/v1/models
 # 期望 200
 
-# 2) 真实调用（上游不支持非流式，必须 stream:true）：带前缀=指定工作空间，不带=挑额度最多的
+# 2) 真实调用（上游不支持非流式，必须 stream:true）：带前缀=指定工作空间，不带=在额度充足者里随机挑
 curl -sN $BASE/v1/chat/completions \
   -H "Authorization: Bearer $ApiKey" -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true}'
@@ -275,7 +278,7 @@ OpenAI 客户端接入时：`base_url = <base>/org/repo/v1`，`api_key = <ApiKey
 | chat 返回 `401` | 没带 key 或 key 与服务端 `ApiKey` 不一致 | 加 `-H "Authorization: Bearer <ApiKey>"`；注意 `v1/models` 免鉴权，**它返回 401 才说明服务端键名或配置有问题** |
 | chat 返回 `502` | 前缀写错/大小写不符，或用了裸路径 | 用形如 `<base>/<org>/<repo>/v1/chat/completions` 的地址 |
 | 上游返回 401/412 之类 | 上游鉴权/网络策略 | 412 表示请求不是从 CNB 工作空间内发出；401 多半是 `CNB_TOKEN` 过期，重启工作空间让平台重铸 |
-| `GET /` 里本工作空间的 `remainingCredits` 一直是 `null`、`error` 非空 | 服务端读不到额度：可能该 `CNB_TOKEN` 没有 `group-resource:r` 权限（`401/403`）、仓库在子组织下（额度接口要根组织，可能 `403/404`）、或隧道刚连上还没到下一个探测周期 | 先看服务端日志里的 `AI quota probe of workspace ... failed`；在工作空间里跑 `scripts/verify-endpoint.sh` 的第 5 节直连试一次。**这是退化不是故障**：chat 照常可用，只是不做额度优选 |
+| `GET /` 里本工作空间的 `remainingCredits` 一直是 `null`、`error` 非空 | 服务端读不到额度：可能该 `CNB_TOKEN` 没有 `group-resource:r` 权限（`401/403`）、仓库在子组织下（额度接口要根组织，可能 `403/404`）、或每次探测都失败（隧道一连上就会立刻探一次，所以正常情况不该长期为空） | 先看服务端日志里的 `AI quota probe of workspace ... failed`；在工作空间里跑 `scripts/verify-endpoint.sh` 的第 5 节直连试一次。**这是退化不是故障**：chat 照常可用，只是不做额度优选 |
 
 常用观察点（都在工作空间内）：
 

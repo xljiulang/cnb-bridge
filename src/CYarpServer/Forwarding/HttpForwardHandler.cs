@@ -24,7 +24,7 @@ namespace CYarpServer.Forwarding
     /// 由两个路由参数拼成，因此这里不做任何路径解析；</item>
     /// <item>裸路径（统一 base_url）：<c>GET /</c> 列出在线工作空间及其 AI 额度，
     /// <c>GET /v1/models</c> 由配置应答，
-    /// <c>POST /v1/chat/completions</c> 挑选剩余 AI 额度最多的在线工作空间。</item>
+    /// <c>POST /v1/chat/completions</c> 在剩余 AI 额度超过阈值的在线工作空间之间随机挑选。</item>
     /// </list>
     /// </summary>
     public static partial class HttpForwardHandler
@@ -194,7 +194,9 @@ namespace CYarpServer.Forwarding
         /// 调用方的凭据（公网 ApiKey）会被丢弃，替换成 CYarp 客户端握手时报上来的 CNB token。
         /// <para>
         /// 裸 <c>POST /v1/chat/completions</c> 复用同一个处理器，但没有工作空间前缀：
-        /// 它挑选剩余 AI 额度最多的在线工作空间（见 <see cref="AiQuotaRouter.Pick"/>），
+        /// 它在剩余 AI 额度超过 <see cref="AiQuotaOptions.MinRemainingCredits"/> 的在线工作空间
+        /// 之间随机挑选，没有这样一个工作空间时退回「未知」的那些、再退回「额度不足」的那些
+        /// （见 <see cref="AiQuotaRouter.Pick"/>），
         /// 无在线工作空间时返回 502。
         /// </para>
         /// </summary>
@@ -224,6 +226,7 @@ namespace CYarpServer.Forwarding
                     options.Enabled,
                     DateTimeOffset.UtcNow,
                     options.StaleAfter,
+                    options.MinRemainingMilliCredits,
                     Random.Shared);
 
                 if (selection is not { } picked)

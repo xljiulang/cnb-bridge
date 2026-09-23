@@ -74,6 +74,7 @@ namespace CYarp.Cnb.Tests
                     ["AiQuota:Interval"] = this.ProbeInterval,
                     ["AiQuota:Timeout"] = "00:00:05",
                     ["AiQuota:StaleAfter"] = "00:00:30",
+                    ["AiQuota:MinRemainingCredits"] = "1",
                     ["Logging:LogLevel:Default"] = "Warning",
                 });
 

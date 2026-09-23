@@ -13,7 +13,8 @@ namespace CYarp.Cnb.Tests
 {
     /// <summary>
     /// The server reads the organization quota through the tunnel of each workspace, reports it on
-    /// <c>GET /</c>, and the bare chat route prefers the workspace with the most remaining credits.
+    /// <c>GET /</c>, and the bare chat route spreads the traffic over the workspaces whose remaining
+    /// credits are above the configured floor.
     /// </summary>
     public sealed class AiQuotaProbeTests : AiQuotaTestBench
     {
@@ -39,8 +40,43 @@ namespace CYarp.Cnb.Tests
         }
 
         [Fact]
-        public async Task BareChat_PrefersTheWorkspaceWithMoreCredits()
+        public async Task BareChat_SpreadsAcrossWorkspacesAboveTheQuotaFloor()
         {
+            // 100 credits versus 2 credits: both are above the floor, so neither one owns the
+            // traffic. The amounts differ on purpose to prove that "the biggest wins" is gone.
+            this.Upstream.SetQuota("orgA", totalMilliCredits: 100_000L, usedMilliCredits: 0L);
+            this.Upstream.SetQuota("orgB", totalMilliCredits: 2_000L, usedMilliCredits: 0L);
+
+            await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
+            await this.ConnectAsync("orgB/repoB", "/orgB/repoB/-/ai", "cnb-token-B");
+            await this.WaitForQuotaAsync("orgA/repoA");
+            await this.WaitForQuotaAsync("orgB/repoB");
+
+            for (var i = 0; i < 20; i++)
+            {
+                using var response = await this.PostChatAsync("/v1/chat/completions");
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            }
+
+            var recorded = this.Upstream.Requests;
+            Assert.Equal(20, recorded.Count);
+
+            // Both workspaces must be reachable. Twenty independent picks landing on one side would
+            // happen with probability 2 * 2^-20, so this is a real assertion rather than a hope.
+            Assert.Contains(recorded, request => request.Path == "/orgA/repoA/-/ai/chat/completions");
+            Assert.Contains(recorded, request => request.Path == "/orgB/repoB/-/ai/chat/completions");
+
+            // The token always belongs to the workspace that served the request.
+            Assert.All(recorded, request => Assert.Equal(
+                request.Path.StartsWith("/orgA/", StringComparison.Ordinal) ? "Bearer cnb-token-A" : "Bearer cnb-token-B",
+                request.Authorization));
+        }
+
+        [Fact]
+        public async Task BareChat_ExcludesAWorkspaceAtTheQuotaFloor()
+        {
+            // Exactly one credit is the shipped floor, and the comparison is strict: such a
+            // workspace is not eligible while a healthy one is connected.
             this.Upstream.SetQuota("orgA", totalMilliCredits: 100_000L, usedMilliCredits: 0L);
             this.Upstream.SetQuota("orgB", totalMilliCredits: 1_000L, usedMilliCredits: 0L);
 

@@ -97,7 +97,7 @@ namespace CYarpServer
             // 公网接口的强类型配置，用源生成绑定器绑定。
             builder.Services.Configure<CnbProxyOptions>(builder.Configuration);
 
-            // AI 额度探测：裸 chat 路由优先选择剩余额度最多的工作空间，GET / 负责报告读到的结果。
+            // AI 额度探测：裸 chat 路由优先在剩余额度超过阈值的工作空间之间随机分摊，GET / 负责报告读到的结果。
             // 两者共用这个 store。
             builder.Services.Configure<AiQuotaOptions>(builder.Configuration.GetSection(AiQuotaOptions.SectionName));
             builder.Services.AddSingleton<AiQuotaStore>();
@@ -134,7 +134,7 @@ namespace CYarpServer
             // 把 base_url 指向服务端根即可：
             //   GET  /                     -> 在线工作空间及其额度
             //   GET  /v1/models            -> 配置的模型列表（从不转发）
-            //   POST /v1/chat/completions  -> 转发给剩余额度最多的在线工作空间
+            //   POST /v1/chat/completions  -> 转发给随机挑中的某个额度充足的在线工作空间
             app.MapMethods("/", [HttpMethods.Get], (RequestDelegate)HttpForwardHandler.HandleClientsAsync);
             app.MapMethods("/v1/models", [HttpMethods.Get], (RequestDelegate)HttpForwardHandler.HandleModelsAsync);
             app.MapMethods("/v1/chat/completions", [HttpMethods.Post], (RequestDelegate)HttpForwardHandler.HandleChatAsync);
