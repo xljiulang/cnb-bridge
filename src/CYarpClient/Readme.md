@@ -50,6 +50,11 @@
 在本工具仓库里，这些文件的**源**在 `src/CYarpClient/`，`pwsh ./scripts/publish.ps1` 会把
 `CYarpClient`（AOT 产物）与这几个文件一起放进 `artifacts/client/`。
 
+`src/CYarpClient/` 里还有一份 `.cnb.yml.sample`：**通用模板**，结构与 `.cnb.yml` 相同，但两处地址是
+占位示例值（`http://ai.example.com`），照着它改就能接自己的服务端。`.cnb.yml` 则已填好本部署的真实
+地址，是唯一事实来源。**sample 不会进入载荷**（`publish.ps1` 只复制 `.cnb.yml`），所以 CNB 仓库根目录
+始终只有一份 `.cnb.yml`。
+
 落地到 CNB 仓库，两种方式任选其一：
 
 ```bash
@@ -62,6 +67,11 @@ cd /path/to/cnb-some-repo && git add -A && git commit -m "update cyarp payload" 
 
 如果希望载荷里只有运行必需的文件，同步时加 `--exclude Readme.md`；留着也无妨，它就是那个仓库的说明文档。
 
+> 载荷里的 `.cnb.yml` **已经填好本部署的真实服务端地址**，与 CNB 仓库里那份一致，所以整目录覆盖
+> （`--delete` 或 `Copy-Item -Recurse`）是安全的，不会把配置冲掉。
+> 两份之所以要一致，是因为它们都源自本工具仓库的同一份模板，避免「模板改了、线上没改」这类漂移；
+> 若你在 CNB 仓库里单独改过地址（例如临时指向另一台服务端），同步时记得 `--exclude .cnb.yml`。
+
 > 客户端运行时把 `cyarp.log` 与按天文件日志（`logs/log<yyyyMMdd>.txt`）都写在 `<载荷根>/logs/`。
 > 载荷自带 `.gitignore`（内容就是 `logs/` 这一条目录级规则），所以不会再污染 `git status`；
 > **不要**把它改成带具体日期的文件名——那样第二天就会漏忽略。
@@ -73,15 +83,20 @@ cd /path/to/cnb-some-repo && git add -A && git commit -m "update cyarp payload" 
 
 ## 2. 改 `.cnb.yml` 里的两处配置
 
-`.cnb.yml` 已经可用，只需要改两处（文件里都标了「改这里」）：
+`.cnb.yml` 里的两处地址已经填好本部署的服务端，开箱可用：
 
 ```yaml
-# 1/2 workspace：你的 CYarpServer 地址（加 TLS 后改 https://）
-CYARP_SERVER_URI: "http://ai.example.com"
+# workspace 拨号的 CYarpServer 地址（加 TLS 后改 https://）
+CYARP_SERVER_URI: "http://47.107.49.72"
 
-# 2/2 keepalive cron：服务端公网基址；留空则只做工作空间状态检查
-FIXED_URL: "http://ai.example.com"
+# keepalive cron：服务端公网基址；留空则只做工作空间状态检查
+FIXED_URL: "http://47.107.49.72"
 ```
+
+**要指向自己的服务端时**，只改这两处即可（通用模板见同目录 `.cnb.yml.sample`，那里的地址是占位示例值）。
+
+工作空间的 CPU 默认给 **1 核**（`runner.cpus: 1`）。客户端只做转发，单核足够；如果同一工作空间
+还要跑别的重活，再按需把这个值调大。
 
 保活 cron（L1/L2）挂在同一个文件里**以分支名命名的顶层键**下（本载荷用 `master:`）。
 这个键名指定「定时任务执行时拉取哪个分支的代码」，CNB 明确要求它**是仓库里真实存在的单一分支名**

@@ -102,6 +102,10 @@ if (-not $SkipClient) {
     # here only on publish (that is why they are not kept in a separate deploy/ folder).
     # .gitattributes / .gitignore travel with the payload so the CNB repository keeps LF
     # scripts and ignores the client's logs/ directory.
+    #
+    # Deliberately absent from this list: .cnb.yml.sample. It is a reference copy of .cnb.yml for
+    # humans, and the CNB repository root must not carry it - only the real .cnb.yml is a pipeline
+    # config there, and a second .yml file at the repository root would just be confusing.
     foreach ($file in 'cyarp-start.sh', '.cnb.yml', 'Readme.md', '.gitattributes', '.gitignore') {
         $source = Join-Path $root "src\CYarpClient\$file"
         if (-not (Test-Path -LiteralPath $source)) { throw "missing payload source: src\CYarpClient\$file" }

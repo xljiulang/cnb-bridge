@@ -44,6 +44,7 @@ src/
     Readme.md              服务端部署指南（唯一源，发布时复制到 artifacts/server/）
   CYarpClient/             客户端进程：环境变量注入 + 自动重连 + 内置文件日志（Native AOT）
     .cnb.yml               CNB 流水线配置（唯一源，发布时复制到 artifacts/client/）
+    .cnb.yml.sample        .cnb.yml 的参考样例（同内容，不参与发布、不进载荷）
     cyarp-start.sh         CNB 工作空间启动脚本（唯一源，发布时复制到 artifacts/client/）
     Readme.md              客户端部署指南（唯一源，发布时复制到 artifacts/client/）
 tests/CYarp.Cnb.Tests/     端到端集成测试（进程内起 server/client/假上游）
@@ -157,14 +158,20 @@ sudo ./CYarpServer stop            # 停止并删除服务
 ## 四、CNB 工作空间侧接入
 
 **第 1 步**：把 `artifacts/client/` 的**内容**放到 CNB 仓库根目录（`.cnb.yml`、`cyarp-start.sh`、`CYarpClient`
-三样必带），例如 `pwsh ./scripts/publish.ps1 -SkipServer` 之后 `rsync -a --delete artifacts/client/ /path/to/cnb-some-repo/`，
-提交推送。
+三样必带），例如 `pwsh ./scripts/publish.ps1 -SkipServer` 之后
+`rsync -a --delete artifacts/client/ /path/to/cnb-some-repo/`，提交推送。
+
+> 载荷里的 `.cnb.yml` **已填好本部署的服务端地址**，与 CNB 仓库里那份一致，所以整目录覆盖是安全的。
+> 两份内容一致是刻意为之：它们同源于本工具仓库的模板，避免「模板改了、线上没改」的漂移。
+> 若你在 CNB 仓库里单独改过地址，同步时记得 `--exclude .cnb.yml`。
 
 > 要放进**你想暴露其 AI 端点**的那个仓库：隧道出口是 `https://api.cnb.cool/$CNB_REPO_SLUG/-/ai`，
 > 而 `CNB_REPO_SLUG` 与 `CNB_TOKEN` 的作用域都是「工作空间所在仓库」。
 
-**第 2 步**：改 `.cnb.yml` 里标了「改这里」的两处：`CYARP_SERVER_URI`（workspace）与
-`FIXED_URL`（keepalive cron）。保活 cron 必须在 `main:` 键下（对应默认分支），否则永不触发。
+**第 2 步**：核对 `.cnb.yml` 里的两处地址：`CYARP_SERVER_URI`（workspace）与
+`FIXED_URL`（keepalive cron）——模板已填好本部署的值，指向别的服务端时才需要改。保活 cron 必须在**真实存在的分支名**对应的顶层键下
+（本载荷用 `master:`；若你的仓库默认分支是 `main`，要把顶层键与两处 `{"branch":"..."}` 一起改），
+否则定时任务永不触发。
 `.cnb.yml` 里不需要任何 key：`v1/models` 免鉴权，cron 直接探活。
 
 **第 3 步**：仓库页面点「云开发」启动工作空间，构建日志出现下面两行即隧道已通：
