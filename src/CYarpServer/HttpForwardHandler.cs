@@ -29,6 +29,33 @@ namespace CYarpServer
     public static partial class HttpForwardHandler
     {
         /// <summary>
+        /// Offset every timestamp of the response is rendered in (<see cref="ClientInfo.ConnectedAt"/>
+        /// and <see cref="ClientInfo.UpdatedAt"/>). Fixed on purpose: the host's local zone differs
+        /// between a Windows machine in UTC+8 and a minimal Linux image that defaults to UTC, so
+        /// following the host would make the same field mean different wall clocks per deployment.
+        /// </summary>
+        private static readonly TimeSpan ResponseTimeOffset = TimeSpan.FromHours(8d);
+
+        /// <summary>
+        /// Normalises a timestamp of this response to its fixed <c>+08:00</c> offset, keeping the
+        /// instant unchanged. Applied to every time the response carries, so a caller never has to
+        /// reconcile two different offsets in one payload.
+        /// <para>
+        /// Kept as its own method because the distinction it makes is invisible on a UTC+8 host and
+        /// only shows up elsewhere: <see cref="DateTimeOffset.ToOffset"/> moves the wall clock along
+        /// with the suffix (03:29Z becomes 11:29+08:00), whereas rebuilding the value from its
+        /// <c>DateTime</c> would relabel the same wall clock and silently shift the instant by the
+        /// difference between the host zone and the target zone.
+        /// </para>
+        /// </summary>
+        /// <param name="time">The timestamp, in whatever offset it carries.</param>
+        /// <returns>The same instant, expressed in +08:00.</returns>
+        internal static DateTimeOffset ToResponseTime(DateTimeOffset time)
+        {
+            return time.ToOffset(ResponseTimeOffset);
+        }
+
+        /// <summary>
         /// <c>GET /</c> - the connected workspaces with the AI quota last read for each of them,
         /// as a JSON array of <see cref="ClientInfo"/>, or <c>[]</c> when none is connected.
         /// Answered locally and without a credential: it is a discovery helper, not a proxy
@@ -49,7 +76,7 @@ namespace CYarpServer
 
             var clients = viewer
                 .OrderBy(client => client.Id, StringComparer.Ordinal)
-                .Select(client => ToClientInfo(client.Id, store, options, now))
+                .Select(client => ToClientInfo(client, store, options, now))
                 .ToArray();
 
             return context.Response.WriteAsJsonAsync(clients, CnbJsonContext.Default.ClientInfoArray);
@@ -57,22 +84,28 @@ namespace CYarpServer
 
         /// <summary>
         /// Projects one connected workspace and the quota probed for it into the response object.
-        /// That the workspace is listed at all means it is connected, hence <c>online: true</c>.
+        /// The tunnel is live by definition here - only connected workspaces are listed - so the
+        /// connection is reported as the moment it was established.
         /// </summary>
-        /// <param name="clientId">The workspace id (the CNB repo slug).</param>
+        /// <param name="client">The connected workspace.</param>
         /// <param name="store">The probed quota.</param>
         /// <param name="options">Probe settings, for the staleness threshold.</param>
         /// <param name="now">Current time.</param>
         /// <returns>The response object of that workspace.</returns>
-        private static ClientInfo ToClientInfo(string clientId, AiQuotaStore store, AiQuotaOptions options, DateTimeOffset now)
+        internal static ClientInfo ToClientInfo(IClient client, AiQuotaStore store, AiQuotaOptions options, DateTimeOffset now)
         {
+            var clientId = client.Id;
+
+            var connectedAt = ToResponseTime(client.CreationTime);
+
             if (store.TryGet(clientId, out var snapshot) == false)
             {
                 return new ClientInfo
                 {
                     ClientId = clientId,
-                    Online = true,
+                    ConnectedAt = connectedAt,
                     RemainingCredits = null,
+                    TotalCredits = null,
                     Stale = true,
                     UpdatedAt = null,
                     Error = null,
@@ -82,10 +115,11 @@ namespace CYarpServer
             return new ClientInfo
             {
                 ClientId = clientId,
-                Online = true,
+                ConnectedAt = connectedAt,
                 RemainingCredits = snapshot.RemainingMilliCredits is { } remaining ? remaining / 1000m : null,
+                TotalCredits = snapshot.TotalMilliCredits is { } total ? total / 1000m : null,
                 Stale = snapshot.IsStale(now, options.StaleAfter),
-                UpdatedAt = snapshot.UpdatedAt,
+                UpdatedAt = snapshot.UpdatedAt is { } updatedAt ? ToResponseTime(updatedAt) : null,
                 Error = snapshot.Error,
             };
         }

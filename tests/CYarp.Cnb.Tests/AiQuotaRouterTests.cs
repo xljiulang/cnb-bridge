@@ -13,7 +13,16 @@ namespace CYarp.Cnb.Tests
     public sealed class AiQuotaRouterTests
     {
         private static readonly DateTimeOffset Now = new(2026, 9, 23, 8, 0, 0, TimeSpan.Zero);
-        private static readonly TimeSpan StaleAfter = TimeSpan.FromMinutes(15d);
+        private static readonly TimeSpan StaleAfter = TimeSpan.FromMinutes(6d);
+
+        /// <summary>
+        /// Records a reading where the organization has spent nothing yet, so the allowance equals
+        /// the remainder. Routing only looks at the remainder, so the total is irrelevant here.
+        /// </summary>
+        private static void Report(AiQuotaStore store, string clientId, long remainingMilliCredits, DateTimeOffset now)
+        {
+            store.ReportSuccess(clientId, totalMilliCredits: remainingMilliCredits, remainingMilliCredits, now);
+        }
 
         [Fact]
         public void NoCandidates_ReturnsNull()
@@ -27,8 +36,8 @@ namespace CYarp.Cnb.Tests
         public void KnownQuota_PicksTheHighestRemaining()
         {
             var store = new AiQuotaStore();
-            store.ReportSuccess("orgA/repoA", 1_000L, Now);
-            store.ReportSuccess("orgB/repoB", 100_000L, Now);
+            Report(store, "orgA/repoA", 1_000L, Now);
+            Report(store, "orgB/repoB", 100_000L, Now);
             var clients = Candidates("orgA/repoA", "orgB/repoB");
 
             var selection = AiQuotaRouter.Pick(clients, store, quotaRoutingEnabled: true, Now, StaleAfter, new Random(7));
@@ -43,8 +52,8 @@ namespace CYarp.Cnb.Tests
         public void TiedQuota_SharesTheTraffic()
         {
             var store = new AiQuotaStore();
-            store.ReportSuccess("orgA/repoA", 5_000L, Now);
-            store.ReportSuccess("orgB/repoB", 5_000L, Now);
+            Report(store, "orgA/repoA", 5_000L, Now);
+            Report(store, "orgB/repoB", 5_000L, Now);
             var clients = Candidates("orgA/repoA", "orgB/repoB");
 
             var picked = new HashSet<string>(StringComparer.Ordinal);
@@ -63,7 +72,7 @@ namespace CYarp.Cnb.Tests
         public void Unknown_DoesNotBeatAKnownQuota()
         {
             var store = new AiQuotaStore();
-            store.ReportSuccess("orgB/repoB", 1L, Now);
+            Report(store, "orgB/repoB", 1L, Now);
             var clients = Candidates("orgA/repoA", "orgB/repoB");
 
             for (var seed = 0; seed < 40; seed++)
@@ -80,7 +89,7 @@ namespace CYarp.Cnb.Tests
         public void Unknown_BeatsAnExhaustedWorkspace()
         {
             var store = new AiQuotaStore();
-            store.ReportSuccess("orgA/repoA", 0L, Now);
+            Report(store, "orgA/repoA", 0L, Now);
             var clients = Candidates("orgA/repoA", "orgB/repoB");
 
             for (var seed = 0; seed < 40; seed++)
@@ -97,8 +106,8 @@ namespace CYarp.Cnb.Tests
         public void StaleQuota_IsTreatedAsUnknown()
         {
             var store = new AiQuotaStore();
-            store.ReportSuccess("orgA/repoA", 1_000_000L, Now - StaleAfter - TimeSpan.FromSeconds(1d));
-            store.ReportSuccess("orgB/repoB", 2_000L, Now);
+            Report(store, "orgA/repoA", 1_000_000L, Now - StaleAfter - TimeSpan.FromSeconds(1d));
+            Report(store, "orgB/repoB", 2_000L, Now);
             var clients = Candidates("orgA/repoA", "orgB/repoB");
 
             var selection = AiQuotaRouter.Pick(clients, store, quotaRoutingEnabled: true, Now, StaleAfter, new Random(3));
@@ -113,8 +122,8 @@ namespace CYarp.Cnb.Tests
         public void AllExhausted_StillPicksOne()
         {
             var store = new AiQuotaStore();
-            store.ReportSuccess("orgA/repoA", 0L, Now);
-            store.ReportSuccess("orgB/repoB", -10L, Now);
+            Report(store, "orgA/repoA", 0L, Now);
+            Report(store, "orgB/repoB", -10L, Now);
             var clients = Candidates("orgA/repoA", "orgB/repoB");
 
             var picked = new HashSet<string>(StringComparer.Ordinal);
@@ -150,8 +159,8 @@ namespace CYarp.Cnb.Tests
         public void Disabled_IgnoresTheProbedQuota()
         {
             var store = new AiQuotaStore();
-            store.ReportSuccess("orgA/repoA", 0L, Now);
-            store.ReportSuccess("orgB/repoB", 1_000_000L, Now);
+            Report(store, "orgA/repoA", 0L, Now);
+            Report(store, "orgB/repoB", 1_000_000L, Now);
             var clients = Candidates("orgA/repoA", "orgB/repoB");
 
             var picked = new HashSet<string>(StringComparer.Ordinal);
@@ -172,7 +181,7 @@ namespace CYarp.Cnb.Tests
         public void AFailedProbeKeepsTheValueButMakesItUnknown()
         {
             var store = new AiQuotaStore();
-            store.ReportSuccess("orgA/repoA", 500L, Now);
+            Report(store, "orgA/repoA", 500L, Now);
 
             // A failure records the reason and keeps the last value; the timestamp is untouched,
             // so the reading ages out on its own instead of being refreshed for free.

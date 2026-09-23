@@ -3,13 +3,15 @@ using System;
 namespace CYarpServer
 {
     /// <summary>
-    /// What the server knows about the AI quota of one workspace: the last remaining credits it
-    /// read successfully, when that happened, and the reason of the most recent failure.
+    /// What the server knows about the AI quota of one workspace: the last quota it read
+    /// successfully (the organization's allowance and what is left of it), when that happened, and
+    /// the reason of the most recent failure.
     /// </summary>
+    /// <param name="TotalMilliCredits">The organization's allowance for the month in milli-credits (free + paid + privilege); null until a probe succeeds.</param>
     /// <param name="RemainingMilliCredits">Remaining credits in milli-credits (1000 = 1 credit); null until a probe succeeds.</param>
     /// <param name="UpdatedAt">When the quota was last read successfully; null if that never happened.</param>
     /// <param name="Error">Reason of the most recent failed probe; null after a success.</param>
-    public sealed record AiQuotaSnapshot(long? RemainingMilliCredits, DateTimeOffset? UpdatedAt, string? Error)
+    public sealed record AiQuotaSnapshot(long? TotalMilliCredits, long? RemainingMilliCredits, DateTimeOffset? UpdatedAt, string? Error)
     {
         /// <summary>
         /// Gets whether this snapshot is too old to be trusted for routing. A snapshot that

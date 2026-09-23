@@ -117,8 +117,8 @@ sudo ./CYarpServer stop            # 停止并删除服务
   "ProxyModels": [ "deepseek-v4-flash", "glm-5.3-flash", "kimi-k3" ],
   "AiQuota": {                              // 裸 /v1/chat/completions 按剩余额度择优选工作空间
     "Enabled": true,
-    "Interval": "00:05:00",
-    "StaleAfter": "00:15:00",
+    "Interval": "00:02:00",
+    "StaleAfter": "00:06:00",
     "Timeout": "00:00:10"
   },
   "CYarpOptions": {
@@ -234,7 +234,7 @@ curl http://ai.example.com/v1/chat/completions \
 
 ### 剩余额度从哪来 / `GET /` 的形状
 
-服务端起一个后台任务（`AiQuota:Interval`，默认 5 分钟），对每个在线工作空间**经它自己的隧道**
+服务端起一个后台任务（`AiQuota:Interval`，默认 2 分钟），对每个在线工作空间**经它自己的隧道**
 （也就是服务工作端向工作空间要一条 TCP 隧道，再在隧道里发普通 HTTPS 请求）读一次 CNB 组织额度：
 
 ```
@@ -253,10 +253,11 @@ network policy`，见第八节）；隧道出口本来就是 `api.cnb.cool`，�
 [
   {
     "clientId": "orgA/repoA",
-    "online": true,
-    "remainingCredits": 100.5,
+    "connectedAt": "2026-09-23T11:29:00+08:00",
+    "totalCredits": 1166,
+    "remainingCredits": 896.83,
     "stale": false,
-    "updatedAt": "2026-09-23T08:12:00+00:00",
+    "updatedAt": "2026-09-23T16:12:00+08:00",
     "error": null
   }
 ]
@@ -264,11 +265,16 @@ network policy`，见第八节）；隧道出口本来就是 `api.cnb.cool`，�
 
 | 字段 | 含义 |
 |---|---|
+| `connectedAt` | **当前这条隧道**建立的时刻（服务端看到的，不是「首次被看到」）。客户端重连（掉线重连 5s/10s、工作空间被回收后重建）会刷新成新值，所以它来回跳就说明隧道在反复抖动 |
+| `totalCredits` | 该组织**当月总额度**，单位 credit（`credit_in_milli.total` ÷ 1000，含免费 + 付费 + 特权额度）。与剩余额度同一个读数，从未读到过是 `null` |
 | `remainingCredits` | 剩余额度，单位 **credit**（= 原始 milli-credit ÷ 1000）。从未读到过是 `null` |
 | `stale` | 这份读数是否**太旧、已不再用于路由**（从未读到时恒为 `true`）。它只解释「为什么列里有值却不按它挑」 |
-| `updatedAt` | 最后一次**成功**读到额度的时刻（UTC）；从未成功为 `null` |
+| `updatedAt` | 最后一次**成功**读到额度的时刻；从未成功为 `null` |
 | `error` | 最近一次失败的原因（成功时回到 `null`）。**失败不会清掉旧值**，所以可能出现「有旧值 + `stale:true` + `error` 非空」 |
-| `online` | 当前恒为 `true`（能列出就说明在线），保留字段是为了将来加入「刚掉线的工作空间」时形状不变 |
+
+> 两个时间字段都固定用 **`+08:00`**（部署地北京时间）输出，不受服务端主机时区影响（Windows 上通常是 `+08:00`，
+> 精简 Linux 镜像默认是 UTC，若跟随主机同一份接口就会有两种偏移）。两者都是同一根时间轴上的**时刻**，
+> 比较时按时刻比而不是按字符串比。
 
 **挑工作空间的规则**（只作用于裸 `POST /v1/chat/completions`，带前缀的路由不受影响）：
 

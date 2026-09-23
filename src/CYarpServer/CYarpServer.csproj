@@ -41,6 +41,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!--
+      The tests assert a couple of internal projections (e.g. the +08:00 normalisation of the tunnel
+      creation time) whose bug is invisible on a UTC+8 host through the HTTP surface alone.
+    -->
+    <InternalsVisibleTo Include="CYarp.Cnb.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Content Update="appsettings.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>

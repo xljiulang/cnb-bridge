@@ -208,15 +208,15 @@ namespace CYarp.Cnb.Tests
                 // The quota itself is covered by the AI quota tests; here only the shape and the
                 // ordering matter.
                 var body = await both.Content.ReadAsStringAsync();
-                Assert.StartsWith("""[{"clientId":"orgA/repoA",""", body);
-                Assert.Contains("""{"clientId":"orgB/repoB",""", body);
+                Assert.StartsWith("""[{"clientId":"orgA/repoA","connectedAt":""", body);
+                Assert.Contains("""{"clientId":"orgB/repoB","connectedAt":""", body);
             }
 
             await this.DisconnectAsync("orgA/repoA");
 
             using var remaining = await this.GetAsync("/", apiKey: null);
             var remainingBody = await remaining.Content.ReadAsStringAsync();
-            Assert.StartsWith("""[{"clientId":"orgB/repoB",""", remainingBody);
+            Assert.StartsWith("""[{"clientId":"orgB/repoB","connectedAt":""", remainingBody);
             Assert.DoesNotContain("orgA/repoA", remainingBody);
         }
 

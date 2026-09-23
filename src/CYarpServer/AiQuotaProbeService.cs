@@ -157,11 +157,11 @@ namespace CYarpServer
 
             try
             {
-                var remaining = await ReadRemainingMilliCreditsAsync(client, organization, authorization, timeout.Token);
+                var (total, remaining) = await ReadQuotaAsync(client, organization, authorization, timeout.Token);
                 var now = DateTimeOffset.UtcNow;
 
-                this._store.ReportSuccess(clientId, remaining, now);
-                LogProbeSucceeded(this._logger, clientId, organization, remaining);
+                this._store.ReportSuccess(clientId, total, remaining, now);
+                LogProbeSucceeded(this._logger, clientId, organization, remaining, total);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -176,14 +176,15 @@ namespace CYarpServer
         }
 
         /// <summary>
-        /// Reads the remaining credits of one organization over the workspace's own tunnel.
+        /// Reads the AI credits of one organization over the workspace's own tunnel: the allowance
+        /// of the month and what is left of it.
         /// </summary>
         /// <param name="client">The workspace that provides the tunnel.</param>
         /// <param name="organization">The organization slug (first segment of the client id).</param>
         /// <param name="authorization">The CNB token reported during the handshake.</param>
         /// <param name="cancellationToken">Timeout of the two requests together.</param>
-        /// <returns>Remaining credits in milli-credits.</returns>
-        private static async Task<long> ReadRemainingMilliCreditsAsync(
+        /// <returns>The month's allowance and the remaining credits, both in milli-credits.</returns>
+        private static async Task<(long Total, long Remaining)> ReadQuotaAsync(
             IClient client,
             string organization,
             string authorization,
@@ -241,7 +242,7 @@ namespace CYarpServer
             }
 
             var frozen = volume.FreezeCreditInMilli ?? 0L;
-            return total - used - frozen;
+            return (total, total - used - frozen);
         }
 
         /// <summary>
@@ -318,8 +319,8 @@ namespace CYarpServer
         [LoggerMessage(Level = LogLevel.Debug, Message = "AI quota probe skipped workspace '{clientId}': {reason}")]
         private static partial void LogProbeSkipped(ILogger logger, string clientId, string reason);
 
-        [LoggerMessage(Level = LogLevel.Information, Message = "AI quota of workspace '{clientId}' (organization {organization}): {remainingMilliCredits} milli-credits remaining")]
-        private static partial void LogProbeSucceeded(ILogger logger, string clientId, string organization, long remainingMilliCredits);
+        [LoggerMessage(Level = LogLevel.Information, Message = "AI quota of workspace '{clientId}' (organization {organization}): {remainingMilliCredits} of {totalMilliCredits} milli-credits remaining")]
+        private static partial void LogProbeSucceeded(ILogger logger, string clientId, string organization, long remainingMilliCredits, long totalMilliCredits);
 
         [LoggerMessage(Level = LogLevel.Warning, Message = "AI quota probe of workspace '{clientId}' (organization {organization}) failed: {error}")]
         private static partial void LogProbeFailed(ILogger logger, string clientId, string organization, string error);

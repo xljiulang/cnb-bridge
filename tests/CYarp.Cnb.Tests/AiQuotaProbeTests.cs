@@ -26,7 +26,8 @@ namespace CYarp.Cnb.Tests
 
             var snapshot = await this.WaitForQuotaAsync("orgA/repoA");
 
-            // The allowance minus what is spent and what is frozen for in-flight tasks.
+            // The allowance of the month, and what is left of it after the spent and frozen parts.
+            Assert.Equal(100_000L, snapshot.TotalMilliCredits);
             Assert.Equal(74_500L, snapshot.RemainingMilliCredits);
             Assert.Null(snapshot.Error);
 
@@ -72,6 +73,7 @@ namespace CYarp.Cnb.Tests
             await this.ConnectAsync("orgB/repoB", "/orgB/repoB/-/ai", "cnb-token-B");
 
             var exhausted = await this.WaitForQuotaAsync("orgA/repoA");
+            Assert.Equal(10_000L, exhausted.TotalMilliCredits);
             Assert.Equal(0L, exhausted.RemainingMilliCredits);
             await this.WaitForQuotaAsync("orgB/repoB");
 
@@ -141,6 +143,7 @@ namespace CYarp.Cnb.Tests
                 using var payload = JsonDocument.Parse(await list.Content.ReadAsStringAsync());
                 foreach (var element in payload.RootElement.EnumerateArray())
                 {
+                    Assert.Equal(JsonValueKind.Null, element.GetProperty("totalCredits").ValueKind);
                     Assert.Equal(JsonValueKind.Null, element.GetProperty("remainingCredits").ValueKind);
                     Assert.True(element.GetProperty("stale").GetBoolean());
                     Assert.Equal(JsonValueKind.Null, element.GetProperty("updatedAt").ValueKind);
@@ -158,7 +161,9 @@ namespace CYarp.Cnb.Tests
         [Fact]
         public async Task ClientList_ReportsTheProbedQuota()
         {
-            this.Upstream.SetQuota("orgA", totalMilliCredits: 100_500L, usedMilliCredits: 0L);
+            // Distinct numbers on purpose: the allowance (200) and the remainder (100.5) must not be
+            // the same value, or the test could not tell which field was wired to which reading.
+            this.Upstream.SetQuota("orgA", totalMilliCredits: 200_000L, usedMilliCredits: 99_500L);
 
             await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
             await this.WaitForQuotaAsync("orgA/repoA");
@@ -175,11 +180,27 @@ namespace CYarp.Cnb.Tests
 
             // Every object carries the same keys, the null ones included.
             Assert.Equal("orgA/repoA", element.GetProperty("clientId").GetString());
-            Assert.True(element.GetProperty("online").GetBoolean());
+            Assert.Equal(200m, element.GetProperty("totalCredits").GetDecimal());
             Assert.Equal(100.5m, element.GetProperty("remainingCredits").GetDecimal());
             Assert.False(element.GetProperty("stale").GetBoolean());
-            Assert.Equal(TimeSpan.Zero, element.GetProperty("updatedAt").GetDateTimeOffset().Offset);
             Assert.Equal(JsonValueKind.Null, element.GetProperty("error").ValueKind);
+
+            // All timestamps of the payload use the same fixed offset.
+            var updatedAt = element.GetProperty("updatedAt").GetDateTimeOffset();
+            Assert.Equal(TimeSpan.FromHours(8d), updatedAt.Offset);
+            Assert.True(
+                (DateTimeOffset.UtcNow - updatedAt).Duration() < TimeSpan.FromMinutes(1d),
+                $"updatedAt {updatedAt:O} should be when this test's quota was just read");
+
+            // connectedAt is the moment this tunnel was established, in a fixed +08:00 offset, so
+            // the value must be the present rather than any constant. The tunnel was opened moments
+            // ago in this test, hence the narrow window.
+            var connectedAt = element.GetProperty("connectedAt").GetDateTimeOffset();
+            Assert.Equal(TimeSpan.FromHours(8d), connectedAt.Offset);
+            Assert.Equal(updatedAt.Offset, connectedAt.Offset);
+            Assert.True(
+                (DateTimeOffset.UtcNow - connectedAt).Duration() < TimeSpan.FromMinutes(1d),
+                $"connectedAt {connectedAt:O} should be the time this test's tunnel was established");
         }
     }
 }

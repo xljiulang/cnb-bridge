@@ -91,8 +91,8 @@ chmod +x /opt/cyarp/CYarpServer
   // 裸 /v1/chat/completions 按剩余 AI 额度择优选工作空间；Enabled=false 则回到等概率随机
   "AiQuota": {
     "Enabled": true,
-    "Interval": "00:05:00",   // 多久经各工作空间的隧道重新读一次额度
-    "StaleAfter": "00:15:00", // 超过这个年龄的读数视为「未知」，不再用于路由
+    "Interval": "00:02:00",   // 多久经各工作空间的隧道重新读一次额度
+    "StaleAfter": "00:06:00", // 超过这个年龄的读数视为「未知」，不再用于路由（默认容忍连续 3 次失败）
     "Timeout": "00:00:10"     // 单个工作空间一轮探测（两个请求合计）的超时
   },
 
@@ -112,9 +112,11 @@ chmod +x /opt/cyarp/CYarpServer
 
 `CYarpOptions` 的生效值会在启动日志里回显（`CYarp options in effect: ...`）；如果这里与文件不一致，说明配置没被读到。
 
-`AiQuota` 是**可选**的：整段删掉就用默认值（即开启、5 分钟一轮）。服务端会在启动后立刻探测一次，
+`AiQuota` 是**可选**的：整段删掉就用默认值（即开启、2 分钟一轮）。服务端会在启动后立刻探测一次，
 之后每个 `Interval` 一轮，日志里能看到 `AI quota of workspace '...' (organization ...): N milli-credits remaining`；
 读不到时是 `AI quota probe of workspace '...' failed: ...`（**不影响转发**，只是该工作空间在路由里算「未知」）。
+一轮是**顺序**探所有工作空间、每个最多占 `Timeout`，所以最坏耗时约为「工作空间数 × 10s」；探测漏拍不补跑，
+超时只表现为下一轮被推迟（当前规模下远小于 2 分钟）。
 
 ### 3.3 安装并启动为系统服务
 
@@ -166,10 +168,13 @@ curl -i http://<你的域名或IP>/<org>/<repo>/v1/models  # 某个工作空间�
 工作空间接入后，`GET /` 的响应形如：
 
 ```json
-[{"clientId":"org/repo","online":true,"remainingCredits":100.5,"stale":false,"updatedAt":"2026-09-23T08:12:00+00:00","error":null}]
+[{"clientId":"org/repo","connectedAt":"2026-09-23T11:29:00+08:00","totalCredits":1166,"remainingCredits":896.83,"stale":false,"updatedAt":"2026-09-23T16:12:00+08:00","error":null}]
 ```
 
+`connectedAt` 是**当前这条隧道**建立的时刻（客户端重连后会刷新成新值，可用来发现隧道反复抖动）。
+`totalCredits` 是组织当月总额度、`remainingCredits` 是剩余额度（单位都是 credit，已用 = 两者之差）。
 `remainingCredits` 为 `null` 说明服务端还没读到额度（`stale` 会是 `true`，`error` 里是原因）。
+两个时间字段都固定用 **`+08:00`** 输出，不跟随主机时区。
 额度是经**该工作空间自己的隧道**向 `api.cnb.cool` 读的（`/{org}/-/charge/quota` 与 `/-/charge/volume`），
 因此工作空间的 `CNB_TOKEN` 需要有 `group-resource:r` 权限；没有该权限时读不到，`GET /` 里会显示 `403`，
 路由退回随机——功能不受影响。详见第 6 节的接口说明。
@@ -237,8 +242,8 @@ C:\cyarp\CYarpServer.exe           # 前台运行，方便调试
 | `ApiKey` | 空 | 公网 **chat** 调用方的 Bearer key；为空则不校验。`v1/models` 永久免鉴权 |
 | `ProxyModels` | `[ "deepseek-v4-flash", "glm-5.3-flash", "kimi-k3" ]` | `/{org}/{repo}/v1/models` 本地返回的列表（JSON 数组；写成逗号字符串会在启动时报绑定错误） |
 | `AiQuota:Enabled` | `true` | 是否经各工作空间的隧道读额度并据此为裸 chat 选路；`false` 回到等概率随机 |
-| `AiQuota:Interval` | `00:05:00` | 额度探测周期（上一轮没跑完时跳过本次触发） |
-| `AiQuota:StaleAfter` | `00:15:00` | 超过这个年龄的读数视为「未知」，不再用于路由（容忍连续两次失败） |
+| `AiQuota:Interval` | `00:02:00` | 额度探测周期（上一轮没跑完时跳过本次触发） |
+| `AiQuota:StaleAfter` | `00:06:00` | 超过这个年龄的读数视为「未知」，不再用于路由（默认容忍连续 3 次失败） |
 | `AiQuota:Timeout` | `00:00:10` | 单个工作空间一轮探测（`quota` + `volume` 两个请求合计）的超时 |
 | `Urls` | `http://+:80` | Kestrel 监听地址；也可用 `--urls` 启动参数 |
 | `CYarpOptions:Client:KeepAliveInterval` | `00:00:40` | 服务端心跳周期 |
@@ -256,7 +261,7 @@ C:\cyarp\CYarpServer.exe           # 前台运行，方便调试
 |---|---|
 | `GET /{org}/{repo}/v1/models` | **免鉴权**（本地应答、不耗额度）：该工作空间在线 `200`，隧道断了 `503` |
 | `POST /{org}/{repo}/v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；转发到该工作空间，上游收到 `/{org}/{repo}/-/ai/chat/completions`；离线 `502` |
-| `GET /` | **免鉴权**：在线工作空间的**对象数组**（`clientId`、`online`、`remainingCredits`、`stale`、`updatedAt`、`error`），无在线时为 `[]` |
+| `GET /` | **免鉴权**：在线工作空间的**对象数组**（`clientId`、`connectedAt`、`totalCredits`、`remainingCredits`、`stale`、`updatedAt`、`error`），无在线时为 `[]` |
 | `GET /v1/models` | **免鉴权**：`ProxyModels` 配置的模型列表；**不检查在线状态**（恒 `200`），与带前缀版本的「离线 503」刻意区分 |
 | `POST /v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；在**当前在线**的工作空间里挑**剩余 AI 额度最多**的那个转发（额度未知则退回随机）；无在线则 `502` |
 | 其它路径（单段/三段前缀、`/v1/embeddings`…） | `404` |

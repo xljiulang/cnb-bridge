@@ -13,7 +13,7 @@ namespace CYarp.Cnb.Tests
     /// An <see cref="IClient"/> that only carries an id, for the routing tests: the routing
     /// decision reads nothing but the id and the probed quota.
     /// </summary>
-    internal sealed class FakeClient(string id, Uri? targetUri = null) : IClient
+    internal sealed class FakeClient(string id, Uri? targetUri = null, DateTimeOffset? creationTime = null) : IClient
     {
         private static readonly ClaimsPrincipal Principal = new(new ClaimsIdentity());
 
@@ -31,7 +31,11 @@ namespace CYarp.Cnb.Tests
 
         public int HttpTunnelCount => 0;
 
-        public DateTimeOffset CreationTime => DateTimeOffset.UnixEpoch;
+        /// <summary>
+        /// A stable, readable instant. Deliberately not UnixEpoch: after the handler renders this
+        /// in +08:00 a test fixture dated 1970 reads like a bug rather than a placeholder.
+        /// </summary>
+        public DateTimeOffset CreationTime { get; } = creationTime ?? new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
         public Task<Stream> CreateTcpTunnelAsync(CancellationToken cancellationToken)
         {

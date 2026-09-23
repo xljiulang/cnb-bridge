@@ -36,7 +36,7 @@ namespace CYarp.Cnb.Tests
 
         /// <summary>
         /// Gets the probe period of the server under test. One second by default, so the tests do
-        /// not have to wait for the five minute production default.
+        /// not have to wait for the two minute production default.
         /// </summary>
         protected virtual string ProbeInterval => "00:00:01";
 

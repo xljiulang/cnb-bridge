@@ -130,7 +130,7 @@ FIXED_URL: "http://ai.example.com"
 |---|---|
 | `GET /{org}/{repo}/v1/models` | **免鉴权**（本地应答、不耗额度）：在线 `200`，隧道断了 `503` |
 | `POST /{org}/{repo}/v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；经隧道转发，上游不支持非流式（必须 `stream:true`） |
-| `GET /` | **免鉴权**：在线工作空间的**对象数组**，每个对象含 `clientId`、`online`、`remainingCredits`、`stale`、`updatedAt`、`error`；无在线时为 `[]` |
+| `GET /` | **免鉴权**：在线工作空间的**对象数组**，每个对象含 `clientId`、`connectedAt`、`totalCredits`、`remainingCredits`、`stale`、`updatedAt`、`error`；无在线时为 `[]` |
 | `GET /v1/models` | **免鉴权**：`ProxyModels` 配置的模型列表；**不检查在线状态**（恒 `200`），与带前缀版本的「离线 503」刻意区分 |
 | `POST /v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；在当前在线的工作空间里挑**剩余 AI 额度最多**的那个转发（额度未知时退回随机）；无在线则 `502` |
 | 其它路径（单段/三段前缀、`/v1/embeddings`…） | `404` |
@@ -146,9 +146,12 @@ FIXED_URL: "http://ai.example.com"
 - **固定工作空间**：`base_url = <base>/org/repo/v1`。
 - 查看当前有哪些工作空间在线、各自剩多少额度：`curl <base>/`。
 
-> 额度由**服务端**每 5 分钟经本工作空间的隧道去读
+> 额度由**服务端**每 2 分钟经本工作空间的隧道去读
 > `https://api.cnb.cool/{org}/-/charge/quota` 与 `/-/charge/volume`（剩余 = 总额度 − 已用 − 冻结，
 > 单位 credit）。所以**客户端不需要做任何事、也不用改配置**：只要能建隧道，服务端就会自己去问。
+> `GET /` 里的 `connectedAt` 是**当前这条隧道**建立的时刻（`+08:00`，重连后刷新），
+> 它来回跳说明本工作空间的隧道在反复重建；`updatedAt` 是额度读数的时间，同一个 `+08:00` 偏移。
+> `totalCredits` 是该组织当月总额度、`remainingCredits` 是剩余，已用 = 两者之差（单位 credit）。
 > 2026-09 实测：工作空间里的 `CNB_TOKEN` **有** `group-resource:r` 权限，两个接口都返回 `200`
 > （用 `bash scripts/verify-endpoint.sh` 第 5 节可以自己复现，它会打印完整响应体并算出剩余额度）。
 > 万一读不到（接口 401/403、隧道抖动、超时），`GET /` 里该工作空间的 `remainingCredits` 是 `null`

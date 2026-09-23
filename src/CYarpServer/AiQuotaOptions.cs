@@ -23,17 +23,18 @@ namespace CYarpServer
         public bool Enabled { get; set; } = true;
 
         /// <summary>
-        /// Gets or sets the probe period. A tick whose previous round is still running is
-        /// skipped instead of being queued.
+        /// Gets or sets the probe period, 2 minutes by default. A tick whose previous round is
+        /// still running is skipped instead of being queued.
         /// </summary>
-        public TimeSpan Interval { get; set; } = TimeSpan.FromMinutes(5d);
+        public TimeSpan Interval { get; set; } = TimeSpan.FromMinutes(2d);
 
         /// <summary>
-        /// Gets or sets how long a reading may be reused. An older snapshot - including one
-        /// that never succeeded - counts as unknown, which only deprioritises the workspace:
-        /// an outdated value is never mistaken for a used up quota.
+        /// Gets or sets how long a reading may be reused, 6 minutes by default - three probe
+        /// rounds, so a couple of consecutive failures do not drop a workspace out of routing.
+        /// An older snapshot - including one that never succeeded - counts as unknown, which only
+        /// deprioritises the workspace: an outdated value is never mistaken for a used up quota.
         /// </summary>
-        public TimeSpan StaleAfter { get; set; } = TimeSpan.FromMinutes(15d);
+        public TimeSpan StaleAfter { get; set; } = TimeSpan.FromMinutes(6d);
 
         /// <summary>
         /// Gets or sets the timeout of the two charge requests of a single workspace, together.

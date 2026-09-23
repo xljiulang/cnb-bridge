@@ -20,11 +20,12 @@ namespace CYarpServer
         /// Records a successful probe.
         /// </summary>
         /// <param name="clientId">The workspace id (the CNB repo slug).</param>
+        /// <param name="totalMilliCredits">The organization's allowance for the month, in milli-credits.</param>
         /// <param name="remainingMilliCredits">Remaining credits in milli-credits.</param>
         /// <param name="now">When the quota was read.</param>
-        public void ReportSuccess(string clientId, long remainingMilliCredits, DateTimeOffset now)
+        public void ReportSuccess(string clientId, long totalMilliCredits, long remainingMilliCredits, DateTimeOffset now)
         {
-            this._snapshots[clientId] = new AiQuotaSnapshot(remainingMilliCredits, now, null);
+            this._snapshots[clientId] = new AiQuotaSnapshot(totalMilliCredits, remainingMilliCredits, now, null);
         }
 
         /// <summary>
@@ -36,7 +37,7 @@ namespace CYarpServer
         {
             this._snapshots.AddOrUpdate(
                 clientId,
-                _ => new AiQuotaSnapshot(null, null, error),
+                _ => new AiQuotaSnapshot(null, null, null, error),
                 (_, existing) => existing with { Error = error });
         }
 
