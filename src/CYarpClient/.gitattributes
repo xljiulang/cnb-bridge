@@ -1,0 +1,11 @@
+# 本文件会随载荷同步到 CNB 仓库根：保证脚本与 YAML 在任何平台上都是 LF。
+#
+# 在 Windows（core.autocrlf=true，本仓库默认）上克隆，若没有这些规则，cyarp-start.sh 与
+# .cnb.yml 会变成 CRLF，shebang 与 YAML 解析都可能出问题。强制 eol=lf 后，检出即 LF。
+
+*.sh   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# 客户端是 Native AOT 单文件可执行程序，绝不能做行尾转换。
+CYarpClient binary

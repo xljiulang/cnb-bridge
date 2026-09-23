@@ -100,7 +100,9 @@ if (-not $SkipClient) {
 
     # cyarp-start.sh / .cnb.yml / Readme.md live next to the client project and are copied
     # here only on publish (that is why they are not kept in a separate deploy/ folder).
-    foreach ($file in 'cyarp-start.sh', '.cnb.yml', 'Readme.md') {
+    # .gitattributes / .gitignore travel with the payload so the CNB repository keeps LF
+    # scripts and ignores the client's logs/ directory.
+    foreach ($file in 'cyarp-start.sh', '.cnb.yml', 'Readme.md', '.gitattributes', '.gitignore') {
         $source = Join-Path $root "src\CYarpClient\$file"
         if (-not (Test-Path -LiteralPath $source)) { throw "missing payload source: src\CYarpClient\$file" }
         Copy-Item -LiteralPath $source -Destination (Join-Path $ClientOutput $file) -Force

@@ -1,1 +1,28 @@
+# 行尾统一：文本文件以 LF 入库
 * text=auto
+
+# Shell / 流水线配置：强制 LF —— Windows 上 core.autocrlf=true 也不会再变成 CRLF，
+# 否则 cyarp-start.sh 的 shebang、.cnb.yml 的 YAML 解析都可能出问题。
+*.sh   text eol=lf
+*.bash text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# C# 与配置/文档：LF 入库，工作区行尾交给 core.autocrlf
+*.cs     text
+*.csproj text
+*.props  text
+*.sln    text
+*.json   text
+*.md     text
+*.txt    text
+.gitignore     text
+.gitattributes text
+
+# 二进制：不做任何行尾转换
+CYarpClient binary
+*.exe binary
+*.dll binary
+*.so  binary
+*.png binary
+*.ico binary

@@ -47,5 +47,5 @@ artifacts/
 *.pdb
 cyarp-cnb.slnx
 
-# 客户端运行时的按天文件日志（本地跑过客户端时会出现）
+# 客户端运行时的日志（cyarp.log 与 logs/log<yyyyMMdd>.txt；本地跑过就会出现）
 src/CYarpClient/logs/

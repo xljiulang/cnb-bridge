@@ -43,6 +43,8 @@
   CYarpClient        linux-x64 Native AOT 客户端（约 8 MB）
   appsettings.json   客户端非敏感默认配置（日志级别）
   Readme.md          本文件
+  .gitattributes     强制脚本/YAML 为 LF、二进制不做行尾转换
+  .gitignore         忽略运行时的 logs/
 ```
 
 在本工具仓库里，这些文件的**源**在 `src/CYarpClient/`，`pwsh ./scripts/publish.ps1` 会把
@@ -60,10 +62,12 @@ cd /path/to/cnb-some-repo && git add -A && git commit -m "update cyarp payload" 
 
 如果希望载荷里只有运行必需的文件，同步时加 `--exclude Readme.md`；留着也无妨，它就是那个仓库的说明文档。
 
-> 客户端运行时会把自己的文件日志写到 `<载荷根>/logs/`（按天分文件）。不想让它出现在 `git status` 里，
-> 就在**载荷仓库**的 `.gitignore` 加一条 `logs/`。
+> 客户端运行时把 `cyarp.log` 与按天文件日志（`logs/log<yyyyMMdd>.txt`）都写在 `<载荷根>/logs/`。
+> 载荷自带 `.gitignore`（内容就是 `logs/` 这一条目录级规则），所以不会再污染 `git status`；
+> **不要**把它改成带具体日期的文件名——那样第二天就会漏忽略。
 >
-> `CYarpClient` 是二进制，别用会改写内容的工具处理它；`cyarp-start.sh` 与 `.cnb.yml` 保持 LF 行尾。
+> 载荷同样自带 `.gitattributes`：`*.sh` / `*.yml` 强制 `eol=lf`，`CYarpClient` 标记为 binary。
+> 在 Windows（`core.autocrlf=true`）上克隆也不会把脚本变成 CRLF，从根上避免 shebang 与 YAML 解析出问题。
 
 ---
 
@@ -79,7 +83,15 @@ CYARP_SERVER_URI: "http://ai.example.com"
 FIXED_URL: "http://ai.example.com"
 ```
 
-保活 cron（L1/L2）在同一个文件的 `main:` 键下，**必须是 `main:`（对应默认分支名），否则永不触发**；一般不用动。
+保活 cron（L1/L2）挂在同一个文件里**以分支名命名的顶层键**下（本载荷用 `master:`）。
+这个键名指定「定时任务执行时拉取哪个分支的代码」，CNB 明确要求它**是仓库里真实存在的单一分支名**
+（定时任务不支持 glob）。**写错分支名 = 定时任务永不触发 = 保活自愈层失效**，这是最容易踩的坑：
+
+- 换仓库前先自查实际分支：`git ls-remote --heads <仓库地址>`；
+- 若默认分支是 `main`，需把顶层 `master:` 与 cron 里两处 `{"branch":"master"}` 一起改成 `main`；
+- 定时任务的 `CNB_TOKEN` 以「最后修改本配置的用户」身份签发，该用户被移出仓库后任务会失败
+  （由其他有权限的人重新改一次配置即可恢复）。
+
 探活打的是 `$FIXED_URL/$CNB_REPO_SLUG/v1/models`，该端点免鉴权，所以 **cron 里不需要任何 key**。
 
 没改域名就开工作空间时，启动脚本会立刻打印 `CYARP_SERVER_URI is required, e.g. http://ai.example.com`
@@ -161,8 +173,12 @@ OpenAI 客户端接入时：`base_url = <base>/org/repo/v1`，`api_key = <ApiKey
 | 层 | 手段 | 防的是什么 |
 |---|---|---|
 | L0 | `services.vscode.options.keepAliveTimeout: 18h` + 客户端 30s 心跳长连接 | 页面关闭 10 分钟即回收 |
-| L1 | `main:` cron 每 5 分钟查 `workspace/list`，无 running → `workspace/start` | 被平台回收后自动拉起 |
-| L2 | cron 探活 `$FIXED_URL/$CNB_REPO_SLUG/v1/models`（**不带 key**），连续两次非 200 → `stop + start` | 「假死」：workspace 显示 running 但隧道已断 |
+| L1 | 分支键（本载荷为 `master:`）下的 cron 每 5 分钟查 `workspace/list`，无 running → `workspace/start` | 被平台回收后自动拉起 |
+| L2 | cron 探活 `$FIXED_URL/$CNB_REPO_SLUG/v1/models`（**不带 key**），**连续两次拿到 `503`** 才 `stop + start` | 「假死」：workspace 显示 running 但隧道已断 |
+
+> L2 只认 `503`（= 服务端活着但隧道断了，唯一可信的假死信号）。若探活拿到 `000`（超时/连不上）、
+> `401`、`404`、`5xx`，说明**探活链路本身**不可信（服务端宕机、网络抖动、配置还没生效等），
+> 此时脚本只记日志、不动工作空间 —— 否则服务端一挂就会每 5 分钟重建一次工作空间。
 
 隧道断开由 CYarpClient 自己重连（5s/10s）；每次 cron 触发都是流水线新铸造的 `CNB_TOKEN`，工作空间重建后新 token 随新进程自动生效。
 
@@ -180,7 +196,7 @@ OpenAI 客户端接入时：`base_url = <base>/org/repo/v1`，`api_key = <ApiKey
 | 变量 | 值 | 说明 |
 |---|---|---|
 | `CYARP_SERVER_URI` | `http://你的域名` | 服务端地址（**必填**）；加 TLS 后改 `https://` |
-| `CYARP_RUN_DIR` | `/workspace/cyarp` | 客户端工作目录（`cyarp.log` 落在这里），可选 |
+| `CYARP_RUN_DIR` | `<载荷根>/logs` | 客户端工作目录（`cyarp.log` 落在这里），可选 |
 | `CYARP_BIN` | `<载荷根>/CYarpClient` | 客户端二进制路径（默认按脚本自身目录推导），可选 |
 
 `clientId` 不是可配项：脚本固定用 `CNB_REPO_SLUG`，环境变量 `CYARP_CLIENT_ID` 已移除。
@@ -213,6 +229,8 @@ OpenAI 客户端接入时：`base_url = <base>/org/repo/v1`，`api_key = <ApiKey
 | 客户端日志 `Connect failure ... Connection refused` | 服务端未监听该地址/端口，或被防火墙拦 | 确认服务端 `systemctl status CYarpServer` 与 `Now listening on: ...`；放行端口 |
 | 客户端日志出现 `连接到服务器...成功` 但公网仍 `502`/`404` | 公网 URL 的 `{org}/{repo}` 与实际工作空间仓库不一致 | `clientId` 固定取 `CNB_REPO_SLUG`，核对 URL 前缀是否与仓库 slug 一致（大小写敏感） |
 | `/{org}/{repo}/v1/models` 返回 `503` | 服务端活着但该工作空间的隧道断了（假死） | cron 会自动 `stop + start`；也可手动重启工作空间 |
+| 工作空间被平台回收后没人拉起（端点长期不通、`workspace/list` 显示没有 running） | cron 的**分支键名**与仓库真实分支不一致（例如写成 `main:` 而后端仓库只有 `master`），或改动没推到该分支 | `git ls-remote --heads <仓库地址>` 查真实分支；把 `.cnb.yml` 顶层键与 cron 里两处 `{"branch":"..."}` 改成该分支；确认改动已推到那个分支。仓库页「定时任务」页应能看到该任务 |
+| cron 日志里出现 `endpoint probe inconclusive (http=000/401/5xx)` | 探活链路不可信（服务端宕机、网络抖动、配置未生效）。脚本**故意**不重建工作空间 | 先修服务端/域名；这是预期行为，不是故障 |
 | chat 返回 `401` | 没带 key 或 key 与服务端 `ApiKey` 不一致 | 加 `-H "Authorization: Bearer <ApiKey>"`；注意 `v1/models` 免鉴权，**它返回 401 才说明服务端键名或配置有问题** |
 | chat 返回 `502` | 前缀写错/大小写不符，或用了裸路径 | 用形如 `<base>/<org>/<repo>/v1/chat/completions` 的地址 |
 | 上游返回 401/412 之类 | 上游鉴权/网络策略 | 412 表示请求不是从 CNB 工作空间内发出；401 多半是 `CNB_TOKEN` 过期，重启工作空间让平台重铸 |
@@ -220,9 +238,12 @@ OpenAI 客户端接入时：`base_url = <base>/org/repo/v1`，`api_key = <ApiKey
 常用观察点（都在工作空间内）：
 
 ```bash
-tail -f /workspace/cyarp/cyarp.log            # 客户端控制台输出（脚本 stdout 重定向到这里）
+tail -f logs/cyarp.log                        # 客户端控制台输出（脚本 stdout 重定向到这里）
 tail -f logs/log$(date +%Y%m%d).txt           # 客户端文件日志（相对载荷根）
 ```
+
+> 默认 `CYARP_RUN_DIR=<载荷根>/logs`，所以 `cyarp.log` 与按天文件日志都落在载荷根的 `logs/` 下
+> （该目录已被载荷自带的 `.gitignore` 忽略）。
 
 ---
 
@@ -235,3 +256,28 @@ tail -f logs/log$(date +%Y%m%d).txt           # 客户端文件日志（相对�
   不带任何密钥探活；知道组织/仓库名的人可以读到模型列表与该工作空间的隧道在线状态。
 - **现在没有 TLS**：CNB token（握手头 + 隧道内注入）与 API 内容都是明文。上 TLS 时把 `CYARP_SERVER_URI` 改成
   `https://`、`FIXED_URL` 改成 `https://`，服务端加证书即可，代码不用动。
+- **预编译客户端的信任链最弱**：`CYarpClient` 是 8 MB 的 Native AOT 单文件可执行程序（stripped、无签名），
+  而它会拿到 `CNB_TOKEN` 并代理 AI 请求。当前没有 hash/签名校验，升级方式就是人工覆盖文件。
+  想收紧可以：在载荷里加一份 `CYarpClient.sha256` 并由启动脚本校验、或改成工作空间内从源码构建、
+  或重新入库时改走 git-lfs 并附校验值。
+
+---
+
+## 9. 仓库体积备注（维护者）
+
+历史提交里曾有 4 个约 8 MB 的客户端二进制（`deploy/cyarp/CYarpClient`，3 个不同 hash），
+合计约 32 MB 常驻在 git 历史中。现在载荷不入库（`artifacts/` 被忽略），新提交不会再增重。
+
+如需彻底瘦身，可重写历史（**会改所有 commit hash，需要强推并通知协作者**）：
+
+```bash
+git filter-repo --path deploy/cyarp/CYarpClient --invert-paths
+git push --force-with-lease origin --all
+```
+
+若以后确实要把二进制重新入库，建议改用 git-lfs（本机已装 `git-lfs`）：
+
+```bash
+git lfs install
+git lfs track "CYarpClient"
+```

@@ -16,8 +16,8 @@
 # You must provide (via .cnb.yml env: or a secrets repo import):
 #   CYARP_SERVER_URI  e.g. http://ai.example.com  (use https:// once the server has TLS)
 # Optional:
-#   CYARP_RUN_DIR     where cyarp.log is written, default /workspace/cyarp
-#   CYARP_BIN         client binary path, default <script dir>/cyarp/CYarpClient
+#   CYARP_RUN_DIR     working directory (holds cyarp.log), default <script dir>/logs
+#   CYARP_BIN         client binary path, default <script dir>/CYarpClient
 #
 # The client does not carry any public API key: only the CNB token is sent, in the handshake.
 set -euo pipefail
@@ -27,8 +27,11 @@ REPO="${CNB_REPO_SLUG:?CNB_REPO_SLUG is missing}"
 # The client id is always the repo slug (org/repo, slashes included) - it is not configurable,
 # so the public path prefix can never drift from the workspace that is actually tunneling.
 CLIENT_ID="$REPO"
-RUN_DIR="${CYARP_RUN_DIR:-/workspace/cyarp}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Everything the client writes (cyarp.log, plus logs/log<yyyyMMdd>.txt) stays inside the
+# payload, so the "logs/" ignore rule below covers it and it never shows up in git status.
+# Override CYARP_RUN_DIR to put cyarp.log somewhere else (e.g. /workspace/cyarp).
+RUN_DIR="${CYARP_RUN_DIR:-$SCRIPT_DIR/logs}"
 BIN="${CYARP_BIN:-$SCRIPT_DIR/CYarpClient}"
 
 if [ -z "${CNB_TOKEN:-}" ]; then
