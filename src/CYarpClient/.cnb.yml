@@ -21,10 +21,11 @@
 # clientId 固定就是 CNB_REPO_SLUG（例如 org/repo），不可配置，所以一个服务端可以同时接多个
 # 工作空间，公网用路径前缀区分：http://<你的域名>/<org>/<repo>/v1/...
 #
-# 下面两处地址已经填成本部署的真实 CYarpServer 地址（http://47.107.49.72）：
+# 需要你改的只有 2 处，都已标出「改这里」——下面这两处已填好本部署的地址，
+# 指向别的服务端（或加上 TLS）时才需要改：
 #   1) workspace 的 CYARP_SERVER_URI  —— 工作空间拨号的 CYarpServer 地址（http:// 或 https://）
 #   2) cron 的 FIXED_URL              —— 保活探活用的公网基址（留空则只做状态检查）
-# 指向别的服务端时改这两处即可；通用模板见同目录的 .cnb.yml.sample。
+# 想要地址是占位示例值的通用模板，见同目录的 .cnb.yml.sample。
 #
 # CNB_TOKEN / CNB_REPO_SLUG 由平台每次运行自动注入，永远不要硬编码。
 #
@@ -50,7 +51,7 @@ master:
         image: cnbcool/default-dev-env:latest
       env:
         REPO: $CNB_REPO_SLUG
-        FIXED_URL: "http://47.107.49.72"               # 保活探活的 CYarpServer 基址；留空=只做状态检查
+        FIXED_URL: "http://47.107.49.72"               # 改这里(2/2)：你的 CYarpServer 基址；留空=只做状态检查
       stages:
         - name: ensure-workspace
           script: |
@@ -112,7 +113,7 @@ $:
     - docker:
         image: cnbcool/default-dev-env:latest
       env:
-        CYARP_SERVER_URI: "http://47.107.49.72"        # 工作空间拨号的 CYarpServer；加 TLS 后改 https://
+        CYARP_SERVER_URI: "http://47.107.49.72"        # 改这里(1/2)：你的 CYarpServer；加 TLS 后改 https://
       runner:
         # 单核足够跑一个隧道客户端（它只是转发请求），按需再调大。
         cpus: 1
