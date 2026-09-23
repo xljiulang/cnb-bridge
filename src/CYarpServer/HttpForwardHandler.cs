@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Security.Claims;
@@ -18,27 +19,75 @@ namespace CYarpServer
     /// <item>workspace-addressed: <c>/{org}/{repo}/v1/models</c> and
     /// <c>/{org}/{repo}/v1/chat/completions</c> - the workspace id is the CNB repo slug, built
     /// from the two route values, so no path parsing happens here;</item>
-    /// <item>bare (unified base_url): <c>GET /</c> lists the connected workspaces,
+    /// <item>bare (unified base_url): <c>GET /</c> lists the connected workspaces and their AI
+    /// quota,
     /// <c>GET /v1/models</c> answers from configuration and
-    /// <c>POST /v1/chat/completions</c> picks one connected workspace at random.</item>
+    /// <c>POST /v1/chat/completions</c> picks the connected workspace with the most remaining
+    /// AI credits.</item>
     /// </list>
     /// </summary>
     public static partial class HttpForwardHandler
     {
         /// <summary>
-        /// <c>GET /</c> - the connected workspace ids, as a JSON array (e.g.
-        /// <c>["org/repo"]</c>), or <c>[]</c> when none is connected. Answered locally and
-        /// without a credential: it is a discovery helper, not a proxy endpoint.
+        /// <c>GET /</c> - the connected workspaces with the AI quota last read for each of them,
+        /// as a JSON array of <see cref="ClientInfo"/>, or <c>[]</c> when none is connected.
+        /// Answered locally and without a credential: it is a discovery helper, not a proxy
+        /// endpoint.
+        /// <para>
+        /// Only connected workspaces are listed, and the quota value is the last one the probe
+        /// managed to read: <see cref="ClientInfo.Stale"/> and <see cref="ClientInfo.Error"/>
+        /// describe whether routing still trusts it.
+        /// </para>
         /// </summary>
         public static Task HandleClientsAsync(HttpContext context)
         {
-            var viewer = context.RequestServices.GetRequiredService<IClientViewer>();
-            var clientIds = viewer
-                .Select(client => client.Id)
-                .OrderBy(id => id, StringComparer.Ordinal)
+            var services = context.RequestServices;
+            var viewer = services.GetRequiredService<IClientViewer>();
+            var store = services.GetRequiredService<AiQuotaStore>();
+            var options = services.GetRequiredService<IOptions<AiQuotaOptions>>().Value;
+            var now = DateTimeOffset.UtcNow;
+
+            var clients = viewer
+                .OrderBy(client => client.Id, StringComparer.Ordinal)
+                .Select(client => ToClientInfo(client.Id, store, options, now))
                 .ToArray();
 
-            return context.Response.WriteAsJsonAsync(clientIds, CnbJsonContext.Default.StringArray);
+            return context.Response.WriteAsJsonAsync(clients, CnbJsonContext.Default.ClientInfoArray);
+        }
+
+        /// <summary>
+        /// Projects one connected workspace and the quota probed for it into the response object.
+        /// That the workspace is listed at all means it is connected, hence <c>online: true</c>.
+        /// </summary>
+        /// <param name="clientId">The workspace id (the CNB repo slug).</param>
+        /// <param name="store">The probed quota.</param>
+        /// <param name="options">Probe settings, for the staleness threshold.</param>
+        /// <param name="now">Current time.</param>
+        /// <returns>The response object of that workspace.</returns>
+        private static ClientInfo ToClientInfo(string clientId, AiQuotaStore store, AiQuotaOptions options, DateTimeOffset now)
+        {
+            if (store.TryGet(clientId, out var snapshot) == false)
+            {
+                return new ClientInfo
+                {
+                    ClientId = clientId,
+                    Online = true,
+                    RemainingCredits = null,
+                    Stale = true,
+                    UpdatedAt = null,
+                    Error = null,
+                };
+            }
+
+            return new ClientInfo
+            {
+                ClientId = clientId,
+                Online = true,
+                RemainingCredits = snapshot.RemainingMilliCredits is { } remaining ? remaining / 1000m : null,
+                Stale = snapshot.IsStale(now, options.StaleAfter),
+                UpdatedAt = snapshot.UpdatedAt,
+                Error = snapshot.Error,
+            };
         }
 
         /// <summary>
@@ -87,8 +136,8 @@ namespace CYarpServer
         /// the CNB token the CYarp client reported during its handshake.
         /// <para>
         /// The bare <c>POST /v1/chat/completions</c> shares this handler but has no workspace
-        /// prefix: it picks one of the connected workspaces at random (uniform), and answers 502
-        /// when none is connected.
+        /// prefix: it picks the connected workspace with the most remaining AI credits (see
+        /// <see cref="AiQuotaRouter.Pick"/>), and answers 502 when none is connected.
         /// </para>
         /// </summary>
         public static async Task HandleChatAsync(HttpContext context)
@@ -109,15 +158,25 @@ namespace CYarpServer
             }
             else
             {
-                client = PickRandomClient(viewer);
-                if (client == null)
+                var options = services.GetRequiredService<IOptions<AiQuotaOptions>>().Value;
+                var store = services.GetRequiredService<AiQuotaStore>();
+                var selection = AiQuotaRouter.Pick(
+                    Snapshot(viewer),
+                    store,
+                    options.Enabled,
+                    DateTimeOffset.UtcNow,
+                    options.StaleAfter,
+                    Random.Shared);
+
+                if (selection is not { } picked)
                 {
                     LogNoConnectedWorkspace(logger, context.Request.Path.Value ?? "/");
                     context.Response.StatusCode = StatusCodes.Status502BadGateway;
                     return;
                 }
 
-                LogRandomRouted(logger, client.Id, viewer.Count);
+                client = picked.Client;
+                LogRouted(logger, picked.Client.Id, picked.Tier, picked.RemainingMilliCredits, viewer.Count);
             }
 
             // The CNB token travels in the handshake principal that CYarp keeps on IClient.User.
@@ -138,30 +197,20 @@ namespace CYarpServer
         }
 
         /// <summary>
-        /// Picks a connected workspace uniformly at random, or null when none is connected.
-        /// The viewer is a concurrent collection, so the count is read once and indexed.
+        /// Copies the connected workspaces into a list, so the routing decision works on a stable
+        /// set even though the viewer is a collection that mutates as tunnels come and go.
         /// </summary>
-        private static IClient? PickRandomClient(IClientViewer viewer)
+        /// <param name="viewer">The connected workspaces.</param>
+        /// <returns>The workspace snapshot.</returns>
+        private static IReadOnlyList<IClient> Snapshot(IClientViewer viewer)
         {
-            var count = viewer.Count;
-            if (count == 0)
+            var clients = new List<IClient>(viewer.Count);
+            foreach (var client in viewer)
             {
-                return null;
+                clients.Add(client);
             }
 
-            IClient? picked = null;
-            var index = Random.Shared.Next(count);
-            var current = 0;
-            foreach (var candidate in viewer)
-            {
-                if (current++ == index)
-                {
-                    picked = candidate;
-                    break;
-                }
-            }
-
-            return picked;
+            return clients;
         }
 
         /// <summary>
@@ -189,8 +238,8 @@ namespace CYarpServer
         [LoggerMessage(Level = LogLevel.Warning, Message = "No workspace is connected, 502 returned for {path}")]
         private static partial void LogNoConnectedWorkspace(ILogger logger, string path);
 
-        [LoggerMessage(Level = LogLevel.Information, Message = "Randomly routed to workspace '{clientId}' out of {count} connected")]
-        private static partial void LogRandomRouted(ILogger logger, string clientId, int count);
+        [LoggerMessage(Level = LogLevel.Information, Message = "Routed to workspace '{clientId}' ({tier}, {remainingMilliCredits} milli-credits remaining) out of {count} connected")]
+        private static partial void LogRouted(ILogger logger, string clientId, AiQuotaTier tier, long? remainingMilliCredits, int count);
 
         [LoggerMessage(Level = LogLevel.Information, Message = "<= [{clientId}] {method} {statusCode}, elapsed {elapsed}")]
         private static partial void LogResponse(ILogger logger, string clientId, string method, int statusCode, TimeSpan elapsed);

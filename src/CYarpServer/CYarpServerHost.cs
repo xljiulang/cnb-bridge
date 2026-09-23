@@ -91,6 +91,12 @@ namespace CYarpServer
             // Strongly typed public surface options, bound with the source generated binder.
             builder.Services.Configure<CnbProxyOptions>(builder.Configuration);
 
+            // AI quota probing: the routing of the bare chat route prefers the workspace with the
+            // most remaining credits, and GET / reports what was read. Both share this store.
+            builder.Services.Configure<AiQuotaOptions>(builder.Configuration.GetSection(AiQuotaOptions.SectionName));
+            builder.Services.AddSingleton<AiQuotaStore>();
+            builder.Services.AddHostedService<AiQuotaProbeService>();
+
             var app = builder.Build();
 
             app.UseCYarp();

@@ -189,7 +189,7 @@ namespace CYarp.Cnb.Tests
         }
 
         [Fact]
-        public async Task RootPath_ListsTheConnectedWorkspaceIds()
+        public async Task RootPath_ListsTheConnectedWorkspacesAsObjects()
         {
             using (var empty = await this.GetAsync("/", apiKey: null))
             {
@@ -203,13 +203,21 @@ namespace CYarp.Cnb.Tests
             using (var both = await this.GetAsync("/", apiKey: null))
             {
                 Assert.Equal(HttpStatusCode.OK, both.StatusCode);
-                Assert.Equal("""["orgA/repoA","orgB/repoB"]""", await both.Content.ReadAsStringAsync());
+
+                // Objects, not ids: this list carries the probed AI quota of every workspace now.
+                // The quota itself is covered by the AI quota tests; here only the shape and the
+                // ordering matter.
+                var body = await both.Content.ReadAsStringAsync();
+                Assert.StartsWith("""[{"clientId":"orgA/repoA",""", body);
+                Assert.Contains("""{"clientId":"orgB/repoB",""", body);
             }
 
             await this.DisconnectAsync("orgA/repoA");
 
             using var remaining = await this.GetAsync("/", apiKey: null);
-            Assert.Equal("""["orgB/repoB"]""", await remaining.Content.ReadAsStringAsync());
+            var remainingBody = await remaining.Content.ReadAsStringAsync();
+            Assert.StartsWith("""[{"clientId":"orgB/repoB",""", remainingBody);
+            Assert.DoesNotContain("orgA/repoA", remainingBody);
         }
 
         [Fact]

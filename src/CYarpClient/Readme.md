@@ -130,9 +130,9 @@ FIXED_URL: "http://ai.example.com"
 |---|---|
 | `GET /{org}/{repo}/v1/models` | **免鉴权**（本地应答、不耗额度）：在线 `200`，隧道断了 `503` |
 | `POST /{org}/{repo}/v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；经隧道转发，上游不支持非流式（必须 `stream:true`） |
-| `GET /` | **免鉴权**：在线工作空间的 clientId 列表（JSON 数组，无在线时为 `[]`） |
+| `GET /` | **免鉴权**：在线工作空间的**对象数组**，每个对象含 `clientId`、`online`、`remainingCredits`、`stale`、`updatedAt`、`error`；无在线时为 `[]` |
 | `GET /v1/models` | **免鉴权**：`ProxyModels` 配置的模型列表；**不检查在线状态**（恒 `200`），与带前缀版本的「离线 503」刻意区分 |
-| `POST /v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；在当前在线的工作空间里等概率**随机挑一个**转发；无在线则 `502` |
+| `POST /v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；在当前在线的工作空间里挑**剩余 AI 额度最多**的那个转发（额度未知时退回随机）；无在线则 `502` |
 | 其它路径（单段/三段前缀、`/v1/embeddings`…） | `404` |
 | 方法不匹配（如 `POST .../v1/models`） | `405` |
 | chat 的 `ApiKey` 缺失/错误 | `401` |
@@ -142,21 +142,30 @@ FIXED_URL: "http://ai.example.com"
 
 调用方有两种接法：
 
-- **统一 base_url**（不必知道 workpace slug）：`base_url = <base>/v1`、`api_key = <ApiKey>`。请求会随机分发给任意一个在线工作空间。
+- **统一 base_url**（不必知道 workpace slug）：`base_url = <base>/v1`、`api_key = <ApiKey>`。请求会发给剩余额度最多的那个在线工作空间；额度读不到时退回随机。
 - **固定工作空间**：`base_url = <base>/org/repo/v1`。
-- 查看当前有哪些工作空间在线：`curl <base>/`。
+- 查看当前有哪些工作空间在线、各自剩多少额度：`curl <base>/`。
+
+> 额度由**服务端**每 5 分钟经本工作空间的隧道去读
+> `https://api.cnb.cool/{org}/-/charge/quota` 与 `/-/charge/volume`（剩余 = 总额度 − 已用 − 冻结，
+> 单位 credit）。所以**客户端不需要做任何事、也不用改配置**：只要能建隧道，服务端就会自己去问。
+> 2026-09 实测：工作空间里的 `CNB_TOKEN` **有** `group-resource:r` 权限，两个接口都返回 `200`
+> （用 `bash scripts/verify-endpoint.sh` 第 5 节可以自己复现，它会打印完整响应体并算出剩余额度）。
+> 万一读不到（接口 401/403、隧道抖动、超时），`GET /` 里该工作空间的 `remainingCredits` 是 `null`
+> 且 `error` 非空，路由对它退化为「未知」——不会报错，只是不做额度优选。额度是**顶级组织级**的，
+> 同组织的多个工作空间读数相同，所以优选真正有意义的是跨组织场景。
 
 验收清单（假设工作空间 `org/repo` 已在线，`<base>` = `http://你的域名`）：
 
 ```bash
-# 0) 有哪些工作空间在线（免鉴权）
+# 0) 有哪些工作空间在线 + 各自剩余额度（免鉴权）
 curl -s $BASE/
 
 # 1) 该工作空间的隧道状态（在线 200 / 隧道假死 503；本地应答、免鉴权、不耗额度）
 curl -s -o /dev/null -w '%{http_code}\n' $BASE/org/repo/v1/models
 # 期望 200
 
-# 2) 真实调用（上游不支持非流式，必须 stream:true）：带前缀=指定工作空间，不带=随机挑一个
+# 2) 真实调用（上游不支持非流式，必须 stream:true）：带前缀=指定工作空间，不带=挑额度最多的
 curl -sN $BASE/v1/chat/completions \
   -H "Authorization: Bearer $ApiKey" -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true}'
@@ -246,6 +255,7 @@ OpenAI 客户端接入时：`base_url = <base>/org/repo/v1`，`api_key = <ApiKey
 | chat 返回 `401` | 没带 key 或 key 与服务端 `ApiKey` 不一致 | 加 `-H "Authorization: Bearer <ApiKey>"`；注意 `v1/models` 免鉴权，**它返回 401 才说明服务端键名或配置有问题** |
 | chat 返回 `502` | 前缀写错/大小写不符，或用了裸路径 | 用形如 `<base>/<org>/<repo>/v1/chat/completions` 的地址 |
 | 上游返回 401/412 之类 | 上游鉴权/网络策略 | 412 表示请求不是从 CNB 工作空间内发出；401 多半是 `CNB_TOKEN` 过期，重启工作空间让平台重铸 |
+| `GET /` 里本工作空间的 `remainingCredits` 一直是 `null`、`error` 非空 | 服务端读不到额度：可能该 `CNB_TOKEN` 没有 `group-resource:r` 权限（`401/403`）、仓库在子组织下（额度接口要根组织，可能 `403/404`）、或隧道刚连上还没到下一个探测周期 | 先看服务端日志里的 `AI quota probe of workspace ... failed`；在工作空间里跑 `scripts/verify-endpoint.sh` 的第 5 节直连试一次。**这是退化不是故障**：chat 照常可用，只是不做额度优选 |
 
 常用观察点（都在工作空间内）：
 
@@ -264,8 +274,9 @@ tail -f logs/log$(date +%Y%m%d).txt           # 客户端文件日志（相对�
 - **隧道入站不做鉴权**：客户端只带 CNB token（不具备公网密钥语义），服务端不做准入拒绝。因此能访问到服务端端口的人
   都可以用任意 `X-CYarp-Client` 注册隧道，把该工作空间的请求引到自己那里（能看到请求体），并把真正的工作空间踢下线。
   要收紧需在服务端 `CYarpTunnelAuthenticationHandler` 里加共享密钥校验（服务端配 `TunnelKey`、工作空间注入对应环境变量）。
-- **`GET /{org}/{repo}/v1/models` 免鉴权**：它是本地应答的静态模型列表（不耗额度、不触上游），免鉴权是为了让保活 cron
-  不带任何密钥探活；知道组织/仓库名的人可以读到模型列表与该工作空间的隧道在线状态。
+- **`GET /{org}/{repo}/v1/models` 与 `GET /` 免鉴权**：前者是本地应答的静态模型列表（不耗额度、不触上游），
+  免鉴权是为了让保活 cron 不带任何密钥探活；后者是发现接口，会暴露有哪些工作空间在线**以及各组织的剩余
+  AI 额度数字**（不含任何 token）。
 - **现在没有 TLS**：CNB token（握手头 + 隧道内注入）与 API 内容都是明文。上 TLS 时把 `CYARP_SERVER_URI` 改成
   `https://`、`FIXED_URL` 改成 `https://`，服务端加证书即可，代码不用动。
 - **预编译客户端的信任链最弱**：`CYarpClient` 是 8 MB 的 Native AOT 单文件可执行程序（stripped、无签名），

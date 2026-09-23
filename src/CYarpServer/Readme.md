@@ -88,6 +88,14 @@ chmod +x /opt/cyarp/CYarpServer
   // /{org}/{repo}/v1/models 本地返回的模型列表，不占上游额度（JSON 数组，不是逗号字符串）
   "ProxyModels": [ "deepseek-v4-flash", "glm-5.3-flash", "kimi-k3" ],
 
+  // 裸 /v1/chat/completions 按剩余 AI 额度择优选工作空间；Enabled=false 则回到等概率随机
+  "AiQuota": {
+    "Enabled": true,
+    "Interval": "00:05:00",   // 多久经各工作空间的隧道重新读一次额度
+    "StaleAfter": "00:15:00", // 超过这个年龄的读数视为「未知」，不再用于路由
+    "Timeout": "00:00:10"     // 单个工作空间一轮探测（两个请求合计）的超时
+  },
+
   // 监听地址：不写则默认 http://+:80（80 端口需要 root，ServiceSelf 安装时本来就是 root）
   // "Urls": "http://+:8080",
 
@@ -103,6 +111,10 @@ chmod +x /opt/cyarp/CYarpServer
 ```
 
 `CYarpOptions` 的生效值会在启动日志里回显（`CYarp options in effect: ...`）；如果这里与文件不一致，说明配置没被读到。
+
+`AiQuota` 是**可选**的：整段删掉就用默认值（即开启、5 分钟一轮）。服务端会在启动后立刻探测一次，
+之后每个 `Interval` 一轮，日志里能看到 `AI quota of workspace '...' (organization ...): N milli-credits remaining`；
+读不到时是 `AI quota probe of workspace '...' failed: ...`（**不影响转发**，只是该工作空间在路由里算「未知」）。
 
 ### 3.3 安装并启动为系统服务
 
@@ -135,7 +147,7 @@ sudo ./CYarpServer        # 不接任何子命令时就是前台运行，Ctrl+C 
 ### 3.4 验证服务端
 
 ```bash
-curl -i http://<你的域名或IP>/                       # 当前在线的工作空间（无在线时返回 []）
+curl -i http://<你的域名或IP>/                       # 当前在线工作空间 + 各自剩余额度（无在线时返回 []）
 curl -i http://<你的域名或IP>/v1/models              # 配置的模型列表（恒 200）
 curl -i http://<你的域名或IP>/<org>/<repo>/v1/models  # 某个工作空间是否在线（离线 503）
 ```
@@ -144,12 +156,23 @@ curl -i http://<你的域名或IP>/<org>/<repo>/v1/models  # 某个工作空间�
 
 | 请求 | 期望 |
 |---|---|
-| `GET /`（不需要 key） | `200` + `[]`（没有在线工作空间） |
+| `GET /`（不需要 key） | `200` + `[]`（没有在线工作空间；有在线时是含 `clientId`/`remainingCredits` 的对象数组） |
 | `GET /v1/models`（不需要 key） | `200` + 模型列表（不看在不在线） |
 | `GET /{org}/{repo}/v1/models`（不需要 key） | `503`：服务端活着，但该工作空间的隧道还没连上 |
 | `POST /{org}/{repo}/v1/chat/completions` + 正确 `ApiKey` | `502`（没有在线工作空间） |
 | `POST /v1/chat/completions` + 正确 `ApiKey` | `502`（没有在线工作空间可挑） |
 | 同样请求但不带 key | `401`（chat 需要 `ApiKey`；若 key 配空则不校验） |
+
+工作空间接入后，`GET /` 的响应形如：
+
+```json
+[{"clientId":"org/repo","online":true,"remainingCredits":100.5,"stale":false,"updatedAt":"2026-09-23T08:12:00+00:00","error":null}]
+```
+
+`remainingCredits` 为 `null` 说明服务端还没读到额度（`stale` 会是 `true`，`error` 里是原因）。
+额度是经**该工作空间自己的隧道**向 `api.cnb.cool` 读的（`/{org}/-/charge/quota` 与 `/-/charge/volume`），
+因此工作空间的 `CNB_TOKEN` 需要有 `group-resource:r` 权限；没有该权限时读不到，`GET /` 里会显示 `403`，
+路由退回随机——功能不受影响。详见第 6 节的接口说明。
 
 ### 3.5 升级与迁移
 
@@ -213,6 +236,10 @@ C:\cyarp\CYarpServer.exe           # 前台运行，方便调试
 |---|---|---|
 | `ApiKey` | 空 | 公网 **chat** 调用方的 Bearer key；为空则不校验。`v1/models` 永久免鉴权 |
 | `ProxyModels` | `[ "deepseek-v4-flash", "glm-5.3-flash", "kimi-k3" ]` | `/{org}/{repo}/v1/models` 本地返回的列表（JSON 数组；写成逗号字符串会在启动时报绑定错误） |
+| `AiQuota:Enabled` | `true` | 是否经各工作空间的隧道读额度并据此为裸 chat 选路；`false` 回到等概率随机 |
+| `AiQuota:Interval` | `00:05:00` | 额度探测周期（上一轮没跑完时跳过本次触发） |
+| `AiQuota:StaleAfter` | `00:15:00` | 超过这个年龄的读数视为「未知」，不再用于路由（容忍连续两次失败） |
+| `AiQuota:Timeout` | `00:00:10` | 单个工作空间一轮探测（`quota` + `volume` 两个请求合计）的超时 |
 | `Urls` | `http://+:80` | Kestrel 监听地址；也可用 `--urls` 启动参数 |
 | `CYarpOptions:Client:KeepAliveInterval` | `00:00:40` | 服务端心跳周期 |
 | `CYarpOptions:HttpTunnel:MaxTunnelsPerClient` | `20` | 每个工作空间并发 HTTP 隧道（≈并发请求）上限 |
@@ -229,18 +256,44 @@ C:\cyarp\CYarpServer.exe           # 前台运行，方便调试
 |---|---|
 | `GET /{org}/{repo}/v1/models` | **免鉴权**（本地应答、不耗额度）：该工作空间在线 `200`，隧道断了 `503` |
 | `POST /{org}/{repo}/v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；转发到该工作空间，上游收到 `/{org}/{repo}/-/ai/chat/completions`；离线 `502` |
-| `GET /` | **免鉴权**：在线工作空间的 clientId 列表（JSON 数组，无在线时为 `[]`） |
+| `GET /` | **免鉴权**：在线工作空间的**对象数组**（`clientId`、`online`、`remainingCredits`、`stale`、`updatedAt`、`error`），无在线时为 `[]` |
 | `GET /v1/models` | **免鉴权**：`ProxyModels` 配置的模型列表；**不检查在线状态**（恒 `200`），与带前缀版本的「离线 503」刻意区分 |
-| `POST /v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；在**当前在线**的工作空间里等概率随机挑一个转发；无在线则 `502` |
+| `POST /v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；在**当前在线**的工作空间里挑**剩余 AI 额度最多**的那个转发（额度未知则退回随机）；无在线则 `502` |
 | 其它路径（单段/三段前缀、`/v1/embeddings`…） | `404` |
 | 方法不匹配（如 `POST .../v1/models`） | `405` |
 | `/cyarp`、`/cyarp/{tunnelId}`（隧道握手） | 不受 `ApiKey` 约束，握手头里带的是 CNB token；形如 `/cyarp/<repo>/v1/chat/completions` 的公网路径仍要求 key |
 
 调用方有两种接法：
 
-- **统一 base_url**（不必知道工作空间 slug）：`base_url = http://<你的域名>/v1`、`api_key = <ApiKey>`。请求随机分发给任意一个在线工作空间。
+- **统一 base_url**（不必知道工作空间 slug）：`base_url = http://<你的域名>/v1`、`api_key = <ApiKey>`。请求发给剩余额度最多的在线工作空间。
 - **固定工作空间**：`base_url = http://<你的域名>/<org>/<repo>/v1`。
-- 想知道当前有哪些工作空间在线：`curl http://<你的域名>/`。
+- 想知道当前有哪些工作空间在线、各自剩多少额度：`curl http://<你的域名>/`。
+
+### 额度从哪来（服务端 → 隧道 → api.cnb.cool）
+
+服务端的后台任务对每个在线工作空间**经它自己的隧道**读一次额度，等价于在工作空间里执行：
+
+```bash
+curl -s -H "Authorization: Bearer $CNB_TOKEN" -H 'Accept: application/vnd.cnb.api+json' \
+  "https://api.cnb.cool/$ORG/-/charge/quota"   # credit_in_milli.total
+curl -s -H "Authorization: Bearer $CNB_TOKEN" -H 'Accept: application/vnd.cnb.api+json' \
+  "https://api.cnb.cool/$ORG/-/charge/volume"  # credit_in_milli + freeze_credit_in_milli
+# 剩余 = total − (credit_in_milli + freeze_credit_in_milli)，单位 milli-credit（1000 = 1 credit）
+```
+
+也可以在工作空间里手动跑 `bash scripts/verify-endpoint.sh`（第 5 节）：它会打印这两个响应体的**全部内容**
+并算出剩余额度（2026-09 在工作空间内实测两接口均为 `200`，`group-resource:r` 权限具备）。
+
+| 结果 | 含义 | 服务端行为 |
+|---|---|---|
+| `200` | 读到了 | `GET /` 显示 `remainingCredits`，路由按额度优选 |
+| `401` / `403` | `CNB_TOKEN` 缺 `group-resource:r` 权限（或仓库在子组织下、该接口要根组织）。工作空间的流水线 token 实测有该权限，出现它多半是权限被别人改过 | `GET /` 的 `error` 写明状态码、`remainingCredits` 为 `null`，路由退回随机 |
+| `412` / 连接失败 / 超时 | 隧道断了、网络抖动、`AiQuota:Timeout` 太小 | 同上；且**不会**清掉上一次成功的值，只是等它自然过期（`StaleAfter`） |
+
+> 探测读的是**组织级**额度（顶级组织），所以同一组织下的多个工作空间读数相同——多工作空间优选
+> 真正有意义的是**跨组织**场景。额度接口的调用不消耗 AI 额度。用的是 `credit_in_milli.total`
+> （免费 + 付费 + 特权，例如实测的 `total=1166000` 就是免费 500 + 天才程序员认证 666），
+> **不是只含免费的 `free`**：用 `free` 会把总额度低估，也会把认证等特权额度漏掉。
 
 服务端转发时**丢弃调用方的 `Authorization`（ApiKey）**，换成该工作空间握手时报上来的
 `Authorization: Bearer <CNB_TOKEN>`，因此上游鉴权成立、公网 key 不会泄漏。
@@ -257,7 +310,9 @@ C:\cyarp\CYarpServer.exe           # 前台运行，方便调试
 | chat 返回 `502` | 没有该前缀的在线工作空间（写成裸路径、前缀写错、大小写不符） | 用形如 `<base>/<org>/<repo>/v1/chat/completions` 的地址，`{org}/{repo}` 与工作空间仓库 slug 逐字符一致（大小写敏感） |
 | `/{org}/{repo}/v1/models` 返回 `503` | 服务端活着但该工作空间的隧道断了（假死） | 工作空间的保活 cron 会自动 `stop + start`；也可手动重启工作空间 |
 | 调用返回 `404` | 路径形态不对：已发布的只有 `/{org}/{repo}/v1/models`、`/{org}/{repo}/v1/chat/completions`、`GET /`、`GET /v1/models`、`POST /v1/chat/completions` | 单段前缀（如 `org~repo`）、三段前缀、其它 `/v1/*` 都是 404；想要"不指定工作空间"就用裸 `/v1/chat/completions` |
-| 裸 `/v1/chat/completions` 返回 `502` | 当前没有任何工作空间在线（随机挑选无候选） | `curl http://<你的域名>/` 看在线列表；确认工作空间已启动且隧道建立 |
+| 裸 `/v1/chat/completions` 返回 `502` | 当前没有任何工作空间在线（无可挑选的候选） | `curl http://<你的域名>/` 看在线列表；确认工作空间已启动且隧道建立 |
+| `GET /` 里某个工作空间的 `remainingCredits` 一直是 `null` | 服务端读不到额度：`error` 里会写明原因（`401/403` = 该 `CNB_TOKEN` 无 `group-resource:r` 权限；`403/404` = 仓库在子组织下；超时 = 隧道慢或 `AiQuota:Timeout` 太小）；也可能是刚连上还没到下一个探测周期（最多等一个 `Interval`） | 用 `sudo ./CYarpServer logs filter=AI` 看探测日志；在工作空间里跑 `scripts/verify-endpoint.sh` 第 5 节直连验证权限。**这是退化不是故障**：chat 照常可用，只是不做额度优选 |
+| 想确认选路是否按额度生效 | 日志级别是 `Information` 时每条裸 chat 会打印 `Routed to workspace '...' (Known/Unknown/Exhausted, ... milli-credits remaining) out of N connected` | `Known` = 按额度最大值挑；`Unknown` = 该轮没有可用额度、退回随机；`Disabled` = `AiQuota:Enabled=false` |
 | 对话请求返回 `301 Moved Permanently` 且 `Location: https://cnb.cool`（响应体是一小段 HTML） | 服务端把**调用方的 Host**（你的公网域名/IP）转发给了上游；CNB 边缘按 Host 路由，认不出就重定向到官网。这是 2026-09 之前服务端版本的 bug | 更新服务端二进制到包含 Host 修复的版本（`CnbAiTransformer` 里清掉转发 Host）并重启服务；`/v1/models` 这类本地应答不受影响，所以「models 通、对话不通」正是这个症状 |
 | 上游返回 401/412 之类 | 上游鉴权/网络策略 | 412 表示请求不是从 CNB 工作空间内发出；401 多半是 `CNB_TOKEN` 过期，重启工作空间让平台重铸 |
 | Windows 上启动即报 `SocketException (10013) ... 访问权限`（WSAEACCES） | 端口落在 Windows 保留段（Hyper-V/WSL 预留，如 8081-8180），或用了 <1024 的端口但没提权 | `netsh interface ipv4 show excludedportrange protocol=tcp` 查保留段，换一个端口：在 `appsettings.json` 加 `"Urls": "http://+:18089"` |
@@ -271,13 +326,14 @@ sudo ./CYarpServer logs                  # 订阅服务进程的日志（可加 
 sudo journalctl -u CYarpServer -n 100 --no-pager
 ```
 
-### 两个已知取舍
+### 三个已知取舍
 
 - **`GET .../v1/models` 与 `GET /` 免鉴权**：models 是本地应答的静态模型列表（不耗额度、不触上游、不含敏感数据），
-  免鉴权是为了让工作空间的保活 cron 不带任何密钥探活；`/` 只暴露"哪些工作空间在线"。
-  知道组织/仓库名的人可以读到模型列表与该工作空间的隧道在线状态。
-- **裸 `POST /v1/chat/completions` 会随机分发**：多工作空间场景下，请求可能落到任意一个在线工作空间，
-  因此上游 token 与额度按被挑中的那个工作空间计。
+  免鉴权是为了让工作空间的保活 cron 不带任何密钥探活；`/` 只暴露"哪些工作空间在线"**以及各组织的剩余 AI
+  额度数字**（不含任何 token）。知道组织/仓库名的人可以读到模型列表与该工作空间的隧道在线状态。
+  要收紧只需把 `GET /` 从 `CreateApiKeyGate` 的白名单里去掉。
+- **裸 `POST /v1/chat/completions` 按额度分发**：多工作空间场景下，请求落到**剩余额度最多**的那个工作空间，
+  因此上游 token 与额度按被挑中的那个工作空间计；额度读不到（或 `AiQuota:Enabled=false`）时回退为等概率随机。
 - **隧道入站不做鉴权**：客户端只带 CNB token（不具备公网密钥语义），服务端不做准入拒绝。因此能访问到服务端端口
   的人都可以用任意 `X-CYarp-Client` 注册隧道，把该工作空间的请求引到自己那里（能看到请求体），并把真正的工作空间
   踢下线。要收紧只需在该 handler 里加一个共享密钥 claim 校验并在失败时返回 `401`。
