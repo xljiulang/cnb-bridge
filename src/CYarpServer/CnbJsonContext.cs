@@ -33,6 +33,7 @@ namespace CYarpServer
     /// </summary>
     [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
     [JsonSerializable(typeof(ModelListResponse))]
+    [JsonSerializable(typeof(string[]))]
     internal sealed partial class CnbJsonContext : JsonSerializerContext
     {
     }

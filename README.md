@@ -185,11 +185,14 @@ sudo ./CYarpServer stop            # 停止并删除服务
 ## 五、公网调用
 
 ```bash
-# 该工作空间的隧道状态（在线 200 / 离线 503；本地应答、免鉴权、不耗额度）
+# 有哪些工作空间在线（免鉴权）
+curl http://ai.example.com/
+
+# 固定打到某个工作空间（在线 200 / 离线 503；本地应答、免鉴权、不耗额度）
 curl http://ai.example.com/org/repo/v1/models
 
-# 对话（需要 ApiKey；OpenAI 客户端把 base_url 设成带 <org>/<repo> 前缀的地址即可）
-curl http://ai.example.com/org/repo/v1/chat/completions \
+# 对话（需要 ApiKey）：带前缀 = 指定工作空间；不带前缀 = 随机挑一个在线工作空间
+curl http://ai.example.com/v1/chat/completions \
   -H "Authorization: Bearer $ApiKey" -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true}'
 ```
@@ -202,13 +205,22 @@ curl http://ai.example.com/org/repo/v1/chat/completions \
 |---|---|
 | `GET /{org}/{repo}/v1/models` | **免鉴权**。该工作空间在线 `200`（返回 `ProxyModels` 配置的列表），**离线 `503`**（隧道假死信号，不耗额度） |
 | `POST /{org}/{repo}/v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；转发到该工作空间，上游收到 `/{org}/{repo}/-/ai/chat/completions`；离线 `502` |
-| 其它路径（含裸 `/v1/models`、`/v1/chat/completions`、单段/三段前缀、`/v1/embeddings`…） | `404`（路由表即接口清单） |
+| `GET /` | **免鉴权**。返回当前在线工作空间的 clientId 列表（JSON 数组，如 `["org/repo"]`；无在线则为 `[]`），用于「统一 base_url」场景下发现有哪些工作空间 |
+| `GET /v1/models` | **免鉴权**。返回 `ProxyModels` 配置的模型列表；**不检查在线状态**（恒 `200`），与带前缀版本的「离线 503」刻意区分 |
+| `POST /v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；在**当前在线**的工作空间里等概率随机挑一个转发；无在线工作空间时 `502` |
+| 其它路径（单段/三段前缀、`/v1/embeddings`…） | `404`（路由表即接口清单） |
 | 方法不匹配（如 `POST .../v1/models`） | `405` |
 | chat 的 `ApiKey` 缺失/错误 | `401`，请求不会到达任何工作空间 |
 | `/cyarp`、`/cyarp/{tunnelId}`（隧道握手） | 不受 `ApiKey` 约束，握手头里带的是 CNB token；形如 `/cyarp/<repo>/v1/chat/completions` 的公网路径仍要求 key |
 
 > 前缀固定为**两段** `{org}/{repo}`（大小写敏感）。`clientId` 恒等于工作空间的 `CNB_REPO_SLUG`
 > （`cyarp-start.sh` 内写死，`.cnb.yml` 里没有可配项），所以公网前缀不可能与隧道注册的 id 不一致。
+
+**两种用法**：
+
+- **统一 base_url**（调用方不必知道工作空间 slug）：`base_url = http://<你的域名>/v1`、`api_key = <ApiKey>`。请求会随机分发给任意一个在线工作空间，多工作空间时上游 token/额度按被挑中的那个计。
+- **固定工作空间**：`base_url = http://<你的域名>/<org>/<repo>/v1`。
+- **查看在线工作空间**：`curl http://<你的域名>/`。
 
 服务端收到请求后：**丢弃调用方的 `Authorization`（公网 key）**，换成该工作空间握手时报上来的
 `Authorization: Bearer <CNB_TOKEN>` 再发往上游，因此上游鉴权成立，公网 key 不会泄漏。
@@ -336,7 +348,8 @@ dotnet test cyarp-cnb.sln -c Release
 | 双工作空间 | 各自打到各自 TargetUri 与各自 token，不串台 |
 | 离线工作空间对话 | 返回 `502` |
 | `GET /{org}/{repo}/v1/models` | 在线 `200`（内容为 `ProxyModels` 数组）、离线 `503`、含尾斜杠 `200`，均不触达上游 |
-| 裸 `/v1/...`、单段/三段前缀、其它 `/v1/*` | 返回 `404` |
+| 单段/三段前缀、其它 `/v1/*` | 返回 `404` |
+| `GET /` / 裸 `GET /v1/models` / 裸 `POST /v1/chat/completions` | 分别返回在线 clientId 数组、模型列表、随机转发的对话响应 |
 | 方法不匹配（`POST .../v1/models`） | 返回 `405` |
 | `ApiKey` 错误/缺失 | `401` 且上游零请求 |
 | `stream=true` | SSE 分帧透传：假上游写第一帧后阻塞，直到测试读到第一帧才写第二帧（整体缓冲的实现会卡死失败） |

@@ -135,17 +135,21 @@ sudo ./CYarpServer        # 不接任何子命令时就是前台运行，Ctrl+C 
 ### 3.4 验证服务端
 
 ```bash
-curl -i http://<你的域名或IP>/<org>/<repo>/v1/models
+curl -i http://<你的域名或IP>/                       # 当前在线的工作空间（无在线时返回 []）
+curl -i http://<你的域名或IP>/v1/models              # 配置的模型列表（恒 200）
+curl -i http://<你的域名或IP>/<org>/<repo>/v1/models  # 某个工作空间是否在线（离线 503）
 ```
 
-该端点免鉴权（本地应答、不耗额度）。此时若还没有工作空间接入，`/{org}/{repo}/v1/models` 会返回 `503`：
+这三个端点都免鉴权（本地应答、不耗额度）。此时若还没有工作空间接入：
 
 | 请求 | 期望 |
 |---|---|
+| `GET /`（不需要 key） | `200` + `[]`（没有在线工作空间） |
+| `GET /v1/models`（不需要 key） | `200` + 模型列表（不看在不在线） |
 | `GET /{org}/{repo}/v1/models`（不需要 key） | `503`：服务端活着，但该工作空间的隧道还没连上 |
 | `POST /{org}/{repo}/v1/chat/completions` + 正确 `ApiKey` | `502`（没有在线工作空间） |
+| `POST /v1/chat/completions` + 正确 `ApiKey` | `502`（没有在线工作空间可挑） |
 | 同样请求但不带 key | `401`（chat 需要 `ApiKey`；若 key 配空则不校验） |
-| 任何裸 `/v1/...` 路径 | `404`（未发布） |
 
 ### 3.5 升级与迁移
 
@@ -225,9 +229,18 @@ C:\cyarp\CYarpServer.exe           # 前台运行，方便调试
 |---|---|
 | `GET /{org}/{repo}/v1/models` | **免鉴权**（本地应答、不耗额度）：该工作空间在线 `200`，隧道断了 `503` |
 | `POST /{org}/{repo}/v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；转发到该工作空间，上游收到 `/{org}/{repo}/-/ai/chat/completions`；离线 `502` |
-| 其它路径（裸 `/v1/*`、单段/三段前缀、`/v1/embeddings`…） | `404` |
+| `GET /` | **免鉴权**：在线工作空间的 clientId 列表（JSON 数组，无在线时为 `[]`） |
+| `GET /v1/models` | **免鉴权**：`ProxyModels` 配置的模型列表；**不检查在线状态**（恒 `200`），与带前缀版本的「离线 503」刻意区分 |
+| `POST /v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；在**当前在线**的工作空间里等概率随机挑一个转发；无在线则 `502` |
+| 其它路径（单段/三段前缀、`/v1/embeddings`…） | `404` |
 | 方法不匹配（如 `POST .../v1/models`） | `405` |
 | `/cyarp`、`/cyarp/{tunnelId}`（隧道握手） | 不受 `ApiKey` 约束，握手头里带的是 CNB token；形如 `/cyarp/<repo>/v1/chat/completions` 的公网路径仍要求 key |
+
+调用方有两种接法：
+
+- **统一 base_url**（不必知道工作空间 slug）：`base_url = http://<你的域名>/v1`、`api_key = <ApiKey>`。请求随机分发给任意一个在线工作空间。
+- **固定工作空间**：`base_url = http://<你的域名>/<org>/<repo>/v1`。
+- 想知道当前有哪些工作空间在线：`curl http://<你的域名>/`。
 
 服务端转发时**丢弃调用方的 `Authorization`（ApiKey）**，换成该工作空间握手时报上来的
 `Authorization: Bearer <CNB_TOKEN>`，因此上游鉴权成立、公网 key 不会泄漏。
@@ -243,7 +256,8 @@ C:\cyarp\CYarpServer.exe           # 前台运行，方便调试
 | chat 返回 `401` | 请求里的 key 与 `appsettings.json` 的 `ApiKey` 不一致，或压根没带 | `curl` 时加 `-H "Authorization: Bearer <ApiKey>"`；或把 `ApiKey` 清空（仅调试）。注意 `v1/models` 免鉴权，**它返回 401 才说明键名写错了（例如仍写成 `ProxyKey`）** |
 | chat 返回 `502` | 没有该前缀的在线工作空间（写成裸路径、前缀写错、大小写不符） | 用形如 `<base>/<org>/<repo>/v1/chat/completions` 的地址，`{org}/{repo}` 与工作空间仓库 slug 逐字符一致（大小写敏感） |
 | `/{org}/{repo}/v1/models` 返回 `503` | 服务端活着但该工作空间的隧道断了（假死） | 工作空间的保活 cron 会自动 `stop + start`；也可手动重启工作空间 |
-| 调用带前缀仍返回 `404` | 路径形态不对：只发布 `/{org}/{repo}/v1/models` 与 `/{org}/{repo}/v1/chat/completions` | 原子路径、单段前缀（如 `org~repo`）、三段前缀、其它 `/v1/*` 都是 404 |
+| 调用返回 `404` | 路径形态不对：已发布的只有 `/{org}/{repo}/v1/models`、`/{org}/{repo}/v1/chat/completions`、`GET /`、`GET /v1/models`、`POST /v1/chat/completions` | 单段前缀（如 `org~repo`）、三段前缀、其它 `/v1/*` 都是 404；想要"不指定工作空间"就用裸 `/v1/chat/completions` |
+| 裸 `/v1/chat/completions` 返回 `502` | 当前没有任何工作空间在线（随机挑选无候选） | `curl http://<你的域名>/` 看在线列表；确认工作空间已启动且隧道建立 |
 | 对话请求返回 `301 Moved Permanently` 且 `Location: https://cnb.cool`（响应体是一小段 HTML） | 服务端把**调用方的 Host**（你的公网域名/IP）转发给了上游；CNB 边缘按 Host 路由，认不出就重定向到官网。这是 2026-09 之前服务端版本的 bug | 更新服务端二进制到包含 Host 修复的版本（`CnbAiTransformer` 里清掉转发 Host）并重启服务；`/v1/models` 这类本地应答不受影响，所以「models 通、对话不通」正是这个症状 |
 | 上游返回 401/412 之类 | 上游鉴权/网络策略 | 412 表示请求不是从 CNB 工作空间内发出；401 多半是 `CNB_TOKEN` 过期，重启工作空间让平台重铸 |
 | Windows 上启动即报 `SocketException (10013) ... 访问权限`（WSAEACCES） | 端口落在 Windows 保留段（Hyper-V/WSL 预留，如 8081-8180），或用了 <1024 的端口但没提权 | `netsh interface ipv4 show excludedportrange protocol=tcp` 查保留段，换一个端口：在 `appsettings.json` 加 `"Urls": "http://+:18089"` |
@@ -259,8 +273,11 @@ sudo journalctl -u CYarpServer -n 100 --no-pager
 
 ### 两个已知取舍
 
-- **`GET /{org}/{repo}/v1/models` 免鉴权**：它是本地应答的静态模型列表（不耗额度、不触上游、不含敏感数据），
-  免鉴权是为了让工作空间的保活 cron 不带任何密钥探活。知道组织/仓库名的人可以读到模型列表与该工作空间的隧道在线状态。
+- **`GET .../v1/models` 与 `GET /` 免鉴权**：models 是本地应答的静态模型列表（不耗额度、不触上游、不含敏感数据），
+  免鉴权是为了让工作空间的保活 cron 不带任何密钥探活；`/` 只暴露"哪些工作空间在线"。
+  知道组织/仓库名的人可以读到模型列表与该工作空间的隧道在线状态。
+- **裸 `POST /v1/chat/completions` 会随机分发**：多工作空间场景下，请求可能落到任意一个在线工作空间，
+  因此上游 token 与额度按被挑中的那个工作空间计。
 - **隧道入站不做鉴权**：客户端只带 CNB token（不具备公网密钥语义），服务端不做准入拒绝。因此能访问到服务端端口
   的人都可以用任意 `X-CYarp-Client` 注册隧道，把该工作空间的请求引到自己那里（能看到请求体），并把真正的工作空间
   踢下线。要收紧只需在该 handler 里加一个共享密钥 claim 校验并在失败时返回 `401`。

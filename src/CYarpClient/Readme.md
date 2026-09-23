@@ -130,22 +130,34 @@ FIXED_URL: "http://ai.example.com"
 |---|---|
 | `GET /{org}/{repo}/v1/models` | **免鉴权**（本地应答、不耗额度）：在线 `200`，隧道断了 `503` |
 | `POST /{org}/{repo}/v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；经隧道转发，上游不支持非流式（必须 `stream:true`） |
-| 其它路径（裸 `/v1/*`、单段/三段前缀、`/v1/embeddings`…） | `404` |
+| `GET /` | **免鉴权**：在线工作空间的 clientId 列表（JSON 数组，无在线时为 `[]`） |
+| `GET /v1/models` | **免鉴权**：`ProxyModels` 配置的模型列表；**不检查在线状态**（恒 `200`），与带前缀版本的「离线 503」刻意区分 |
+| `POST /v1/chat/completions` | 需要 `Authorization: Bearer <ApiKey>`；在当前在线的工作空间里等概率**随机挑一个**转发；无在线则 `502` |
+| 其它路径（单段/三段前缀、`/v1/embeddings`…） | `404` |
 | 方法不匹配（如 `POST .../v1/models`） | `405` |
 | chat 的 `ApiKey` 缺失/错误 | `401` |
 
 组织名恰好叫 `cyarp` 也没问题：`/cyarp/<repo>/v1/chat/completions` 这类公网路径照样要求 `ApiKey`，
 只有真正的 `/cyarp` 握手端点免鉴权。
 
+调用方有两种接法：
+
+- **统一 base_url**（不必知道 workpace slug）：`base_url = <base>/v1`、`api_key = <ApiKey>`。请求会随机分发给任意一个在线工作空间。
+- **固定工作空间**：`base_url = <base>/org/repo/v1`。
+- 查看当前有哪些工作空间在线：`curl <base>/`。
+
 验收清单（假设工作空间 `org/repo` 已在线，`<base>` = `http://你的域名`）：
 
 ```bash
+# 0) 有哪些工作空间在线（免鉴权）
+curl -s $BASE/
+
 # 1) 该工作空间的隧道状态（在线 200 / 隧道假死 503；本地应答、免鉴权、不耗额度）
 curl -s -o /dev/null -w '%{http_code}\n' $BASE/org/repo/v1/models
 # 期望 200
 
-# 2) 真实调用（上游不支持非流式，必须 stream:true）
-curl -sN $BASE/org/repo/v1/chat/completions \
+# 2) 真实调用（上游不支持非流式，必须 stream:true）：带前缀=指定工作空间，不带=随机挑一个
+curl -sN $BASE/v1/chat/completions \
   -H "Authorization: Bearer $ApiKey" -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true}'
 # 期望 SSE 分帧返回
@@ -155,7 +167,7 @@ curl -s -o /dev/null -w '%{http_code}\n' $BASE/org/repo/v1/models -H "Authorizat
 curl -s -o /dev/null -w '%{http_code}\n' $BASE/ghost/repo/v1/models                                    # 503（离线也免鉴权）
 curl -s -o /dev/null -w '%{http_code}\n' -X POST $BASE/ghost/repo/v1/chat/completions -H "Authorization: Bearer $ApiKey" -H 'Content-Type: application/json' -d '{}'  # 502
 curl -s -o /dev/null -w '%{http_code}\n' -X POST $BASE/org/repo/v1/chat/completions -H 'Content-Type: application/json' -d '{}'  # 401（不带 key）
-curl -s -o /dev/null -w '%{http_code}\n' $BASE/v1/models -H "Authorization: Bearer $ApiKey"            # 404（裸路径未发布）
+curl -s -o /dev/null -w '%{http_code}\n' $BASE/v1/models                                              # 200（裸路径，免鉴权）
 ```
 
 OpenAI 客户端接入时：`base_url = <base>/org/repo/v1`，`api_key = <ApiKey>`。

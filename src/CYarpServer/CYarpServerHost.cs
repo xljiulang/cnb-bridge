@@ -119,6 +119,15 @@ namespace CYarpServer
             app.MapMethods("/{org}/{repo}/v1/models", [HttpMethods.Get], (RequestDelegate)HttpForwardHandler.HandleModelsAsync);
             app.MapMethods("/{org}/{repo}/v1/chat/completions", [HttpMethods.Post], (RequestDelegate)HttpForwardHandler.HandleChatAsync);
 
+            // Bare routes: the "unified base_url" surface. A caller that does not know (or does
+            // not want to hardcode) the workspace slug points base_url at the server root:
+            //   GET  /                     -> connected workspace ids, e.g. ["org/repo"]
+            //   GET  /v1/models            -> the configured model list (never forwarded)
+            //   POST /v1/chat/completions  -> forwarded to one connected workspace at random
+            app.MapMethods("/", [HttpMethods.Get], (RequestDelegate)HttpForwardHandler.HandleClientsAsync);
+            app.MapMethods("/v1/models", [HttpMethods.Get], (RequestDelegate)HttpForwardHandler.HandleModelsAsync);
+            app.MapMethods("/v1/chat/completions", [HttpMethods.Post], (RequestDelegate)HttpForwardHandler.HandleChatAsync);
+
             return app;
         }
 
@@ -162,9 +171,11 @@ namespace CYarpServer
                 // Not behind the ApiKey:
                 // - the CYarp endpoints: their Authorization header carries the CNB token,
                 //   never the public ApiKey;
-                // - GET /{org}/{repo}/v1/models: answered locally, needs no credential, and the
-                //   workspace keepalive cron probes it without one.
-                if (IsCYarpEndpoint(context.Request.Path) || IsModelsEndpoint(context))
+                // - GET .../v1/models (both the bare and the workspace-addressed route): answered
+                //   locally from configuration, needs no credential, and the workspace keepalive
+                //   cron probes it without one;
+                // - GET / (the connected workspace list): a local discovery helper.
+                if (IsCYarpEndpoint(context.Request.Path) || IsModelsEndpoint(context) || IsClientsEndpoint(context))
                 {
                     await next(context);
                     return;
@@ -201,14 +212,25 @@ namespace CYarpServer
         }
 
         /// <summary>
-        /// Gets whether the request is <c>GET /{org}/{repo}/v1/models</c>, the locally answered
-        /// model list. It is deliberately open (see <see cref="CreateApiKeyGate"/>).
+        /// Gets whether the request is <c>GET .../v1/models</c> - either the bare
+        /// <c>/v1/models</c> or the workspace-addressed <c>/{org}/{repo}/v1/models</c>. That list
+        /// is answered locally, so it is deliberately open (see <see cref="CreateApiKeyGate"/>).
         /// </summary>
         private static bool IsModelsEndpoint(HttpContext context)
         {
             return HttpMethods.IsGet(context.Request.Method)
                 && context.Request.Path.Value is { } path
                 && path.EndsWith("/v1/models", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Gets whether the request is <c>GET /</c>, the connected workspace list. Deliberately
+        /// open, like the model list: it exposes only which workspaces are online.
+        /// </summary>
+        private static bool IsClientsEndpoint(HttpContext context)
+        {
+            return HttpMethods.IsGet(context.Request.Method)
+                && (context.Request.Path.Value is null or "/" or "");
         }
 
         private static bool FixedTimeEquals(string left, string right)

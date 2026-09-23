@@ -20,9 +20,9 @@ namespace CYarp.Cnb.Tests
     /// End to end tests: a real CYarp client tunnels to a real CYarp server, which forwards
     /// the public OpenAI-compatible surface to a stub upstream.
     /// <para>
-    /// The published surface is a literal route table: the workspace id is the CNB repo slug,
-    /// so the only routes are <c>/{org}/{repo}/v1/models</c> and
-    /// <c>/{org}/{repo}/v1/chat/completions</c>; everything else is 404.
+    /// The published surface is a literal route table in two flavours: workspace-addressed
+    /// (<c>/{org}/{repo}/v1/models</c>, <c>/{org}/{repo}/v1/chat/completions</c>) and bare
+    /// (<c>GET /</c>, <c>GET /v1/models</c>, <c>POST /v1/chat/completions</c>); everything else is 404.
     /// </para>
     /// </summary>
     public sealed class CnbProxyTests : IAsyncLifetime
@@ -189,15 +189,76 @@ namespace CYarp.Cnb.Tests
         }
 
         [Fact]
-        public async Task BareOpenAiPaths_AreNotPublished()
+        public async Task RootPath_ListsTheConnectedWorkspaceIds()
+        {
+            using (var empty = await this.GetAsync("/", apiKey: null))
+            {
+                Assert.Equal(HttpStatusCode.OK, empty.StatusCode);
+                Assert.Equal("[]", await empty.Content.ReadAsStringAsync());
+            }
+
+            await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
+            await this.ConnectAsync("orgB/repoB", "/orgB/repoB/-/ai", "cnb-token-B");
+
+            using (var both = await this.GetAsync("/", apiKey: null))
+            {
+                Assert.Equal(HttpStatusCode.OK, both.StatusCode);
+                Assert.Equal("""["orgA/repoA","orgB/repoB"]""", await both.Content.ReadAsStringAsync());
+            }
+
+            await this.DisconnectAsync("orgA/repoA");
+
+            using var remaining = await this.GetAsync("/", apiKey: null);
+            Assert.Equal("""["orgB/repoB"]""", await remaining.Content.ReadAsStringAsync());
+        }
+
+        [Fact]
+        public async Task BareModels_ReturnsTheConfiguredListWithoutAnyWorkspace()
+        {
+            // No workspace connected at all: the bare list is a static "what can this server
+            // serve" answer and must not depend on the tunnel state (unlike /{org}/{repo}/v1/models).
+            using var response = await this.GetAsync("/v1/models", apiKey: null);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.Contains("\"object\":\"list\"", body);
+            Assert.Contains("\"id\":\"model-a\"", body);
+            Assert.Contains("\"id\":\"model-b\"", body);
+            Assert.Empty(this.upstream.Requests);
+        }
+
+        [Fact]
+        public async Task BareChat_PicksAConnectedWorkspaceAtRandom()
         {
             await this.ConnectAsync("orgA/repoA", "/orgA/repoA/-/ai", "cnb-token-A");
+            await this.ConnectAsync("orgB/repoB", "/orgB/repoB/-/ai", "cnb-token-B");
 
-            using var bareModels = await this.GetAsync("/v1/models");
-            using var bareChat = await this.PostChatAsync("/v1/chat/completions");
+            var routedPaths = new HashSet<string>(StringComparer.Ordinal);
 
-            Assert.Equal(HttpStatusCode.NotFound, bareModels.StatusCode);
-            Assert.Equal(HttpStatusCode.NotFound, bareChat.StatusCode);
+            for (var i = 0; i < 20; i++)
+            {
+                using var response = await this.PostChatAsync("/v1/chat/completions");
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            }
+
+            // Every request went to exactly one of the connected workspaces, with its own token.
+            var recorded = this.upstream.Requests;
+            Assert.Equal(20, recorded.Count);
+            Assert.All(recorded, request => Assert.Contains(request.Authorization, new[] { "Bearer cnb-token-A", "Bearer cnb-token-B" }));
+            Assert.All(recorded, request => Assert.Contains(request.Path, new[] { "/orgA/repoA/-/ai/chat/completions", "/orgB/repoB/-/ai/chat/completions" }));
+            Assert.All(recorded, request => routedPaths.Add(request.Path));
+
+            // 20 coin flips: the chance of one workspace never being picked is ~2e-6.
+            Assert.Equal(2, routedPaths.Count);
+        }
+
+        [Fact]
+        public async Task BareChat_WithoutAnyConnectedWorkspace_IsBadGateway()
+        {
+            using var response = await this.PostChatAsync("/v1/chat/completions");
+
+            Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
             Assert.Empty(this.upstream.Requests);
         }
 
