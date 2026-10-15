@@ -123,12 +123,13 @@ namespace CYarp.Cnb.Tests
         }
 
         [Fact]
-        public async Task Quota_IsProbedOverATcpTunnelOfTheWorkspace()
+        public async Task Quota_IsProbedOverAnHttpTunnelOfTheWorkspace()
         {
             // The probe must open a tunnel instead of calling the charge endpoint directly: a
             // direct call from the server is rejected by CNB's network policy in production, and
             // the tunnel is also where the workspace's own credential comes from. Holding the
-            // charge response open leaves the tunnel in place, which is what this asserts on.
+            // charge response open leaves that tunnel in place, which is what this asserts on.
+            // The probe asks CYarp for a HttpClient, so the tunnel it holds is an HTTP one.
             this.Upstream.SetQuota("orgA", totalMilliCredits: 50_000L, usedMilliCredits: 0L);
             this.Upstream.HoldCharge();
 
@@ -136,16 +137,18 @@ namespace CYarp.Cnb.Tests
 
             var viewer = this.Server.Services.GetRequiredService<IClientViewer>();
             var deadline = DateTime.UtcNow.AddSeconds(30d);
-            var tunnelCount = 0;
+            var httpTunnelCount = 0;
+            var tcpTunnelCount = 0;
 
-            while (DateTime.UtcNow < deadline && tunnelCount == 0)
+            while (DateTime.UtcNow < deadline && httpTunnelCount == 0)
             {
                 if (viewer.TryGetValue("orgA/repoA", out var client))
                 {
-                    tunnelCount = client.TcpTunnelCount;
+                    httpTunnelCount = client.HttpTunnelCount;
+                    tcpTunnelCount = client.TcpTunnelCount;
                 }
 
-                if (tunnelCount == 0)
+                if (httpTunnelCount == 0)
                 {
                     await Task.Delay(50);
                 }
@@ -153,8 +156,10 @@ namespace CYarp.Cnb.Tests
 
             this.Upstream.ReleaseCharge();
 
-            // A held quota response means a tunnel of this workspace is open right now.
-            Assert.True(tunnelCount > 0, "the quota probe should hold a TCP tunnel of the workspace while its request is in flight");
+            // A held quota response means a tunnel of this workspace is open right now, and the
+            // probe builds it on the HTTP tunnel path rather than opening a TCP tunnel.
+            Assert.True(httpTunnelCount > 0, "the quota probe should hold an HTTP tunnel of the workspace while its request is in flight");
+            Assert.Equal(0, tcpTunnelCount);
 
             var snapshot = await this.WaitForQuotaAsync("orgA/repoA");
             Assert.Equal(50_000L, snapshot.RemainingMilliCredits);

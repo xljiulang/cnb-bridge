@@ -8,7 +8,6 @@ using Microsoft.Extensions.Options;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Security.Claims;
@@ -23,9 +22,9 @@ namespace CYarpServer.Quota
     /// 周期性地读取每个在线工作空间的 CNB AI 额度。
     /// <para>
     /// charge 端点只应答来自 CNB 网络内部的请求，所以探测不是由服务端直接调用它们：
-    /// 而是向每个工作空间要一条 TCP 隧道（<see cref="IClient.CreateTcpTunnelAsync"/>），
-    /// 再在这条隧道上发一个普通的 HTTPS 请求。TLS 与 HTTP 都由
-    /// <see cref="SocketsHttpHandler"/> 在隧道流之上完成，与 CYarp 自己转发 HTTP 请求的方式一致。
+    /// 而是向每个工作空间要一个挂在隧道上的 <see cref="HttpClient"/>（<see cref="IClient.CreateHttpClient"/>），
+    /// 再在隧道里发普通的 HTTPS 请求。TLS 与 HTTP 都由 CYarp 挂在隧道流上的
+    /// <see cref="SocketsHttpHandler"/> 完成，与 CYarp 自己转发 HTTP 请求的方式一致。
     /// </para>
     /// <para>
     /// 这里的一切都不允许影响隧道本身：失败只会被记进快照的错误字段，并保留上一次的值，
@@ -272,6 +271,10 @@ namespace CYarpServer.Quota
 
         /// <summary>
         /// 经工作空间自己的隧道读取某个组织的 AI 额度：当月总额度，以及其中剩余的部分。
+        /// <para>
+        /// 探测走 HTTP 隧道（<see cref="IClient.CreateHttpClient"/>）而不是 TCP 隧道：这条隧道因此
+        /// 计入 <c>HttpTunnelCount</c>，并与该工作空间的转发共用连接池（同一条隧道可能两者都用）。
+        /// </para>
         /// </summary>
         /// <param name="client">提供隧道的工作空间。</param>
         /// <param name="organization">组织 slug（client id 的第一段）。</param>
@@ -285,40 +288,26 @@ namespace CYarpServer.Quota
             CancellationToken cancellationToken)
         {
             // 隧道的目标 Uri 是 CNB AI 基址（https://api.cnb.cool/{org}/{repo}/-/ai）；
-            // charge 端点与它同主机，因此不需要额外配置地址。
-            var target = client.TargetUri;
-            var baseAddress = new Uri($"{target.Scheme}://{target.Authority}");
-
-            var handler = new SocketsHttpHandler
-            {
-                Proxy = null,
-                UseProxy = false,
-                UseCookies = false,
-                AllowAutoRedirect = false,
-                // 两个请求共用一条连接就够了，把上限压在 1 意味着这一轮只占一条隧道，而不是每个请求一条。
-                MaxConnectionsPerServer = 1,
-                ConnectCallback = (_, token) => new ValueTask<Stream>(client.CreateTcpTunnelAsync(token)),
-            };
-
-            // invoker 按「每个工作空间、每一轮」创建：它绝不能被共享，否则连接池里的连接
-            // 会被复用到另一个工作空间的隧道上。
-            using var invoker = new HttpMessageInvoker(handler, disposeHandler: true);
-
+            // charge 端点与它同主机，因此不需要额外配置地址。两个请求都以 "/" 开头的根相对路径
+            // 发出，所以落点是 authority 根，与 TargetUri 自带的路径无关。
             var escapedOrganization = Uri.EscapeDataString(organization);
             var quotaPath = $"/{escapedOrganization}/-/charge/quota";
             var volumePath = $"/{escapedOrganization}/-/charge/volume";
 
+            // HttpClient 由 CYarp 提供：隧道 handler 与它的连接池按工作空间持有，因此同一个工作
+            // 空间的探测与转发可以复用同一条隧道，而不同工作空间之间不会串用。释放这个实例
+            // 只释放隧道之外的东西，连接池仍归 CYarp 管。
+            using var httpClient = client.CreateHttpClient();
+
             var quota = await GetAsync(
-                invoker,
-                new Uri(baseAddress, quotaPath),
+                httpClient,
                 quotaPath,
                 authorization,
                 CnbJsonContext.Default.CnbChargeQuotaResponse,
                 cancellationToken);
 
             var volume = await GetAsync(
-                invoker,
-                new Uri(baseAddress, volumePath),
+                httpClient,
                 volumePath,
                 authorization,
                 CnbJsonContext.Default.CnbChargeVolumeResponse,
@@ -343,27 +332,26 @@ namespace CYarpServer.Quota
         /// 或空的响应体都会以异常形式抛出，由调用方转成快照里的错误。
         /// </summary>
         /// <typeparam name="TResponse">本服务端读取的响应部分。</typeparam>
-        /// <param name="invoker">承载隧道的、按工作空间创建的 invoker。</param>
-        /// <param name="requestUri">请求的绝对 Uri。</param>
-        /// <param name="path">路径，用于错误信息。</param>
+        /// <param name="httpClient">承载隧道的工作空间 HttpClient。</param>
+        /// <param name="path">相对 <see cref="HttpClient.BaseAddress"/> 的请求路径（以 <c>/</c> 开头即落到
+        /// authority 根），同时用于错误信息。</param>
         /// <param name="authorization">握手时报上来的 CNB token。</param>
         /// <param name="typeInfo">源生成的 JSON 元数据（发布产物经过裁剪）。</param>
         /// <param name="cancellationToken">请求超时。</param>
         /// <returns>反序列化后的响应。</returns>
         private static async Task<TResponse> GetAsync<TResponse>(
-            HttpMessageInvoker invoker,
-            Uri requestUri,
+            HttpClient httpClient,
             string path,
             string authorization,
             JsonTypeInfo<TResponse> typeInfo,
             CancellationToken cancellationToken)
             where TResponse : class
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
+            using var request = new HttpRequestMessage(HttpMethod.Get, path);
             request.Headers.TryAddWithoutValidation("Accept", AcceptMediaType);
             request.Headers.TryAddWithoutValidation("Authorization", authorization);
 
-            using var response = await invoker.SendAsync(request, cancellationToken);
+            using var response = await httpClient.SendAsync(request, cancellationToken);
             if (response.IsSuccessStatusCode == false)
             {
                 throw new HttpRequestException(

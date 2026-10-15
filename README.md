@@ -16,7 +16,7 @@
                  https://api.cnb.cool/$CNB_REPO_SLUG/-/ai/chat/completions
 ```
 
-本仓库**不含任何 CYarp 上游源码**，两端都引用官方 NuGet 包（`CYarp.Server` / `CYarp.Client` 2.0.3）。
+本仓库**不含任何 CYarp 上游源码**，两端都引用官方 NuGet 包（`CYarp.Server` 2.0.4 / `CYarp.Client` 2.0.3）。
 工作空间的身份与 CNB token 通过 CYarp 客户端握手头进入 Kestrel 的自定义 authentication scheme，
 被解析成 claims 放进 `HttpContext.User`；CYarp 库会把该 principal 存到 `IClient.User`，服务端转发时
 从那里取出 token 注入——因此 `IClient` 接口不需要任何扩展。
@@ -251,7 +251,8 @@ curl http://ai.example.com/v1/chat/completions \
 ### 剩余额度从哪来 / `GET /` 的形状
 
 服务端起一个后台任务，对每个在线工作空间**经它自己的隧道**
-（也就是服务工作端向工作空间要一条 TCP 隧道，再在隧道里发普通 HTTPS 请求）读一次 CNB 组织额度。
+（也就是服务工作端向 CYarp 要一个挂在该工作空间隧道上的 `HttpClient`，再在隧道里发普通 HTTPS 请求；
+这条隧道算 HTTP 隧道，并与该工作空间的转发共用连接池）读一次 CNB 组织额度。
 触发时机有两个：**工作空间一连上就立刻探一次**（借 CYarp 的客户端状态监听），之后每 `AiQuota:Interval`
 （默认 2 分钟）再刷新一轮：
 
@@ -355,7 +356,7 @@ L0 + 客户端 30s 心跳长连接共同把工作空间钉住；隧道断开由 
 | 组件 | 版本 | 用途 |
 |---|---|---|
 | `CYarp.Client` | 2.0.3 | 客户端隧道库（Native AOT 下发布零警告） |
-| `CYarp.Server` | 2.0.3 | 服务端隧道库 |
+| `CYarp.Server` | 2.0.4 | 服务端隧道库（`IClient.CreateHttpClient` 供额度探测使用） |
 | `Yarp.ReverseProxy` | 2.3.0 | 只用其中的 `IHttpForwarder` + `HttpTransformer` |
 | `ServiceSelf` | 1.0.8 | 自安装为 systemd / Windows 服务 |
 
@@ -396,7 +397,7 @@ CYarp 会把握手请求的 `ClaimsPrincipal` 存到 `IClient.User`，转发时 
 
 ### 为什么服务端不做 Native AOT（已实测）
 
-`CYarp.Server` 2.0.3 的端点是这样映射的：`endpoints.Map("/{tunnelId}", TunnelHandler.HandleTunnelAsync)`
+`CYarp.Server` 2.0.4 的端点是这样映射的：`endpoints.Map("/{tunnelId}", TunnelHandler.HandleTunnelAsync)`
 ——handler 带 DI 参数，编译期只能选中 `Map(IEndpointRouteBuilder, string, Delegate)` 重载，
 运行期由 `RequestDelegateFactory` 用表达式树构造请求委托。请求委托的源生成器（RDG）无法拦截
 **预编译程序集内**的调用点，于是在 Native AOT 下：

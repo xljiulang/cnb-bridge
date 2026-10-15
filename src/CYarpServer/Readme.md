@@ -252,7 +252,7 @@ C:\cyarp\CYarpServer.exe           # 前台运行，方便调试
 | `AiQuota:Timeout` | `00:00:10` | 单个工作空间一轮探测（`quota` + `volume` 两个请求合计）的超时 |
 | `Urls` | `http://+:80` | Kestrel 监听地址；也可用 `--urls` 启动参数 |
 | `CYarpOptions:Client:KeepAliveInterval` | `00:00:40` | 服务端心跳周期 |
-| `CYarpOptions:HttpTunnel:MaxTunnelsPerClient` | `20` | 每个工作空间并发 HTTP 隧道（≈并发请求）上限 |
+| `CYarpOptions:HttpTunnel:MaxTunnelsPerClient` | `20` | 每个工作空间并发 HTTP 隧道（≈并发请求）上限；额度探测的连接也来自这个池 |
 | `CYarpOptions:HttpTunnel:CreationTimeout` | `00:00:10` | 隧道建立超时 |
 | `Logging:LogLevel:*` | Information | 日志级别 |
 
@@ -281,7 +281,8 @@ C:\cyarp\CYarpServer.exe           # 前台运行，方便调试
 
 ### 额度从哪来（服务端 → 隧道 → api.cnb.cool）
 
-服务端的后台任务对每个在线工作空间**经它自己的隧道**读一次额度，等价于在工作空间里执行：
+服务端的后台任务对每个在线工作空间**经它自己的隧道**读一次额度：借 CYarp 的 `IClient.CreateHttpClient`
+在隧道上建一个 `HttpClient`（算 HTTP 隧道，并与该工作空间的转发共用连接池），等价于在工作空间里执行：
 
 ```bash
 curl -s -H "Authorization: Bearer $CNB_TOKEN" -H 'Accept: application/vnd.cnb.api+json' \

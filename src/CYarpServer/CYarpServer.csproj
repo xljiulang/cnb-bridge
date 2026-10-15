@@ -35,7 +35,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="CYarp.Server" Version="2.0.3" />
+    <PackageReference Include="CYarp.Server" Version="2.0.4" />
     <PackageReference Include="ServiceSelf" Version="1.0.8" />
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
   </ItemGroup>

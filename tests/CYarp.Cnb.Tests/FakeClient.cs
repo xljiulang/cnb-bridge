@@ -2,6 +2,7 @@ using CYarp.Server;
 using System;
 using System.IO;
 using System.Net;
+using System.Net.Http;
 using System.Security.Claims;
 using System.Threading;
 using System.Threading.Tasks;
@@ -45,6 +46,11 @@ namespace CYarp.Cnb.Tests
         public ValueTask<ForwarderError> ForwardHttpAsync(Microsoft.AspNetCore.Http.HttpContext context, HttpTransformer? transformer)
         {
             throw new NotSupportedException("The routing tests never forward a request.");
+        }
+
+        public HttpClient CreateHttpClient(DelegatingHandler? handler = default)
+        {
+            throw new NotSupportedException("The routing tests never open a tunnel.");
         }
 
         public ValueTask DisposeAsync()
