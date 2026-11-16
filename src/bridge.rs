@@ -66,6 +66,7 @@ pub struct Bridge {
     settings: SettingsStore,
     logger: Arc<Logger>,
     runtime: Mutex<Runtime>,
+    transition: Mutex<()>,
 }
 
 #[derive(Default)]
@@ -96,18 +97,40 @@ impl Bridge {
             settings,
             logger,
             runtime: Mutex::new(Runtime::default()),
+            transition: Mutex::new(()),
         }
     }
 
     /// Starts the complete bridge: login → key → repo → workspace → SSH → health.
     pub async fn start(&self) -> Result<BridgeSnapshot, BridgeError> {
-        let settings = self.settings.load().map_err(BridgeError::Other)?;
-        let manual_creation_pending = self.runtime.lock().await.repo_creation_url.is_some();
-        {
+        let Ok(_transition) = self.transition.try_lock() else {
+            return Ok(self.snapshot().await);
+        };
+        let already_ready = {
             let mut runtime = self.runtime.lock().await;
-            runtime.error = None;
+            if runtime.state == Some(BridgeState::Ready) {
+                true
+            } else {
+                runtime.state = Some(BridgeState::PreparingKey);
+                runtime.error = None;
+                false
+            }
+        };
+        if already_ready {
+            return Ok(self.snapshot().await);
         }
-        self.set_state(BridgeState::PreparingKey).await;
+        self.start_locked().await
+    }
+
+    async fn start_locked(&self) -> Result<BridgeSnapshot, BridgeError> {
+        let settings = match self.settings.load() {
+            Ok(settings) => settings,
+            Err(error) => {
+                self.set_error(BridgeState::Failed, error.clone()).await;
+                return Err(BridgeError::Other(error));
+            }
+        };
+        let manual_creation_pending = self.runtime.lock().await.repo_creation_url.is_some();
 
         let token = match self.account.access_token().await {
             Ok(token) => token,
@@ -233,6 +256,11 @@ impl Bridge {
 
     /// Stops the tunnel and the cloud workspace.
     pub async fn stop(&self) -> BridgeSnapshot {
+        let _transition = self.transition.lock().await;
+        self.stop_locked().await
+    }
+
+    async fn stop_locked(&self) -> BridgeSnapshot {
         self.set_state(BridgeState::Stopping).await;
         let (tunnel, sn) = {
             let mut runtime = self.runtime.lock().await;
@@ -337,6 +365,22 @@ async fn wait_for_health(port: u16) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::AccountStore;
+
+    fn test_bridge(temp: &tempfile::TempDir) -> Bridge {
+        let account = AccountManager::with_store(AccountStore::new(
+            temp.path().join("account.bin"),
+        ));
+        Bridge::new(
+            account,
+            SettingsStore::new(temp.path().join("settings.json")),
+            SshKeyStore::new(
+                temp.path().join("id_ed25519"),
+                temp.path().join("id_ed25519.pub"),
+            ),
+            Arc::new(Logger::new(32)),
+        )
+    }
 
     #[test]
     fn serializes_repo_creation_state_for_the_ui() {
@@ -344,5 +388,27 @@ mod tests {
             serde_json::to_string(&BridgeState::NeedsRepoCreation).unwrap(),
             r#""needsRepoCreation""#
         );
+    }
+
+    #[tokio::test]
+    async fn start_returns_current_snapshot_when_already_ready() {
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&temp);
+        bridge.runtime.lock().await.state = Some(BridgeState::Ready);
+
+        let snapshot = bridge.start().await.unwrap();
+
+        assert_eq!(snapshot.state, BridgeState::Ready);
+    }
+
+    #[tokio::test]
+    async fn start_is_admission_controlled_by_the_transition_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&temp);
+        let _active_transition = bridge.transition.lock().await;
+
+        let snapshot = bridge.start().await.unwrap();
+
+        assert_eq!(snapshot.state, BridgeState::SignedOut);
     }
 }

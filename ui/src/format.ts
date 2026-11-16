@@ -22,6 +22,16 @@ export function isReady(snapshot: AppSnapshot | null): boolean {
   return snapshot?.bridge.state === "ready";
 }
 
+export function isBridgeTransitioning(state: BridgeState): boolean {
+  return (
+    state === "preparingKey" ||
+    state === "preparingRepo" ||
+    state === "startingWorkspace" ||
+    state === "connecting" ||
+    state === "stopping"
+  );
+}
+
 export function validatePort(value: number): string | null {
   if (!Number.isInteger(value) || value < 1 || value > 65535) {
     return "端口必须是 1–65535 之间的整数";
@@ -36,10 +46,4 @@ export function formatError(error: unknown): string {
     if (candidate.message) return candidate.message;
   }
   return String(error);
-}
-
-export function shortenKey(key: string | null | undefined): string {
-  if (!key) return "尚未生成";
-  const value = key.trim();
-  return value.length <= 48 ? value : `${value.slice(0, 28)}…${value.slice(-12)}`;
 }

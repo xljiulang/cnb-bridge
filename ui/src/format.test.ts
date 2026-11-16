@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { bridgeLabel, formatError, shortenKey, validatePort } from "./format";
+import {
+  bridgeLabel,
+  formatError,
+  isBridgeTransitioning,
+  validatePort,
+} from "./format";
 
 describe("format helpers", () => {
   it("labels bridge states", () => {
@@ -14,13 +19,19 @@ describe("format helpers", () => {
     expect(validatePort(70000)).not.toBeNull();
   });
 
+  it("identifies bridge transitions that must block duplicate starts", () => {
+    expect(isBridgeTransitioning("preparingKey")).toBe(true);
+    expect(isBridgeTransitioning("preparingRepo")).toBe(true);
+    expect(isBridgeTransitioning("startingWorkspace")).toBe(true);
+    expect(isBridgeTransitioning("connecting")).toBe(true);
+    expect(isBridgeTransitioning("stopping")).toBe(true);
+    expect(isBridgeTransitioning("failed")).toBe(false);
+    expect(isBridgeTransitioning("needsRepoCreation")).toBe(false);
+    expect(isBridgeTransitioning("ready")).toBe(false);
+  });
+
   it("formats command errors", () => {
     expect(formatError({ message: "boom" })).toBe("boom");
     expect(formatError("plain")).toBe("plain");
-  });
-
-  it("shortens long keys", () => {
-    const key = `ssh-ed25519 ${"A".repeat(80)} cnb`;
-    expect(shortenKey(key)).toContain("…");
   });
 });
