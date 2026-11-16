@@ -67,7 +67,7 @@ $env:PATH = "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\C
 1. 首次启动点击“登录 CNB”，系统浏览器打开设备授权页并显示设备码。
 2. 授权成功后客户端静默刷新 token，自动生成专用 Ed25519 密钥并展示公钥。
 3. 首次使用需把公钥添加到 [CNB 公钥管理](https://cnb.cool/profile/ssh-keys/create)。
-4. 客户端自动创建私有仓库 `cnb-ai-bridge`（缺失时）、推送模板、启动工作空间、建立 SSH 转发。
+4. 客户端在可用的 CNB 命名空间中复用或创建私有仓库 `cnb-ai-bridge`；有多个 Owner 命名空间时可在设置中指定。OAuth 应用无权建仓时，客户端会引导用户在浏览器创建空仓库，确认模板已推送到 `main` 分支后，再启动工作空间和建立 SSH 转发。
 5. 状态变为“桥接就绪”后，把任意 OpenAI 兼容客户端的 base URL 指向 `http://127.0.0.1:11233/v1`。
 6. 关闭窗口最小化到托盘；托盘“退出并关闭云主机”会断开隧道并停止工作空间。
 
@@ -83,6 +83,7 @@ $env:PATH = "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\C
 ## 已知边界
 
 - 需要 WebView2 Runtime 承载 Tauri UI；登录页本身始终使用系统浏览器。
+- CNB CLI 的公共 OAuth 应用缺少 `group-resource:rw`，首次建仓需按客户端引导在浏览器创建一次空仓库。
 - CNB 暂无 SSH 公钥 OpenAPI，首次需手动在 CNB 网页添加客户端生成的公钥。
 - 云原生开发环境有 18 小时会话上限和凌晨 4–6 点强制回收；客户端会自动重建并重连。
 - v1 单工作空间，不做多环境额度优选。

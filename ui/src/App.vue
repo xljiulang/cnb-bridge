@@ -6,6 +6,7 @@ import {
   ensureSshKey,
   getLogs,
   getSnapshot,
+  listNamespaces,
   logout,
   openExternal,
   openLogsFolder,
@@ -22,7 +23,7 @@ import {
   shortenKey,
   validatePort,
 } from "./format";
-import type { AppSnapshot, LogEntry, Settings } from "./types";
+import type { AppSnapshot, LogEntry, Namespace, Settings } from "./types";
 
 type Tab = "connect" | "settings" | "logs" | "about";
 
@@ -32,9 +33,11 @@ const busy = ref(false);
 const error = ref<string | null>(null);
 const notice = ref<string | null>(null);
 const logs = ref<LogEntry[]>([]);
+const namespaces = ref<Namespace[]>([]);
 const logFilter = ref("all");
 const settingsDirty = ref(false);
 const settingsDraft = reactive<Settings>({
+  repoNamespace: "",
   repoName: "cnb-ai-bridge",
   localPort: 11233,
   minimizeToTray: true,
@@ -44,6 +47,9 @@ let timer: number | undefined;
 let unlisten: UnlistenFn | undefined;
 
 const ready = computed(() => snapshot.value?.bridge.state === "ready");
+const repoCreationNeeded = computed(
+  () => snapshot.value?.bridge.state === "needsRepoCreation",
+);
 const accountState = computed(() => snapshot.value?.account.state ?? "signedOut");
 const statusLabel = computed(() =>
   snapshot.value ? bridgeLabel(snapshot.value.bridge.state) : "正在加载",
@@ -52,6 +58,9 @@ const baseUrl = computed(
   () => snapshot.value?.bridge.baseUrl ?? `http://127.0.0.1:${snapshot.value?.settings.localPort ?? 11233}/v1`,
 );
 const publicKey = computed(() => snapshot.value?.bridge.sshPublicKey ?? null);
+const namespaceAvailable = computed(() =>
+  namespaces.value.some((namespace) => namespace.path === settingsDraft.repoNamespace),
+);
 const filteredLogs = computed(() =>
   logFilter.value === "all"
     ? logs.value
@@ -63,6 +72,7 @@ async function refresh() {
     const next = await getSnapshot();
     snapshot.value = next;
     if (!settingsDirty.value) {
+      settingsDraft.repoNamespace = next.settings.repoNamespace;
       settingsDraft.repoName = next.settings.repoName;
       settingsDraft.localPort = next.settings.localPort;
       settingsDraft.minimizeToTray = next.settings.minimizeToTray;
@@ -83,6 +93,7 @@ async function run(action: () => Promise<unknown>, message?: string) {
     await refresh();
   } catch (cause) {
     error.value = formatError(cause);
+    await refresh();
   } finally {
     busy.value = false;
   }
@@ -107,6 +118,35 @@ async function makeKey() {
   await run(async () => {
     await ensureSshKey();
   });
+}
+
+async function loadNamespaces() {
+  if (accountState.value !== "connected") {
+    namespaces.value = [];
+    return;
+  }
+  try {
+    namespaces.value = await listNamespaces();
+  } catch (cause) {
+    namespaces.value = [];
+    error.value = formatError(cause);
+  }
+}
+
+async function openSettings() {
+  tab.value = "settings";
+  await loadNamespaces();
+}
+
+async function openRepoCreation() {
+  const url = snapshot.value?.bridge.repoCreationUrl;
+  if (!url) return;
+  try {
+    await openExternal(url);
+    notice.value = "创建私有空仓库后返回这里，点击“重新检查仓库”。";
+  } catch (cause) {
+    error.value = formatError(cause);
+  }
 }
 
 async function remakeKey() {
@@ -173,7 +213,7 @@ onBeforeUnmount(() => {
           <span class="nav-dot" :class="{ live: ready }" />
           连接
         </button>
-        <button :class="{ active: tab === 'settings' }" @click="tab = 'settings'">
+        <button :class="{ active: tab === 'settings' }" @click="openSettings">
           设置
         </button>
         <button :class="{ active: tab === 'logs' }" @click="tab = 'logs'">
@@ -196,7 +236,16 @@ onBeforeUnmount(() => {
     <main class="content">
       <div v-if="error" class="banner error">
         <span>{{ error }}</span>
-        <button class="ghost" @click="error = null">关闭</button>
+        <div class="banner-actions">
+          <button
+            v-if="snapshot?.bridge.repoCreationUrl"
+            class="primary"
+            @click="openRepoCreation"
+          >
+            打开 CNB 创建仓库
+          </button>
+          <button class="ghost" @click="error = null">关闭</button>
+        </div>
       </div>
       <div v-if="notice" class="banner notice">
         <span>{{ notice }}</span>
@@ -209,7 +258,13 @@ onBeforeUnmount(() => {
             <p class="eyebrow">LOCAL AI BRIDGE</p>
             <h1>{{ statusLabel }}</h1>
             <p class="muted">
-              {{ ready ? "本机 OpenAI 兼容端点已就绪。" : "登录后自动完成建仓、启动云主机与 SSH 通道。" }}
+              {{
+                ready
+                  ? "本机 OpenAI 兼容端点已就绪。"
+                  : repoCreationNeeded
+                    ? "请先在 CNB 创建私有空仓库，然后返回这里重新检查。"
+                    : "登录后自动完成建仓、启动云主机与 SSH 通道。"
+              }}
             </p>
           </div>
           <div class="head-actions">
@@ -219,7 +274,7 @@ onBeforeUnmount(() => {
               :disabled="busy || accountState !== 'connected'"
               @click="run(startBridge)"
             >
-              启动桥接
+              {{ repoCreationNeeded ? "重新检查仓库" : "启动桥接" }}
             </button>
             <button v-else class="danger" :disabled="busy" @click="run(stopBridge)">
               停止桥接
@@ -312,7 +367,7 @@ onBeforeUnmount(() => {
               <span>2</span>
               <div><strong>SSH 密钥</strong><small>{{ publicKey ? "已生成" : "待生成" }}</small></div>
             </div>
-            <div class="step" :class="{ done: !!snapshot?.bridge.repoSlug }">
+            <div class="step" :class="{ done: !!snapshot?.bridge.repoSlug && !repoCreationNeeded }">
               <span>3</span>
               <div><strong>仓库</strong><small>{{ snapshot?.bridge.repoSlug || "待准备" }}</small></div>
             </div>
@@ -338,6 +393,28 @@ onBeforeUnmount(() => {
         </header>
 
         <article class="card form-card">
+          <label>
+            <span>仓库命名空间</span>
+            <select v-model="settingsDraft.repoNamespace" @change="settingsDirty = true">
+              <option value="">自动选择</option>
+              <option
+                v-if="settingsDraft.repoNamespace && !namespaceAvailable"
+                :value="settingsDraft.repoNamespace"
+              >
+                {{ settingsDraft.repoNamespace }}（当前配置不可用）
+              </option>
+              <option
+                v-for="namespace in namespaces"
+                :key="namespace.path"
+                :value="namespace.path"
+              >
+                {{ namespace.name }}（{{ namespace.path }}）
+              </option>
+            </select>
+            <small>
+              优先复用已有仓库；仅有一个 Owner 命名空间时自动选择，多个时请在此指定。
+            </small>
+          </label>
           <label>
             <span>仓库名</span>
             <input v-model="settingsDraft.repoName" spellcheck="false" @input="settingsDirty = true" />

@@ -13,6 +13,7 @@ pub const DEFAULT_LOCAL_PORT: u16 = 11233;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
+    pub repo_namespace: String,
     pub repo_name: String,
     pub local_port: u16,
     pub minimize_to_tray: bool,
@@ -22,6 +23,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            repo_namespace: String::new(),
             repo_name: DEFAULT_REPO_NAME.to_string(),
             local_port: DEFAULT_LOCAL_PORT,
             minimize_to_tray: true,
@@ -33,6 +35,9 @@ impl Default for Settings {
 impl Settings {
     /// Validates values before they are persisted or applied.
     pub fn validate(&self) -> Result<(), String> {
+        if !self.repo_namespace.is_empty() {
+            validate_path_segment("仓库命名空间", &self.repo_namespace)?;
+        }
         if self.repo_name.trim().is_empty() {
             return Err("仓库名不能为空".to_string());
         }
@@ -49,6 +54,18 @@ impl Settings {
         }
         Ok(())
     }
+}
+
+fn validate_path_segment(label: &str, value: &str) -> Result<(), String> {
+    if value.len() > 100 {
+        return Err(format!("{label}不能超过 100 个字符"));
+    }
+    if value.chars().any(|c| {
+        !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' || c == '.')
+    }) {
+        return Err(format!("{label}只能包含小写字母、数字、-、_、."));
+    }
+    Ok(())
 }
 
 /// Loads and stores [`Settings`] as JSON.
@@ -113,6 +130,8 @@ mod tests {
         assert_eq!(settings.repo_name, "cnb-ai-bridge");
         assert_eq!(settings.local_port, 11233);
         assert!(settings.minimize_to_tray);
+        let serialized = serde_json::to_value(settings).unwrap();
+        assert_eq!(serialized["repoNamespace"], "");
     }
 
     #[test]
@@ -120,6 +139,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SettingsStore::new(dir.path().join("settings.json"));
         let settings = Settings {
+            repo_namespace: "xljiulang".to_string(),
             repo_name: "my-bridge".to_string(),
             local_port: 12000,
             minimize_to_tray: false,
@@ -127,6 +147,21 @@ mod tests {
         };
         store.save(&settings).unwrap();
         assert_eq!(store.load().unwrap(), settings);
+    }
+
+    #[test]
+    fn loads_legacy_settings_without_repo_namespace() {
+        let settings: Settings = serde_json::from_str(
+            r#"{
+                "repoName": "cnb-ai-bridge",
+                "localPort": 11233,
+                "minimizeToTray": true,
+                "launchAtLogin": false
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(settings.repo_namespace, "");
     }
 
     #[test]
@@ -141,6 +176,16 @@ mod tests {
             local_port: 0,
             ..Settings::default()
         };
+        assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_repo_namespace() {
+        let settings = Settings {
+            repo_namespace: "team/space".to_string(),
+            ..Settings::default()
+        };
+
         assert!(settings.validate().is_err());
     }
 }

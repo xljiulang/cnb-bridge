@@ -9,6 +9,7 @@ export type BridgeState =
   | "connecting"
   | "ready"
   | "needsSshKey"
+  | "needsRepoCreation"
   | "stopping"
   | "failed";
 
@@ -29,14 +30,21 @@ export interface BridgeSnapshot {
   localPort: number;
   baseUrl?: string | null;
   sshPublicKey?: string | null;
+  repoCreationUrl?: string | null;
   error?: string | null;
 }
 
 export interface Settings {
+  repoNamespace: string;
   repoName: string;
   localPort: number;
   minimizeToTray: boolean;
   launchAtLogin: boolean;
+}
+
+export interface Namespace {
+  name: string;
+  path: string;
 }
 
 export interface AppSnapshot {

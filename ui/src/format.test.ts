@@ -5,6 +5,7 @@ describe("format helpers", () => {
   it("labels bridge states", () => {
     expect(bridgeLabel("ready")).toBe("桥接就绪");
     expect(bridgeLabel("needsSshKey")).toBe("需要注册 SSH 公钥");
+    expect(bridgeLabel("needsRepoCreation")).toBe("需要创建仓库");
   });
 
   it("validates ports", () => {

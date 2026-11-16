@@ -1,12 +1,12 @@
 //! End-to-end bridge state machine.
 
 use crate::account::{AccountError, AccountManager, AccountStatus};
-use crate::api::{ApiError, CnbApi, WorkspaceDetail};
+use crate::api::{ApiError, CnbApi, Namespace, WorkspaceDetail};
 use crate::logging::Logger;
 use crate::settings::SettingsStore;
 use crate::ssh_key::SshKeyStore;
 use crate::tunnel::{start_tunnel, TunnelHandle, DEFAULT_TUNNEL_PORT};
-use crate::workspace::{RepoProvisioner, WorkspaceManager};
+use crate::workspace::{RepoProvisionError, RepoProvisioner, WorkspaceManager};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -24,6 +24,7 @@ pub enum BridgeState {
     Connecting,
     Ready,
     NeedsSshKey,
+    NeedsRepoCreation,
     Stopping,
     Failed,
 }
@@ -40,6 +41,7 @@ pub struct BridgeSnapshot {
     pub local_port: u16,
     pub base_url: Option<String>,
     pub ssh_public_key: Option<String>,
+    pub repo_creation_url: Option<String>,
     pub error: Option<String>,
 }
 
@@ -50,6 +52,8 @@ pub enum BridgeError {
     Account(#[from] AccountError),
     #[error("{0}")]
     Api(#[from] ApiError),
+    #[error("{0}")]
+    RepoProvision(#[from] RepoProvisionError),
     #[error("{0}")]
     Other(String),
 }
@@ -74,6 +78,7 @@ struct Runtime {
     tunnel: Option<TunnelHandle>,
     error: Option<String>,
     ssh_public_key: Option<String>,
+    repo_creation_url: Option<String>,
 }
 
 impl Bridge {
@@ -97,6 +102,11 @@ impl Bridge {
     /// Starts the complete bridge: login → key → repo → workspace → SSH → health.
     pub async fn start(&self) -> Result<BridgeSnapshot, BridgeError> {
         let settings = self.settings.load().map_err(BridgeError::Other)?;
+        let manual_creation_pending = self.runtime.lock().await.repo_creation_url.is_some();
+        {
+            let mut runtime = self.runtime.lock().await;
+            runtime.error = None;
+        }
         self.set_state(BridgeState::PreparingKey).await;
 
         let token = match self.account.access_token().await {
@@ -123,16 +133,64 @@ impl Bridge {
 
         self.set_state(BridgeState::PreparingRepo).await;
         let provisioner = RepoProvisioner::new(&self.api);
-        let repo = provisioner
-            .ensure(&token, &user.username, &settings.repo_name)
+        let repo = match provisioner
+            .ensure(
+                &token,
+                &settings.repo_name,
+                &settings.repo_namespace,
+                !manual_creation_pending,
+            )
             .await
-            .map_err(BridgeError::Other)?;
-        self.runtime.lock().await.repo_slug = Some(repo.slug.clone());
+        {
+            Ok(repo) => repo,
+            Err(RepoProvisionError::ManualCreationRequired {
+                namespace,
+                slug,
+                url,
+            }) => {
+                let error = RepoProvisionError::ManualCreationRequired {
+                    namespace,
+                    slug: slug.clone(),
+                    url: url.clone(),
+                };
+                {
+                    let mut runtime = self.runtime.lock().await;
+                    runtime.repo_slug = Some(slug.clone());
+                    runtime.repo_creation_url = Some(url);
+                    runtime.error = Some(if manual_creation_pending {
+                        format!(
+                            "尚未检测到仓库 {slug}。请确认已在 CNB 创建该私有空仓库，然后再次点击“重新检查仓库”。"
+                        )
+                    } else {
+                        error.to_string()
+                    });
+                }
+                self.logger
+                    .log("warn", format!("仓库需要手动创建: {error}"));
+                self.set_state(BridgeState::NeedsRepoCreation).await;
+                return Err(BridgeError::RepoProvision(error));
+            }
+            Err(error) => {
+                self.logger.log("error", format!("仓库准备失败: {error}"));
+                self.set_error(BridgeState::Failed, error.to_string()).await;
+                return Err(BridgeError::RepoProvision(error));
+            }
+        };
+        {
+            let mut runtime = self.runtime.lock().await;
+            runtime.repo_slug = Some(repo.slug.clone());
+            runtime.repo_creation_url = None;
+            runtime.error = None;
+        }
+        self.logger.log(
+            "info",
+            format!("bridge repository ready: {} ({})", repo.slug, repo.branch),
+        );
 
         self.set_state(BridgeState::StartingWorkspace).await;
         let manager = WorkspaceManager::new(&self.api);
         let session = manager
-            .ensure_running(&token, &repo.slug, "master")
+            .ensure_running(&token, &repo.slug, &repo.branch)
             .await
             .map_err(BridgeError::Api)?;
         self.runtime.lock().await.workspace_sn = Some(session.sn.clone());
@@ -197,6 +255,7 @@ impl Bridge {
             }
         }
         self.set_state(BridgeState::SignedOut).await;
+        self.runtime.lock().await.repo_creation_url = None;
         self.snapshot().await
     }
 
@@ -215,6 +274,7 @@ impl Bridge {
             base_url: (runtime.tunnel.is_some())
                 .then(|| format!("http://127.0.0.1:{}/v1", settings.local_port)),
             ssh_public_key: runtime.ssh_public_key.clone(),
+            repo_creation_url: runtime.repo_creation_url.clone(),
             error: runtime.error.clone(),
         }
     }
@@ -235,6 +295,12 @@ impl Bridge {
         Ok(key)
     }
 
+    /// Returns the CNB namespaces in which the current user can create repos.
+    pub async fn list_namespaces(&self) -> Result<Vec<Namespace>, BridgeError> {
+        let token = self.account.access_token().await?;
+        Ok(self.api.list_owned_namespaces(&token).await?)
+    }
+
     async fn set_state(&self, state: BridgeState) {
         let mut runtime = self.runtime.lock().await;
         runtime.state = Some(state);
@@ -244,6 +310,7 @@ impl Bridge {
         let mut runtime = self.runtime.lock().await;
         runtime.state = Some(state);
         runtime.error = Some(error);
+        runtime.repo_creation_url = None;
     }
 }
 
@@ -264,4 +331,17 @@ async fn wait_for_health(port: u16) -> Result<(), String> {
     Err(format!(
         "agent 健康检查超时：请确认工作空间内 agent 已启动并监听 {DEFAULT_TUNNEL_PORT}"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serializes_repo_creation_state_for_the_ui() {
+        assert_eq!(
+            serde_json::to_string(&BridgeState::NeedsRepoCreation).unwrap(),
+            r#""needsRepoCreation""#
+        );
+    }
 }

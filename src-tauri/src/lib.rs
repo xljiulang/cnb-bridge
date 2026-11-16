@@ -47,6 +47,7 @@ pub fn run() {
             commands::stop_bridge,
             commands::ensure_ssh_key,
             commands::regenerate_ssh_key,
+            commands::list_namespaces,
             commands::open_ssh_keys_page,
             commands::open_external,
             commands::open_logs_folder,

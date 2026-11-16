@@ -31,6 +31,17 @@ pub struct User {
     pub nickname: String,
 }
 
+/// A top-level CNB namespace in which the current user can create repositories.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Namespace {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub access_role: String,
+}
+
 /// A repository entry returned by `/user/repos`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repo {
@@ -40,6 +51,13 @@ pub struct Repo {
     pub path: String,
     #[serde(default)]
     pub web_url: Option<String>,
+}
+
+/// A repository branch returned by the Git API.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Branch {
+    #[serde(default)]
+    pub name: String,
 }
 
 /// A cloud-native development workspace.
@@ -109,6 +127,25 @@ impl CnbApi {
             .await
     }
 
+    /// Lists top-level namespaces owned by the current user.
+    pub async fn list_owned_namespaces(&self, token: &str) -> Result<Vec<Namespace>, ApiError> {
+        let namespaces: Vec<Namespace> = self
+            .send_json(
+                Method::GET,
+                "/user/groups?page=1&page_size=100",
+                token,
+                None::<&()>,
+            )
+            .await?;
+        Ok(namespaces
+            .into_iter()
+            .filter(|namespace| {
+                namespace.access_role.eq_ignore_ascii_case("Owner")
+                    && !namespace.path.trim().is_empty()
+            })
+            .collect())
+    }
+
     /// Returns whether a file exists on a specific branch.
     pub async fn file_exists(
         &self,
@@ -142,6 +179,12 @@ impl CnbApi {
             code,
             message,
         })
+    }
+
+    /// Lists branches in a repository.
+    pub async fn list_branches(&self, token: &str, slug: &str) -> Result<Vec<Branch>, ApiError> {
+        let path = format!("/{slug}/-/git/branches?page=1&page_size=100");
+        self.send_json(Method::GET, &path, token, None::<&()>).await
     }
 
     /// Lists repositories visible to the current user.
@@ -237,7 +280,7 @@ impl CnbApi {
             .header("Accept", "application/vnd.cnb.api+json");
         if let Some(body) = body {
             request = request
-                .header("Content-Type", "application/vnd.cnb.api+json")
+                .header("Content-Type", "application/json")
                 .json(body);
         }
         let response = request.send().await?;
@@ -283,6 +326,8 @@ fn parse_remote_error(text: &str) -> (Option<i64>, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{body_json, header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn parses_cnb_error_envelope() {
@@ -290,5 +335,121 @@ mod tests {
             parse_remote_error(r#"{"errcode":10024,"errmsg":"resource mismatch"}"#);
         assert_eq!(code, Some(10024));
         assert_eq!(message, "resource mismatch");
+    }
+
+    #[tokio::test]
+    async fn lists_only_owned_namespaces() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/groups"))
+            .and(query_param("page", "1"))
+            .and(query_param("page_size", "100"))
+            .and(header("authorization", "Bearer token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "name": "xljiulang",
+                    "path": "xljiulang",
+                    "access_role": "Owner"
+                },
+                {
+                    "name": "other-team",
+                    "path": "other-team",
+                    "access_role": "Master"
+                }
+            ])))
+            .mount(&server)
+            .await;
+        let api = CnbApi::with_base_url(server.uri());
+
+        let namespaces = api.list_owned_namespaces("token").await.unwrap();
+
+        assert_eq!(
+            namespaces,
+            vec![Namespace {
+                name: "xljiulang".to_string(),
+                path: "xljiulang".to_string(),
+                access_role: "Owner".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn creates_repo_under_the_namespace_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/xljiulang/-/repos"))
+            .and(header("authorization", "Bearer token"))
+            .and(header("content-type", "application/json"))
+            .and(header("accept", "application/vnd.cnb.api+json"))
+            .and(body_json(serde_json::json!({
+                "name": "cnb-ai-bridge",
+                "description": "bridge",
+                "visibility": "private"
+            })))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+        let api = CnbApi::with_base_url(server.uri());
+
+        api.create_repo("token", "xljiulang", "cnb-ai-bridge", "bridge")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn lists_repository_branches() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xljiulang/cnb-ai-bridge/-/git/branches"))
+            .and(query_param("page", "1"))
+            .and(query_param("page_size", "100"))
+            .and(header("authorization", "Bearer token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "name": "master",
+                    "commit": { "sha": "abc123" },
+                    "protected": false,
+                    "locked": false
+                }
+            ])))
+            .mount(&server)
+            .await;
+        let api = CnbApi::with_base_url(server.uri());
+
+        let branches = api
+            .list_branches("token", "xljiulang/cnb-ai-bridge")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            branches,
+            vec![Branch {
+                name: "master".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn starts_workspace_with_json_branch_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/xljiulang/cnb-ai-bridge/-/workspace/start"))
+            .and(header("authorization", "Bearer token"))
+            .and(header("content-type", "application/json"))
+            .and(header("accept", "application/vnd.cnb.api+json"))
+            .and(body_json(serde_json::json!({ "branch": "main" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sn": "pipeline-1"
+            })))
+            .mount(&server)
+            .await;
+        let api = CnbApi::with_base_url(server.uri());
+
+        let result = api
+            .start_workspace("token", "xljiulang/cnb-ai-bridge", "main")
+            .await
+            .unwrap();
+
+        assert_eq!(result["sn"], "pipeline-1");
     }
 }

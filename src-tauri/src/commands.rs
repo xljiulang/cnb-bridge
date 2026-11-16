@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use cnb_bridge::account::AccountStatus;
+use cnb_bridge::api::Namespace;
 use cnb_bridge::logging::LogEntry;
 use cnb_bridge::settings::Settings;
 use serde::Serialize;
@@ -133,6 +134,17 @@ pub async fn regenerate_ssh_key(state: State<'_, DesktopState>) -> Result<String
         .regenerate_ssh_key()
         .await
         .map_err(|message| CommandError::new("ssh_key_regenerate_failed", message))
+}
+
+#[tauri::command]
+pub async fn list_namespaces(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<Namespace>, CommandError> {
+    state
+        .bridge
+        .list_namespaces()
+        .await
+        .map_err(|error| CommandError::new("namespaces_load_failed", error.to_string()))
 }
 
 #[tauri::command]
