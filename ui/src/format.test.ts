@@ -6,6 +6,7 @@ import {
   formatCreditsUsage,
   formatInputModalities,
   isBridgeTransitioning,
+  statusIconKind,
   settingsEqual,
   shouldShowConnectionDetails,
   validatePort,
@@ -47,6 +48,16 @@ describe("format helpers", () => {
 
   it("labels the request-driven idle state", () => {
     expect(bridgeLabel("idle")).toBe("空闲待命");
+  });
+
+  it("selects a distinct status icon for each sidebar state", () => {
+    expect(statusIconKind("signedOut", false, false)).toBe("scan");
+    expect(statusIconKind("idle", true, false)).toBe("pause");
+    expect(statusIconKind("ready", true, false)).toBe("live");
+    expect(statusIconKind("connecting", true, false)).toBe("busy");
+    expect(statusIconKind("failed", true, false)).toBe("error");
+    expect(statusIconKind("needsRepoCreation", true, false)).toBe("error");
+    expect(statusIconKind("preparingKey", true, true)).toBe("busy");
   });
 
   it("formats command errors", () => {

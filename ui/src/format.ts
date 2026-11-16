@@ -39,6 +39,33 @@ export function isBridgeTransitioning(state: BridgeState): boolean {
   );
 }
 
+export type StatusIconKind =
+  | "scan"
+  | "live"
+  | "busy"
+  | "pause"
+  | "error"
+  | "server";
+
+export function statusIconKind(
+  state: BridgeState,
+  accountConnected: boolean,
+  creatingOrganization: boolean,
+): StatusIconKind {
+  if (!accountConnected) return "scan";
+  if (state === "ready") return "live";
+  if (creatingOrganization || isBridgeTransitioning(state)) return "busy";
+  if (state === "idle") return "pause";
+  if (
+    state === "failed" ||
+    state === "needsSshKey" ||
+    state === "needsRepoCreation"
+  ) {
+    return "error";
+  }
+  return "server";
+}
+
 export function shouldShowConnectionDetails(
   state: AccountState,
   needsOrganization = false,

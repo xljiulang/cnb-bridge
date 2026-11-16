@@ -7,6 +7,7 @@ import {
   Cable,
   CheckCircle2,
   ChevronRight,
+  CirclePause,
   CircleUserRound,
   Copy,
   Cpu,
@@ -56,6 +57,7 @@ import {
   isBridgeTransitioning,
   settingsEqual,
   shouldShowConnectionDetails,
+  statusIconKind,
   validatePort,
 } from "./format";
 import type {
@@ -109,6 +111,13 @@ let unlisten: UnlistenFn | undefined;
 const ready = computed(() => snapshot.value?.bridge.state === "ready");
 const bridgeState = computed(() => snapshot.value?.bridge.state ?? "signedOut");
 const bridgeTransitioning = computed(() => isBridgeTransitioning(bridgeState.value));
+const sidebarStatusIcon = computed(() =>
+  statusIconKind(
+    bridgeState.value,
+    accountConnected.value,
+    creatingOrganization.value,
+  ),
+);
 const idle = computed(() => bridgeState.value === "idle");
 const repoCreationNeeded = computed(() => bridgeState.value === "needsRepoCreation");
 const accountState = computed(() => snapshot.value?.account.state ?? "signedOut");
@@ -581,11 +590,29 @@ watch(
 
       <div class="sidebar-status" :class="{ live: ready }">
         <span class="status-icon">
-          <ScanQrCode v-if="!accountConnected" :size="16" aria-hidden="true" />
-          <Activity v-else-if="ready" :size="16" aria-hidden="true" />
+          <ScanQrCode
+            v-if="sidebarStatusIcon === 'scan'"
+            :size="16"
+            aria-hidden="true"
+          />
+          <Activity
+            v-else-if="sidebarStatusIcon === 'live'"
+            :size="16"
+            aria-hidden="true"
+          />
           <LoaderCircle
-            v-else-if="bridgeTransitioning || creatingOrganization"
+            v-else-if="sidebarStatusIcon === 'busy'"
             class="spin"
+            :size="16"
+            aria-hidden="true"
+          />
+          <CirclePause
+            v-else-if="sidebarStatusIcon === 'pause'"
+            :size="16"
+            aria-hidden="true"
+          />
+          <AlertTriangle
+            v-else-if="sidebarStatusIcon === 'error'"
             :size="16"
             aria-hidden="true"
           />
