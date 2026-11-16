@@ -91,6 +91,7 @@ describe("App shell", () => {
     await wrapper.findAll("nav button")[1].trigger("click");
     await flushPromises();
     expect(wrapper.find(".settings-card").exists()).toBe(true);
+    expect(wrapper.findAll(".settings-card")).toHaveLength(4);
 
     await wrapper.findAll("nav button")[2].trigger("click");
     await flushPromises();

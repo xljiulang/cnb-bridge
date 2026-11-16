@@ -862,49 +862,72 @@ small {
   transform: translateY(-50%);
 }
 
+.settings-stack {
+  display: grid;
+  gap: 14px;
+}
+
 .settings-card {
-  padding: 0;
-  overflow: hidden;
+  display: grid;
+  grid-template-columns: minmax(0, 240px) minmax(0, 1fr);
+  align-items: start;
+  gap: 20px 24px;
 }
 
-.settings-page .form-section {
-  padding: 14px 18px;
+.settings-card-intro h2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
 }
 
-.settings-page .form-grid {
-  margin-top: 11px;
+.settings-card-intro h2 > svg {
+  flex: 0 0 auto;
+  color: var(--muted);
 }
 
-.settings-page .narrow-field {
-  margin-top: 11px;
+.settings-card-intro p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
-.settings-page .switch-row {
-  margin-top: 11px;
+.settings-fields {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.settings-field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+}
+
+.settings-field-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.settings-fields > .narrow-field {
+  margin-top: 0;
+}
+
+.settings-card .switch-row {
+  width: fit-content;
+  justify-content: flex-start;
+  gap: 14px;
+  margin-top: 0;
   padding-top: 0;
   border-top: 0;
-}
-
-.form-section {
-  padding: 21px;
-}
-
-.form-section.divided {
-  border-top: 1px solid var(--line-soft);
-}
-
-.form-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
-  margin-top: 17px;
 }
 
 label {
   min-width: 0;
 }
 
-.form-grid label,
 .narrow-field {
   display: flex;
   flex-direction: column;
@@ -912,7 +935,6 @@ label {
 }
 
 label > span,
-.form-grid label > span,
 .narrow-field > span {
   color: var(--muted-strong);
   font-size: 12px;
@@ -925,7 +947,7 @@ label small {
 
 .narrow-field {
   max-width: 360px;
-  margin-top: 17px;
+  margin-top: 12px;
 }
 
 input,
@@ -989,6 +1011,7 @@ select:focus {
   min-height: 22px;
   flex: 0 0 38px;
   appearance: none;
+  margin: 0;
   padding: 0;
   border-radius: 999px;
   background: #2c3846;
@@ -1502,9 +1525,13 @@ code {
 }
 
 @media (max-width: 1020px) {
-  .connect-card-grid,
-  .form-grid {
+  .connect-card-grid {
     grid-template-columns: 1fr;
+  }
+
+  .settings-card {
+    grid-template-columns: 1fr;
+    gap: 12px;
   }
 
   .connect-card-grid {

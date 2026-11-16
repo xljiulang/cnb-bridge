@@ -32,97 +32,106 @@ defineProps<{ app: DesktopApp }>();
       </button>
     </header>
 
-    <article class="card settings-card">
-      <section class="form-section">
-        <div class="section-head">
-          <div>
-            <span class="card-label">仓库</span>
-            <h2>
-              <FolderGit2 :size="16" aria-hidden="true" />
-              创建位置
-            </h2>
+    <div class="settings-stack">
+      <article class="card settings-card">
+        <div class="settings-card-intro">
+          <span class="card-label">仓库</span>
+          <h2>
+            <FolderGit2 :size="16" aria-hidden="true" />
+            创建位置
+          </h2>
+          <p>桥接配置会保存在该 CNB 仓库中。</p>
+        </div>
+        <div class="settings-fields">
+          <div class="settings-field-grid">
+            <label>
+              <span>命名空间</span>
+              <SelectMenu
+                v-model="app.settingsDraft.repoNamespace"
+                :options="app.namespaceOptions"
+                aria-label="仓库命名空间"
+              />
+              <small>从已登录账号的 CNB 命名空间中选择。</small>
+            </label>
+            <label>
+              <span>仓库名</span>
+              <input
+                v-model="app.settingsDraft.repoName"
+                spellcheck="false"
+              />
+              <small>桥接隧道与配置使用的仓库名称。</small>
+            </label>
           </div>
         </div>
-        <div class="form-grid">
-          <label>
-            <span>命名空间</span>
+      </article>
+
+      <article class="card settings-card">
+        <div class="settings-card-intro">
+          <span class="card-label">日志</span>
+          <h2>
+            <ScrollText :size="16" aria-hidden="true" />
+            HTTP 日志
+          </h2>
+          <p>控制请求日志的写入范围，便于排查问题。</p>
+        </div>
+        <div class="settings-fields">
+          <label class="narrow-field">
+            <span>记录策略</span>
             <SelectMenu
-              v-model="app.settingsDraft.repoNamespace"
-              :options="app.namespaceOptions"
-              aria-label="仓库命名空间"
+              v-model="app.settingsDraft.httpLogFilter"
+              :options="app.httpLogOptions"
+              aria-label="HTTP 日志记录策略"
             />
+            <small>仅异常时只保存失败响应，便于控制磁盘占用。</small>
           </label>
-          <label>
-            <span>仓库名</span>
+        </div>
+      </article>
+
+      <article class="card settings-card">
+        <div class="settings-card-intro">
+          <span class="card-label">连接</span>
+          <h2>
+            <Network :size="16" aria-hidden="true" />
+            本机端口
+          </h2>
+          <p>OpenAI 兼容端点监听的本地端口。</p>
+        </div>
+        <div class="settings-fields">
+          <label class="narrow-field">
+            <span>监听端口</span>
             <input
-              v-model="app.settingsDraft.repoName"
-              spellcheck="false"
+              v-model.number="app.settingsDraft.localPort"
+              type="number"
+              min="1"
+              max="65535"
             />
+            <small>默认只监听本机，修改后网关立即重新监听。</small>
           </label>
         </div>
-      </section>
+      </article>
 
-      <section class="form-section divided">
-        <div class="section-head">
-          <div>
-            <span class="card-label">日志</span>
-            <h2>
-              <ScrollText :size="16" aria-hidden="true" />
-              HTTP 日志
-            </h2>
-          </div>
+      <article class="card settings-card">
+        <div class="settings-card-intro">
+          <span class="card-label">桌面</span>
+          <h2>
+            <Power :size="16" aria-hidden="true" />
+            启动行为
+          </h2>
+          <p>控制应用随系统启动的行为。</p>
         </div>
-        <label class="narrow-field">
-          <span>记录策略</span>
-          <SelectMenu
-            v-model="app.settingsDraft.httpLogFilter"
-            :options="app.httpLogOptions"
-            aria-label="HTTP 日志记录策略"
-          />
-        </label>
-      </section>
-
-      <section class="form-section divided">
-        <div class="section-head">
-          <div>
-            <span class="card-label">连接</span>
-            <h2>
-              <Network :size="16" aria-hidden="true" />
-              本机端口
-            </h2>
-          </div>
+        <div class="settings-fields">
+          <label class="switch-row">
+            <input
+              v-model="app.settingsDraft.launchAtLogin"
+              type="checkbox"
+            />
+            <span>
+              <strong>登录 Windows 时自动启动</strong>
+              <small>登录 Windows 后随系统在托盘启动。</small>
+            </span>
+          </label>
         </div>
-        <label class="narrow-field">
-          <span>监听端口</span>
-          <input
-            v-model.number="app.settingsDraft.localPort"
-            type="number"
-            min="1"
-            max="65535"
-          />
-        </label>
-      </section>
-
-      <section class="form-section divided">
-        <div class="section-head">
-          <div>
-            <span class="card-label">桌面</span>
-            <h2>
-              <Power :size="16" aria-hidden="true" />
-              启动行为
-            </h2>
-          </div>
-        </div>
-        <label class="switch-row">
-          <span>
-            <strong>登录 Windows 时自动启动</strong>
-          </span>
-          <input
-            v-model="app.settingsDraft.launchAtLogin"
-            type="checkbox"
-          />
-        </label>
-      </section>
-    </article>
+      </article>
+    </div>
   </section>
 </template>
