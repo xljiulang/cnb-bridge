@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{App, AppHandle, Manager};
@@ -7,7 +5,6 @@ use tauri::{App, AppHandle, Manager};
 use crate::state;
 
 pub const TRAY_ID: &str = "cnb-bridge-tray";
-static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub fn setup(app: &mut App) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
@@ -26,9 +23,7 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main_window(app),
-            "exit" if !EXIT_REQUESTED.swap(true, Ordering::AcqRel) => {
-                state::exit_with_shutdown(app.clone());
-            }
+            "exit" => state::exit_with_shutdown(app.clone()),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

@@ -10,7 +10,11 @@ pub use state::{AppSnapshot, DesktopState};
 
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if cnb_bridge::lifecycle::is_shutdown_for_update(args.iter()) {
+                state::exit_with_shutdown(app.clone());
+                return;
+            }
             show_main_window(app);
         }))
         .plugin(tauri_plugin_autostart::init(
@@ -19,8 +23,14 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            let lifecycle_mutex = cnb_bridge::lifecycle::AppLifecycleMutex::acquire()
+                .map_err(std::io::Error::other)?;
+            if cnb_bridge::lifecycle::is_shutdown_for_update(std::env::args()) {
+                state::exit_with_shutdown(app.handle().clone());
+                return Ok(());
+            }
             tray::setup(app)?;
-            state::initialize(app)?;
+            state::initialize(app, lifecycle_mutex)?;
             Ok(())
         })
         .on_window_event(|window, event| {

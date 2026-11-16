@@ -87,7 +87,7 @@ npm --prefix ui run build
 cargo test
 cargo build --release -p cnb-bridge-desktop --features custom-protocol
 
-# 安装包（需要 Inno Setup 6）
+# 安装包（需要 Inno Setup 6.7.3+）
 iscc installer\cnb-bridge.iss
 ```
 
@@ -95,9 +95,11 @@ iscc installer\cnb-bridge.iss
 
 ## GitHub Actions 手动打包
 
-在 GitHub Actions 中打开 `Package Windows Installer` 工作流并点击 `Run workflow`。工作流会执行前端与 Rust 测试、构建 release 客户端、编译 Inno Setup 安装包，并验证安装目录同时包含 `cnb-bridge.exe` 和 `vcruntime140.dll`。
+在 GitHub Actions 中打开 `Package Windows Installer` 工作流并点击 `Run workflow`。工作流会执行前端与 Rust 测试、构建 release 客户端、编译简体中文 Inno Setup 安装包，并验证安装目录包含 `cnb-bridge.exe`、`vcruntime140.dll` 和 `app.ico`。
 
-成功后可下载名为 `cnb-bridge-windows-x64-<run_number>` 的 Artifact，其中只包含 `cnb-bridge-<version>-windows-x64-setup.exe`。
+安装和升级前会通过 `--shutdown-for-update` 优雅停止正在运行的客户端，替换完成后恢复启动；卸载前也会停止客户端并清理开机启动注册项。安装器不再检测 WebView2，也不会显示语言选择，只使用项目内简体中文。
+
+成功后可下载名为 `cnb-bridge-v<version>-windows-x64-setup` 的 Artifact，其中只包含 `cnb-bridge-v<version>-windows-x64-setup.exe`。
 
 如果 CMake 只随 Visual Studio 安装，构建前把它加入 PATH：
 

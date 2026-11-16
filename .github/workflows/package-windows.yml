@@ -20,6 +20,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Read package version
+        id: version
+        shell: pwsh
+        run: |
+          $cargo = Get-Content -LiteralPath "Cargo.toml" -Raw
+          $match = [regex]::Match($cargo, '(?m)^version\s*=\s*"([^"]+)"')
+          if (-not $match.Success) {
+            throw "Cargo.toml package version was not found"
+          }
+          "version=$($match.Groups[1].Value)" >> $env:GITHUB_OUTPUT
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -73,6 +84,35 @@ jobs:
             }
           }
 
+          $iss = Get-Content -LiteralPath "installer/cnb-bridge.iss" -Raw
+          if ($iss -match "WebView2") {
+            throw "Installer must not contain WebView2 detection"
+          }
+          if ($iss -notmatch [regex]::Escape('{#AppMutexName}')) {
+            throw "Installer lifecycle mutex reference is missing"
+          }
+          if ($iss -notmatch [regex]::Escape('--shutdown-for-update')) {
+            throw "Installer graceful shutdown argument is missing"
+          }
+          foreach ($marker in @(
+            'taskkill.exe',
+            'ShouldOfferLaunch',
+            'Software\Microsoft\Windows\CurrentVersion\Run',
+            'StartupApproved\Run'
+          )) {
+            if ($iss -notmatch [regex]::Escape($marker)) {
+              throw "Installer lifecycle marker is missing: $marker"
+            }
+          }
+          $languageSection = [regex]::Match(
+            $iss,
+            '(?ms)^\[Languages\]\s*(.*?)(?=^\[|\z)'
+          ).Groups[1].Value
+          $languageCount = [regex]::Matches($languageSection, '(?m)^Name:\s*"').Count
+          if ($languageCount -ne 1) {
+            throw "Expected exactly one installer language, found $languageCount"
+          }
+
       - name: Install frontend dependencies
         working-directory: ui
         run: npm ci
@@ -97,25 +137,52 @@ jobs:
             throw "Missing release executable: $executable"
           }
 
-      - name: Install Inno Setup
+      - name: Install Inno Setup 6.7.3
         shell: pwsh
-        run: choco install innosetup --no-progress -y
+        run: |
+          $installerPath = Join-Path $env:RUNNER_TEMP "innosetup-6.7.3.exe"
+          Invoke-WebRequest `
+            -Uri "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe" `
+            -OutFile $installerPath
+          $expectedHash = "9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732"
+          $actualHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) {
+            throw "Inno Setup SHA-256 mismatch: $actualHash"
+          }
+
+          $installDir = "C:\Tools\InnoSetup-6.7.3"
+          $process = Start-Process `
+            -FilePath $installerPath `
+            -ArgumentList @(
+              "/VERYSILENT"
+              "/SUPPRESSMSGBOXES"
+              "/NORESTART"
+              "/SP-"
+              "/DIR=$installDir"
+            ) `
+            -WindowStyle Hidden `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Inno Setup installation failed with exit code $($process.ExitCode)"
+          }
+
+          $iscc = Join-Path $installDir "ISCC.exe"
+          if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) {
+            throw "ISCC.exe was not installed: $iscc"
+          }
+          "INNO_SETUP_ISCC=$iscc" >> $env:GITHUB_ENV
 
       - name: Compile installer
         shell: pwsh
         run: |
-          $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
-          if ($null -eq $iscc) {
-            $fallback = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-            if (-not (Test-Path -LiteralPath $fallback -PathType Leaf)) {
-              throw "Inno Setup compiler was not found"
-            }
-            $compiler = $fallback
-          } else {
-            $compiler = $iscc.Source
+          if (-not (Test-Path -LiteralPath $env:INNO_SETUP_ISCC -PathType Leaf)) {
+            throw "INNO_SETUP_ISCC is missing or invalid"
           }
 
-          & $compiler "installer\cnb-bridge.iss"
+          & $env:INNO_SETUP_ISCC `
+            "/DAppVersion=${{ steps.version.outputs.version }}" `
+            "installer\cnb-bridge.iss"
           if ($LASTEXITCODE -ne 0) {
             throw "Inno Setup compilation failed with exit code $LASTEXITCODE"
           }
@@ -151,7 +218,7 @@ jobs:
             throw "Installer exited with code $($process.ExitCode)"
           }
 
-          foreach ($file in @("cnb-bridge.exe", "vcruntime140.dll")) {
+          foreach ($file in @("cnb-bridge.exe", "vcruntime140.dll", "app.ico")) {
             $installedFile = Join-Path $installDir $file
             if (-not (Test-Path -LiteralPath $installedFile -PathType Leaf)) {
               throw "Installer did not install $file"
@@ -161,6 +228,6 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: cnb-bridge-windows-x64-${{ github.run_number }}
-          path: installer/output/*-windows-x64-setup.exe
+          name: cnb-bridge-v${{ steps.version.outputs.version }}-windows-x64-setup
+          path: installer/output/cnb-bridge-v${{ steps.version.outputs.version }}-windows-x64-setup.exe
           if-no-files-found: error

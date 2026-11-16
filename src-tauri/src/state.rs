@@ -2,6 +2,7 @@ use crate::commands::CommandError;
 use crate::tray;
 use cnb_bridge::account::{AccountManager, AccountStatus};
 use cnb_bridge::bridge::{Bridge, BridgeSnapshot};
+use cnb_bridge::lifecycle::AppLifecycleMutex;
 use cnb_bridge::logging::Logger;
 use cnb_bridge::model_catalog::{self, ModelSummary};
 use cnb_bridge::paths;
@@ -36,6 +37,7 @@ pub struct DesktopState {
     pub models: Vec<ModelSummary>,
     pub login_cancel: Mutex<Option<Arc<AtomicBool>>>,
     pub login_generation: AtomicU64,
+    _lifecycle_mutex: AppLifecycleMutex,
 }
 
 impl DesktopState {
@@ -60,7 +62,10 @@ impl DesktopState {
 }
 
 /// Creates state and starts background work after the Tauri app is ready.
-pub fn initialize(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
+pub fn initialize(
+    app: &mut App,
+    lifecycle_mutex: AppLifecycleMutex,
+) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = paths::ensure_data_dir()?;
     std::fs::create_dir_all(data_dir.join("logs"))?;
     std::fs::create_dir_all(paths::logs_dir().join("http-trace"))?;
@@ -84,6 +89,7 @@ pub fn initialize(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
         models,
         login_cancel: Mutex::new(None),
         login_generation: AtomicU64::new(0),
+        _lifecycle_mutex: lifecycle_mutex,
     });
 
     let handle = app.handle().clone();
@@ -121,6 +127,10 @@ pub fn apply_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
 
 /// Stops the bridge and exits the process.
 pub fn exit_with_shutdown(app: AppHandle) {
+    static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+    if EXIT_REQUESTED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
     tauri::async_runtime::spawn(async move {
         if let Some(state) = app.try_state::<DesktopState>() {
             let _ = tokio::time::timeout(
