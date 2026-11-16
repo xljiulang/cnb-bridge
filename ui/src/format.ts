@@ -1,4 +1,10 @@
-import type { AccountState, AppSnapshot, BridgeState, CommandError } from "./types";
+import type {
+  AccountState,
+  AppSnapshot,
+  BridgeState,
+  CommandError,
+  Settings,
+} from "./types";
 
 const BRIDGE_LABELS: Record<BridgeState, string> = {
   signedOut: "未登录",
@@ -35,6 +41,16 @@ export function isBridgeTransitioning(state: BridgeState): boolean {
 
 export function shouldShowConnectionDetails(state: AccountState): boolean {
   return state === "connected";
+}
+
+export function settingsEqual(draft: Settings, persisted: Settings): boolean {
+  return (
+    draft.repoNamespace === persisted.repoNamespace &&
+    draft.repoName === persisted.repoName &&
+    Number(draft.localPort) === Number(persisted.localPort) &&
+    draft.minimizeToTray === persisted.minimizeToTray &&
+    draft.launchAtLogin === persisted.launchAtLogin
+  );
 }
 
 export function formatContextWindow(tokens: number): string {

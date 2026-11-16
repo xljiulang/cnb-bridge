@@ -4,17 +4,21 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   Activity,
   AlertTriangle,
+  BookOpen,
   Cable,
   CheckCircle2,
   ChevronRight,
   CircleUserRound,
   Copy,
   Cpu,
+  Database,
   ExternalLink,
+  FileText,
   FolderGit2,
   FolderOpen,
   Info,
   KeyRound,
+  ListFilter,
   LoaderCircle,
   LogOut,
   Network,
@@ -24,6 +28,7 @@ import {
   ScrollText,
   Server,
   Settings as SettingsIcon,
+  ShieldCheck,
   Square,
   X,
 } from "@lucide/vue";
@@ -49,6 +54,7 @@ import {
   formatContextWindow,
   formatInputModalities,
   isBridgeTransitioning,
+  settingsEqual,
   shouldShowConnectionDetails,
   validatePort,
 } from "./format";
@@ -80,7 +86,6 @@ const httpTraces = ref<HttpTraceSummary[]>([]);
 const namespaces = ref<Namespace[]>([]);
 const logFilter = ref("all");
 const logMode = ref<"runtime" | "http">("runtime");
-const settingsDirty = ref(false);
 const copiedModelId = ref<string | null>(null);
 const settingsDraft = reactive<Settings>({
   repoNamespace: "",
@@ -94,12 +99,20 @@ let noticeTimer: number | undefined;
 let modelCopyTimer: number | undefined;
 let unlisten: UnlistenFn | undefined;
 
+const GITHUB_PROJECT_URL = "https://github.com/xljiulang/cyarp-cnb";
+const GITHUB_README_URL = `${GITHUB_PROJECT_URL}#readme`;
+const GITHUB_LICENSE_URL = `${GITHUB_PROJECT_URL}/blob/main/LICENSE`;
+
 const ready = computed(() => snapshot.value?.bridge.state === "ready");
 const bridgeState = computed(() => snapshot.value?.bridge.state ?? "signedOut");
 const bridgeTransitioning = computed(() => isBridgeTransitioning(bridgeState.value));
 const idle = computed(() => bridgeState.value === "idle");
 const repoCreationNeeded = computed(() => bridgeState.value === "needsRepoCreation");
 const accountState = computed(() => snapshot.value?.account.state ?? "signedOut");
+const settingsDirty = computed(() => {
+  const persisted = snapshot.value?.settings;
+  return persisted ? !settingsEqual(settingsDraft, persisted) : false;
+});
 const connectionDetailsVisible = computed(() =>
   shouldShowConnectionDetails(accountState.value),
 );
@@ -194,6 +207,7 @@ const pipelineSteps = computed<ConnectionStep[]>(() => {
 
 async function refresh() {
   try {
+    const syncDraft = !settingsDirty.value;
     const next = await getSnapshot();
     snapshot.value = next;
     if (next.account.state === "failed" && next.account.error) {
@@ -208,16 +222,18 @@ async function refresh() {
     } else if (next.bridge.state === "ready" && !next.account.error) {
       error.value = null;
     }
-    if (!settingsDirty.value) {
-      settingsDraft.repoNamespace = next.settings.repoNamespace;
-      settingsDraft.repoName = next.settings.repoName;
-      settingsDraft.localPort = next.settings.localPort;
-      settingsDraft.minimizeToTray = next.settings.minimizeToTray;
-      settingsDraft.launchAtLogin = next.settings.launchAtLogin;
-    }
+    if (syncDraft) applySettingsDraft(next.settings);
   } catch (cause) {
     error.value = formatError(cause);
   }
+}
+
+function applySettingsDraft(settings: Settings) {
+  settingsDraft.repoNamespace = settings.repoNamespace;
+  settingsDraft.repoName = settings.repoName;
+  settingsDraft.localPort = settings.localPort;
+  settingsDraft.minimizeToTray = settings.minimizeToTray;
+  settingsDraft.launchAtLogin = settings.launchAtLogin;
 }
 
 async function run(action: () => Promise<unknown>, message?: string) {
@@ -342,11 +358,12 @@ async function save() {
     return;
   }
   await run(async () => {
-    await saveSettings({
+    const next = await saveSettings({
       ...settingsDraft,
       localPort: Number(settingsDraft.localPort),
     });
-    settingsDirty.value = false;
+    snapshot.value = next;
+    applySettingsDraft(next.settings);
   }, "设置已保存");
 }
 
@@ -378,6 +395,20 @@ function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
   return `${(value / 1024 / 1024).toFixed(1)} MiB`;
+}
+
+function httpTraceLabel(trace: HttpTraceSummary): string {
+  return `${trace.method} ${trace.path}，状态 ${trace.status}，请求 ${formatBytes(
+    trace.requestBytes,
+  )}，响应 ${formatBytes(trace.responseBytes)}，耗时 ${trace.elapsedMs} 毫秒`;
+}
+
+async function openAboutResource(url: string) {
+  try {
+    await openExternal(url);
+  } catch (cause) {
+    error.value = formatError(cause);
+  }
 }
 
 onMounted(async () => {
@@ -503,7 +534,7 @@ onBeforeUnmount(() => {
           <div class="page-title">
             <p class="eyebrow">CNB BRIDGE</p>
             <div class="title-row">
-              <h1>{{ statusLabel }}</h1>
+              <h1>连接</h1>
               <span class="status-pill" :class="{ live: ready, busy: bridgeTransitioning }">
                 <span />
                 {{
@@ -579,6 +610,9 @@ onBeforeUnmount(() => {
               </div>
               <p v-if="!connectionDetailsVisible" class="account-intro">
                 扫码完成 CNB 授权后，即可查看模型、本机接入地址并启动桥接。
+              </p>
+              <p v-else class="account-intro">
+                登录态用于 CNB 工作空间与 Agent 鉴权。
               </p>
               <div class="account-actions">
                 <button
@@ -712,10 +746,6 @@ onBeforeUnmount(() => {
                   网关不校验客户端 API Key，可填写 <code>local</code>、任意占位值或留空。
                   真正的 CNB 鉴权来自已登录账号。
                 </p>
-                <div class="api-key-example">
-                  <span>示例</span>
-                  <code>local</code>
-                </div>
               </article>
             </template>
           </div>
@@ -780,13 +810,13 @@ onBeforeUnmount(() => {
           </div>
           <button
             type="button"
-            class="primary"
-            :disabled="busy"
+            :class="settingsDirty ? 'primary' : 'secondary'"
+            :disabled="busy || !settingsDirty"
             @click="save"
           >
             <LoaderCircle v-if="busy" class="spin" :size="16" aria-hidden="true" />
             <CheckCircle2 v-else :size="16" aria-hidden="true" />
-            保存
+            {{ busy ? "保存中…" : settingsDirty ? "保存" : "已保存" }}
           </button>
         </header>
 
@@ -802,7 +832,7 @@ onBeforeUnmount(() => {
             <div class="form-grid">
               <label>
                 <span>命名空间</span>
-                <select v-model="settingsDraft.repoNamespace" @change="settingsDirty = true">
+                <select v-model="settingsDraft.repoNamespace">
                   <option value="">自动选择</option>
                   <option
                     v-if="settingsDraft.repoNamespace && !namespaceAvailable"
@@ -825,7 +855,6 @@ onBeforeUnmount(() => {
                 <input
                   v-model="settingsDraft.repoName"
                   spellcheck="false"
-                  @input="settingsDirty = true"
                 />
                 <small>默认 cnb-ai-bridge。</small>
               </label>
@@ -847,7 +876,6 @@ onBeforeUnmount(() => {
                 type="number"
                 min="1"
                 max="65535"
-                @input="settingsDirty = true"
               />
               <small>修改后需等待当前请求结束。</small>
             </label>
@@ -869,7 +897,6 @@ onBeforeUnmount(() => {
               <input
                 v-model="settingsDraft.minimizeToTray"
                 type="checkbox"
-                @change="settingsDirty = true"
               />
             </label>
             <label class="switch-row">
@@ -880,7 +907,6 @@ onBeforeUnmount(() => {
               <input
                 v-model="settingsDraft.launchAtLogin"
                 type="checkbox"
-                @change="settingsDirty = true"
               />
             </label>
           </section>
@@ -917,7 +943,12 @@ onBeforeUnmount(() => {
                 HTTP 记录
               </button>
             </div>
-            <label v-if="logMode === 'runtime'" class="filter-control">
+            <label
+              v-if="logMode === 'runtime'"
+              class="filter-control"
+              title="筛选日志级别"
+            >
+              <ListFilter :size="15" aria-hidden="true" />
               <select v-model="logFilter" aria-label="日志级别">
                 <option value="all">全部</option>
                 <option value="info">Info</option>
@@ -970,11 +1001,23 @@ onBeforeUnmount(() => {
               <strong>暂无 HTTP 记录</strong>
               <span>请求发往上游并收到响应后，会写入一对平铺报文文件。</span>
             </div>
+            <div
+              v-if="httpTraces.length > 0"
+              class="http-log-header"
+              aria-hidden="true"
+            >
+              <span>请求</span>
+              <span>协议</span>
+              <span>状态</span>
+              <span>请求 / 响应大小</span>
+              <span class="http-log-duration">耗时</span>
+            </div>
             <button
               v-for="trace in httpTraces"
               :key="trace.id"
               type="button"
               class="http-log-row"
+              :aria-label="httpTraceLabel(trace)"
               @click="openTrace(trace.id)"
             >
               <span class="http-log-main">
@@ -1011,20 +1054,113 @@ onBeforeUnmount(() => {
           </div>
         </header>
 
-        <article class="card details-card">
-          <div class="section-head">
-            <div>
-              <span class="card-label">产品</span>
-              <h2>应用信息</h2>
+        <div class="about-grid">
+          <article class="card details-card about-card">
+            <div class="section-head">
+              <div>
+                <span class="card-label">应用</span>
+                <h2>应用信息</h2>
+              </div>
+              <Info :size="19" aria-hidden="true" />
             </div>
-            <Info :size="19" aria-hidden="true" />
-          </div>
-          <dl>
-            <div><dt>版本</dt><dd><code>{{ snapshot?.version || "0.1.0" }}</code></dd></div>
-            <div><dt>运行方式</dt><dd>Tauri 桌面客户端</dd></div>
-            <div><dt>安全边界</dt><dd>仅监听 127.0.0.1</dd></div>
-          </dl>
-        </article>
+            <dl>
+              <div>
+                <dt>版本</dt>
+                <dd><code>{{ snapshot?.version || "0.1.0" }}</code></dd>
+              </div>
+              <div><dt>运行方式</dt><dd>Tauri 桌面客户端</dd></div>
+              <div><dt>本机端点</dt><dd><code>{{ baseUrl }}</code></dd></div>
+            </dl>
+          </article>
+
+          <article class="card about-card">
+            <div class="section-head">
+              <div>
+                <span class="card-label">安全</span>
+                <h2>本机安全边界</h2>
+              </div>
+              <ShieldCheck :size="19" aria-hidden="true" />
+            </div>
+            <ul class="about-list">
+              <li>
+                <strong>仅监听 loopback</strong>
+                <span>公开网关只接受来自 127.0.0.1 的本机连接。</span>
+              </li>
+              <li>
+                <strong>CNB 鉴权由账号登录提供</strong>
+                <span>桌面客户端使用已绑定账号完成工作空间与 Agent 鉴权。</span>
+              </li>
+              <li>
+                <strong>客户端 API Key 不校验</strong>
+                <span>可填写 local、任意占位值或留空。</span>
+              </li>
+            </ul>
+          </article>
+
+          <article class="card about-card data-card">
+            <div class="section-head">
+              <div>
+                <span class="card-label">数据</span>
+                <h2>本地日志</h2>
+              </div>
+              <Database :size="19" aria-hidden="true" />
+            </div>
+            <p class="about-copy">
+              HTTP 记录会保存实际发往上游的认证头、Cookie、API Key 和对话正文，请勿直接分享。
+            </p>
+            <div class="about-path">
+              <span>日志目录</span>
+              <code>{{ snapshot?.httpLogsPath }}</code>
+            </div>
+            <div class="about-meta">
+              <span>保留 7 天</span>
+              <span>总量上限 1 GiB</span>
+            </div>
+            <button type="button" class="secondary compact" @click="run(openLogsFolder)">
+              <FolderOpen :size="15" aria-hidden="true" />
+              打开日志目录
+            </button>
+          </article>
+
+          <article class="card about-card">
+            <div class="section-head">
+              <div>
+                <span class="card-label">资源</span>
+                <h2>项目与许可</h2>
+              </div>
+              <BookOpen :size="19" aria-hidden="true" />
+            </div>
+            <p class="about-copy">
+              CNB Bridge 使用 MIT License。项目说明、接口文档和构建方式可在仓库中查看。
+            </p>
+            <div class="about-actions">
+              <button
+                type="button"
+                class="secondary compact"
+                @click="openAboutResource(GITHUB_PROJECT_URL)"
+              >
+                <ExternalLink :size="15" aria-hidden="true" />
+                项目主页
+              </button>
+              <button
+                type="button"
+                class="ghost compact"
+                @click="openAboutResource(GITHUB_README_URL)"
+              >
+                <BookOpen :size="15" aria-hidden="true" />
+                README
+              </button>
+              <button
+                type="button"
+                class="ghost compact"
+                @click="openAboutResource(GITHUB_LICENSE_URL)"
+              >
+                <FileText :size="15" aria-hidden="true" />
+                MIT License
+              </button>
+            </div>
+          </article>
+        </div>
       </section>
     </main>
   </div>

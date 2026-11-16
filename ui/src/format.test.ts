@@ -5,9 +5,19 @@ import {
   formatContextWindow,
   formatInputModalities,
   isBridgeTransitioning,
+  settingsEqual,
   shouldShowConnectionDetails,
   validatePort,
 } from "./format";
+import type { Settings } from "./types";
+
+const savedSettings: Settings = {
+  repoNamespace: "owner",
+  repoName: "cnb-ai-bridge",
+  localPort: 11233,
+  minimizeToTray: true,
+  launchAtLogin: false,
+};
 
 describe("format helpers", () => {
   it("labels bridge states", () => {
@@ -55,5 +65,21 @@ describe("format helpers", () => {
     expect(formatContextWindow(131_072)).toBe("128K 上下文");
     expect(formatInputModalities(["text", "image"])).toBe("文本 / 图像");
     expect(formatInputModalities(["embedding"])).toBe("embedding");
+  });
+
+  it("detects settings changes and clears after values are restored", () => {
+    const changedDraft = { ...savedSettings, repoName: "other-repo" };
+
+    expect(settingsEqual(savedSettings, savedSettings)).toBe(true);
+    expect(settingsEqual(changedDraft, savedSettings)).toBe(false);
+    expect(settingsEqual({ ...changedDraft, repoName: savedSettings.repoName }, savedSettings)).toBe(
+      true,
+    );
+  });
+
+  it("compares numeric ports and desktop switches", () => {
+    expect(settingsEqual({ ...savedSettings, localPort: 12000 }, savedSettings)).toBe(false);
+    expect(settingsEqual({ ...savedSettings, minimizeToTray: false }, savedSettings)).toBe(false);
+    expect(settingsEqual({ ...savedSettings, launchAtLogin: true }, savedSettings)).toBe(false);
   });
 });

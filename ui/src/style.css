@@ -307,7 +307,7 @@ button:disabled {
 .status-copy small {
   margin-top: 3px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .port-chip {
@@ -316,7 +316,7 @@ button:disabled {
   border-radius: 6px;
   color: var(--muted);
   font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .content {
@@ -422,7 +422,7 @@ small {
 }
 
 .small {
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .head-actions {
@@ -442,7 +442,7 @@ small {
   border-radius: 999px;
   background: var(--panel);
   color: var(--muted-strong);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
 }
 
@@ -482,7 +482,7 @@ small {
 .connect-card-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-auto-rows: 176px;
+  grid-auto-rows: 160px;
   align-items: stretch;
   gap: 14px;
 }
@@ -549,7 +549,7 @@ small {
   border-radius: 999px;
   background: var(--panel-raised);
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   white-space: nowrap;
 }
 
@@ -685,7 +685,7 @@ small {
   border-radius: 999px;
   background: var(--success-soft);
   color: #91e8cc;
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   line-height: 1;
 }
@@ -706,7 +706,7 @@ small {
   border-radius: 7px;
   background: rgba(255, 255, 255, 0.025);
   color: var(--muted-strong);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.2;
 }
 
@@ -725,25 +725,6 @@ small {
   color: #cce9ff;
 }
 
-.api-key-example {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: auto;
-  padding: 10px 12px;
-  border: 1px solid var(--line-soft);
-  border-radius: 9px;
-  background: rgba(9, 13, 18, 0.45);
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.api-key-example code {
-  color: var(--text);
-  font-size: 12px;
-}
-
 .pill {
   align-self: start;
   padding: 4px 8px;
@@ -751,7 +732,7 @@ small {
   border-radius: 999px;
   background: var(--panel-raised);
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1;
 }
 
@@ -865,7 +846,7 @@ small {
 
 .step small {
   margin-top: 4px;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .step-arrow {
@@ -1044,20 +1025,42 @@ select:focus {
 
 .filter-control {
   display: flex;
-  flex-direction: column;
-  gap: 5px;
+  min-height: 36px;
+  align-items: center;
+  gap: 2px;
+  padding-left: 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--control-radius);
+  background: #0c1219;
+  color: var(--muted);
+}
+
+.filter-control:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.filter-control > svg {
+  flex: 0 0 auto;
 }
 
 .filter-control select {
   min-height: 34px;
-  padding-top: 6px;
-  padding-bottom: 6px;
+  padding: 6px 8px 6px 6px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.filter-control select:focus {
+  border-color: transparent;
+  box-shadow: none;
 }
 
 .code-path {
   overflow: hidden;
   font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1077,7 +1080,7 @@ select:focus {
   padding: 10px 14px;
   border-bottom: 1px solid var(--line-soft);
   font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .log-row:last-child {
@@ -1122,7 +1125,7 @@ select:focus {
   border-radius: 10px;
   background: var(--warning-soft);
   color: #f4c982;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .http-log-list {
@@ -1130,6 +1133,18 @@ select:focus {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: rgba(9, 13, 18, 0.76);
+}
+
+.http-log-header {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.6fr) 112px 54px 160px 76px auto 18px;
+  gap: 10px;
+  padding: 8px 13px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
 }
 
 .http-log-row {
@@ -1172,13 +1187,13 @@ select:focus {
 .http-log-main strong {
   color: #d2dde7;
   font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .http-log-main small {
   margin-top: 3px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .http-log-protocol,
@@ -1186,7 +1201,7 @@ select:focus {
 .http-log-duration {
   color: var(--muted);
   font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .http-log-status {
@@ -1196,7 +1211,7 @@ select:focus {
   background: var(--success-soft);
   color: #8de1c5;
   font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
-  font-size: 10px;
+  font-size: 11px;
   text-align: center;
 }
 
@@ -1210,7 +1225,7 @@ select:focus {
   border-radius: 6px;
   background: var(--warning-soft);
   color: var(--warning);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .empty-state {
@@ -1234,7 +1249,7 @@ select:focus {
 }
 
 .empty-state span {
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .details-card dl {
@@ -1252,15 +1267,120 @@ select:focus {
 
 .details-card dt {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .details-card dd {
   min-width: 0;
   margin: 0;
   color: var(--muted-strong);
-  font-size: 12px;
+  font-size: 13px;
   overflow-wrap: anywhere;
+}
+
+.about-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 14px;
+}
+
+.about-card {
+  display: flex;
+  min-height: 238px;
+  flex-direction: column;
+}
+
+.about-card .section-head {
+  align-items: center;
+}
+
+.about-copy {
+  margin: 16px 0 0;
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.about-list {
+  display: grid;
+  gap: 0;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.about-list li {
+  display: grid;
+  gap: 3px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.about-list li:first-child {
+  border-top: 0;
+}
+
+.about-list strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.about-list span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.about-path {
+  display: grid;
+  gap: 5px;
+  margin-top: 14px;
+  padding: 10px 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: rgba(9, 13, 18, 0.42);
+}
+
+.about-path span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.about-path code {
+  color: #c6e4f8;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.about-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.about-meta span {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--muted-strong);
+  font-size: 11px;
+}
+
+.data-card > button {
+  align-self: flex-start;
+  margin-top: auto;
+}
+
+.about-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 18px;
 }
 
 code {
@@ -1349,7 +1469,8 @@ code {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .http-log-row {
+  .http-log-row,
+  .http-log-header {
     grid-template-columns: minmax(180px, 1fr) 100px 48px 130px 18px;
   }
 
@@ -1365,6 +1486,7 @@ code {
 
 @media (max-width: 1020px) {
   .connect-card-grid,
+  .about-grid,
   .form-grid {
     grid-template-columns: 1fr;
   }
@@ -1376,6 +1498,10 @@ code {
   .connect-card {
     min-height: 0;
     height: auto;
+  }
+
+  .about-card {
+    min-height: 0;
   }
 
   .account-intro {
