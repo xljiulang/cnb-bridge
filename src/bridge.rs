@@ -396,7 +396,7 @@ impl Bridge {
             runtime.error = None;
         }
         self.logger
-            .log("info", "本机隧道空闲，已关闭并等待 CNB 自然回收");
+            .log("info", "SSH 隧道空闲 5 分钟，已关闭并等待 CNB 自然回收");
         true
     }
 

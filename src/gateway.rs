@@ -23,9 +23,17 @@ impl GatewayConfig {
         Self {
             port,
             activation_timeout: Duration::from_secs(180),
-            idle_timeout: Duration::from_secs(60),
+            idle_timeout: Duration::from_secs(5 * 60),
         }
     }
+}
+
+fn should_close_idle_tunnel(
+    active_connections: usize,
+    idle_for: Duration,
+    idle_timeout: Duration,
+) -> bool {
+    active_connections == 0 && idle_for >= idle_timeout
 }
 
 struct GatewayActivity {
@@ -137,9 +145,11 @@ impl GatewayHandle {
                         }
                     }
                     _ = interval.tick() => {
-                        if idle_activity.active_connections() != 0
-                            || idle_activity.idle_for() < idle_timeout
-                        {
+                        if !should_close_idle_tunnel(
+                            idle_activity.active_connections(),
+                            idle_activity.idle_for(),
+                            idle_timeout,
+                        ) {
                             continue;
                         }
                         let Some(bridge) = idle_bridge.upgrade() else {
@@ -259,7 +269,23 @@ mod tests {
     fn gateway_config_uses_request_driven_defaults() {
         let config = GatewayConfig::new(11233);
         assert_eq!(config.activation_timeout, Duration::from_secs(180));
-        assert_eq!(config.idle_timeout, Duration::from_secs(60));
+        assert_eq!(config.idle_timeout, Duration::from_secs(5 * 60));
+    }
+
+    #[test]
+    fn only_closes_after_five_idle_minutes_without_active_connections() {
+        let timeout = Duration::from_secs(5 * 60);
+        assert!(!should_close_idle_tunnel(
+            1,
+            Duration::from_secs(301),
+            timeout
+        ));
+        assert!(!should_close_idle_tunnel(
+            0,
+            Duration::from_secs(299),
+            timeout
+        ));
+        assert!(should_close_idle_tunnel(0, timeout, timeout));
     }
 
     #[tokio::test]
