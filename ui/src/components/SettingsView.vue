@@ -5,6 +5,7 @@ import {
   LoaderCircle,
   Network,
   Power,
+  Save,
   ScrollText,
 } from "@lucide/vue";
 import SelectMenu from "./SelectMenu.vue";
@@ -20,16 +21,20 @@ defineProps<{ app: DesktopApp }>();
         <p class="eyebrow">SETTINGS</p>
         <h1>设置</h1>
       </div>
-      <button
-        type="button"
-        :class="app.settingsDirty ? 'primary' : 'secondary'"
-        :disabled="app.busy || !app.settingsDirty"
-        @click="app.save"
-      >
-        <LoaderCircle v-if="app.busy" class="spin" :size="16" aria-hidden="true" />
-        <CheckCircle2 v-else :size="16" aria-hidden="true" />
-        {{ app.busy ? "保存中…" : app.settingsDirty ? "保存" : "已保存" }}
-      </button>
+      <div class="head-actions">
+        <span v-if="app.settingsDirty" class="badge warn">未保存</span>
+        <button
+          type="button"
+          :class="app.settingsDirty ? 'primary' : 'secondary'"
+          :disabled="app.busy || !app.settingsDirty"
+          @click="app.save"
+        >
+          <LoaderCircle v-if="app.busy" class="spin" :size="16" aria-hidden="true" />
+          <Save v-else-if="app.settingsDirty" :size="16" aria-hidden="true" />
+          <CheckCircle2 v-else :size="16" aria-hidden="true" />
+          {{ app.busy ? "保存中…" : app.settingsDirty ? "保存" : "已保存" }}
+        </button>
+      </div>
     </header>
 
     <div class="settings-stack">
@@ -51,7 +56,7 @@ defineProps<{ app: DesktopApp }>();
                 :options="app.namespaceOptions"
                 aria-label="仓库命名空间"
               />
-              <small>从已登录账号的 CNB 命名空间中选择。</small>
+              <small>自动选择：优先复用同名仓库，否则用唯一命名空间创建。</small>
             </label>
             <label>
               <span>仓库名</span>

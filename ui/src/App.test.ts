@@ -81,6 +81,39 @@ function mockSnapshotIpc() {
   );
 }
 
+function mockSettingsIpc(namespaces: { name: string; path: string }[]) {
+  mockWindows("main");
+  mockIPC(
+    (command, args) => {
+      switch (command) {
+        case "get_snapshot":
+          return snapshot;
+        case "save_settings": {
+          const next = (args as { settings: typeof snapshot.settings }).settings;
+          return { ...snapshot, settings: next };
+        }
+        case "get_logs":
+          return [];
+        case "list_http_traces":
+          return [];
+        case "list_namespaces":
+          return namespaces;
+        case "get_cnb_usage":
+          return {
+            namespace: "tester",
+            month: "2026-11",
+            creditsUsedMilli: 0,
+            creditsTotalMilli: 1000,
+            fetchedAt: "2026-11-17T00:00:00Z",
+          };
+        default:
+          return null;
+      }
+    },
+    { shouldMockEvents: true },
+  );
+}
+
 describe("App shell", () => {
   it("switches between all views through the sidebar", async () => {
     mockSnapshotIpc();
@@ -134,6 +167,47 @@ describe("App shell", () => {
     await vi.advanceTimersByTimeAsync(2500);
     await flushPromises();
     expect(copyButtons[1].text()).toContain("复制地址");
+
+    wrapper.unmount();
+  });
+
+  it("marks unsaved settings and clears the badge after saving", async () => {
+    mockSettingsIpc([]);
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper.findAll("nav button")[1].trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".badge.warn").exists()).toBe(false);
+
+    await wrapper.find('.switch-row input[type="checkbox"]').setValue(true);
+    await flushPromises();
+    expect(wrapper.find(".badge.warn").text()).toBe("未保存");
+
+    await wrapper.find(".page-head button").trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".badge.warn").exists()).toBe(false);
+    expect(wrapper.find(".page-head button").text()).toContain("已保存");
+
+    wrapper.unmount();
+  });
+
+  it("shows a namespace once when its name and path match", async () => {
+    mockSettingsIpc([{ name: "xliulang", path: "xliulang" }]);
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper.findAll("nav button")[1].trigger("click");
+    await flushPromises();
+
+    await wrapper.find(".select-trigger").trigger("click");
+    await flushPromises();
+
+    const labels = [...document.body.querySelectorAll(".select-option")].map(
+      (option) => option.textContent?.trim() ?? "",
+    );
+    expect(labels).toContain("xliulang");
+    expect(labels.some((label) => label.includes("（xliulang）"))).toBe(false);
 
     wrapper.unmount();
   });

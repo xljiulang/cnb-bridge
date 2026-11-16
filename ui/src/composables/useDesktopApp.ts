@@ -155,7 +155,10 @@ export function useDesktopApp() {
     for (const namespace of namespaces.value) {
       options.push({
         value: namespace.path,
-        label: `${namespace.name}（${namespace.path}）`,
+        label:
+          namespace.name === namespace.path
+            ? namespace.name
+            : `${namespace.name}（${namespace.path}）`,
       });
     }
     return options;
