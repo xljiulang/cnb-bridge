@@ -8,7 +8,6 @@ import {
   CheckCircle2,
   ChevronRight,
   CircleUserRound,
-  Cloud,
   Copy,
   ExternalLink,
   FolderGit2,
@@ -553,7 +552,6 @@ onBeforeUnmount(() => {
           <div class="page-title">
             <p class="eyebrow">SETTINGS</p>
             <h1>设置</h1>
-            <p class="muted">调整仓库位置、本机端口和桌面启动行为。</p>
           </div>
           <button
             type="button"
@@ -563,7 +561,7 @@ onBeforeUnmount(() => {
           >
             <LoaderCircle v-if="busy" class="spin" :size="16" aria-hidden="true" />
             <CheckCircle2 v-else :size="16" aria-hidden="true" />
-            保存设置
+            保存
           </button>
         </header>
 
@@ -572,13 +570,13 @@ onBeforeUnmount(() => {
             <div class="section-head">
               <div>
                 <span class="card-label">仓库</span>
-                <h2>CNB 仓库配置</h2>
+                <h2>创建位置</h2>
               </div>
               <FolderGit2 :size="19" aria-hidden="true" />
             </div>
             <div class="form-grid">
               <label>
-                <span>仓库命名空间</span>
+                <span>命名空间</span>
                 <select v-model="settingsDraft.repoNamespace" @change="settingsDirty = true">
                   <option value="">自动选择</option>
                   <option
@@ -595,9 +593,7 @@ onBeforeUnmount(() => {
                     {{ namespace.name }}（{{ namespace.path }}）
                   </option>
                 </select>
-                <small>
-                  优先复用已有仓库；仅有一个 Owner 命名空间时自动选择，多个时请在此指定。
-                </small>
+                <small>单组织自动选择；多组织请手动指定。</small>
               </label>
               <label>
                 <span>仓库名</span>
@@ -606,7 +602,7 @@ onBeforeUnmount(() => {
                   spellcheck="false"
                   @input="settingsDirty = true"
                 />
-                <small>默认使用 cnb-ai-bridge，实际路径以启动状态为准。</small>
+                <small>默认 cnb-ai-bridge。</small>
               </label>
             </div>
           </section>
@@ -614,8 +610,8 @@ onBeforeUnmount(() => {
           <section class="form-section divided">
             <div class="section-head">
               <div>
-                <span class="card-label">本机端口</span>
-                <h2>连接端点</h2>
+                <span class="card-label">连接</span>
+                <h2>本机端口</h2>
               </div>
               <Network :size="19" aria-hidden="true" />
             </div>
@@ -628,22 +624,22 @@ onBeforeUnmount(() => {
                 max="65535"
                 @input="settingsDirty = true"
               />
-              <small>SSH 本地转发与工作空间 agent 使用该端口，修改后需重新建立桥接。</small>
+              <small>修改后需重新启动桥接。</small>
             </label>
           </section>
 
           <section class="form-section divided">
             <div class="section-head">
               <div>
-                <span class="card-label">桌面行为</span>
-                <h2>启动与托盘</h2>
+                <span class="card-label">桌面</span>
+                <h2>启动行为</h2>
               </div>
               <Power :size="19" aria-hidden="true" />
             </div>
             <label class="switch-row">
               <span>
                 <strong>关闭窗口时最小化到托盘</strong>
-                <small>保持桥接和隧道在后台运行。</small>
+                <small>关闭窗口后继续运行。</small>
               </span>
               <input
                 v-model="settingsDraft.minimizeToTray"
@@ -654,7 +650,7 @@ onBeforeUnmount(() => {
             <label class="switch-row">
               <span>
                 <strong>登录 Windows 时自动启动</strong>
-                <small>启动后自动恢复已绑定的桥接连接。</small>
+                <small>启动时自动恢复已登录连接。</small>
               </span>
               <input
                 v-model="settingsDraft.launchAtLogin"
@@ -721,38 +717,20 @@ onBeforeUnmount(() => {
           </div>
         </header>
 
-        <div class="about-grid">
-          <article class="card details-card">
-            <div class="section-head">
-              <div>
-                <span class="card-label">产品</span>
-                <h2>应用信息</h2>
-              </div>
-              <Info :size="19" aria-hidden="true" />
+        <article class="card details-card">
+          <div class="section-head">
+            <div>
+              <span class="card-label">产品</span>
+              <h2>应用信息</h2>
             </div>
-            <dl>
-              <div><dt>版本</dt><dd><code>{{ snapshot?.version || "0.1.0" }}</code></dd></div>
-              <div><dt>运行方式</dt><dd>Tauri 桌面客户端</dd></div>
-              <div><dt>安全边界</dt><dd>仅监听 127.0.0.1</dd></div>
-            </dl>
-          </article>
-
-          <article class="card details-card">
-            <div class="section-head">
-              <div>
-                <span class="card-label">接口</span>
-                <h2>本机端点</h2>
-              </div>
-              <Cloud :size="19" aria-hidden="true" />
-            </div>
-            <dl>
-              <div><dt>Base URL</dt><dd><code>{{ baseUrl }}</code></dd></div>
-              <div><dt>健康检查</dt><dd><code>/healthz</code></dd></div>
-              <div><dt>模型列表</dt><dd><code>/models · /v1/models</code></dd></div>
-              <div><dt>Chat</dt><dd><code>/chat/completions · /v1/chat/completions</code></dd></div>
-            </dl>
-          </article>
-        </div>
+            <Info :size="19" aria-hidden="true" />
+          </div>
+          <dl>
+            <div><dt>版本</dt><dd><code>{{ snapshot?.version || "0.1.0" }}</code></dd></div>
+            <div><dt>运行方式</dt><dd>Tauri 桌面客户端</dd></div>
+            <div><dt>安全边界</dt><dd>仅监听 127.0.0.1</dd></div>
+          </dl>
+        </article>
       </section>
     </main>
   </div>
