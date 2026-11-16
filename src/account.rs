@@ -1,38 +1,28 @@
-//! CNB OAuth device authorization and DPAPI backed credential storage.
+//! Personal access token storage for CNB Bridge.
 
 use crate::dpapi;
 use crate::paths;
-use chrono::Utc;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-/// CNB's public web platform.
-pub const DEFAULT_PLATFORM_URL: &str = "https://cnb.cool";
+/// Authentication method persisted with the CNB credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum AuthMethod {
+    #[default]
+    OAuth,
+    PersonalAccessToken,
+}
 
-/// Public client id used by the official CNB CLI for device authorization.
-pub const DEFAULT_CLIENT_ID: &str = "cnb_cli";
-
-const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
-
-/// Persisted OAuth credentials.
+/// Persisted CNB personal access token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Credentials {
     pub access_token: String,
-    pub refresh_token: Option<String>,
-    pub expires_at_ms: i64,
     pub username: Option<String>,
-}
-
-impl Credentials {
-    /// Returns true when the access token is missing or expires within two minutes.
-    pub fn needs_refresh(&self) -> bool {
-        self.expires_at_ms <= Utc::now().timestamp_millis() + 120_000
-    }
+    #[serde(default)]
+    pub auth_method: AuthMethod,
 }
 
 /// Current account state exposed to the desktop UI.
@@ -41,8 +31,7 @@ impl Credentials {
 pub struct AccountStatus {
     pub state: AccountState,
     pub username: Option<String>,
-    pub verification_url: Option<String>,
-    pub user_code: Option<String>,
+    pub auth_method: Option<AuthMethod>,
     pub error: Option<String>,
 }
 
@@ -62,56 +51,39 @@ impl AccountStatus {
         Self {
             state: AccountState::SignedOut,
             username: None,
-            verification_url: None,
-            user_code: None,
+            auth_method: None,
             error: None,
         }
     }
 
-    /// Connected status.
+    /// WebView authorization in progress.
+    pub fn signing_in() -> Self {
+        Self {
+            state: AccountState::SigningIn,
+            username: None,
+            auth_method: None,
+            error: None,
+        }
+    }
+
+    /// Connected status backed by a personal access token.
     pub fn connected(credentials: &Credentials) -> Self {
         Self {
             state: AccountState::Connected,
             username: credentials.username.clone(),
-            verification_url: None,
-            user_code: None,
+            auth_method: Some(credentials.auth_method),
             error: None,
         }
     }
 }
 
-/// Device authorization challenge returned by CNB.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct DeviceCode {
-    pub device_code: String,
-    pub user_code: String,
-    pub verification_uri: String,
-    pub verification_uri_complete: String,
-    pub expires_in: i64,
-    #[serde(default)]
-    pub interval: u64,
-}
-
-/// Errors raised during the OAuth flows.
+/// Errors raised while loading or saving credentials.
 #[derive(Debug, thiserror::Error)]
 pub enum AccountError {
-    #[error("网络请求失败: {0}")]
-    Http(#[from] reqwest::Error),
-    #[error("OAuth 响应无效: {0}")]
-    InvalidResponse(String),
     #[error("授权失败: {0}")]
     Authorization(String),
-    #[error("登录被取消")]
-    Cancelled,
     #[error("本地凭据存储失败: {0}")]
     Storage(String),
-}
-
-impl From<String> for AccountError {
-    fn from(value: String) -> Self {
-        Self::Storage(value)
-    }
 }
 
 /// Encrypted credential store.
@@ -136,7 +108,7 @@ impl AccountStore {
         &self.path
     }
 
-    /// Loads and decrypts saved credentials.
+    /// Loads a PAT and discards legacy OAuth credentials.
     pub fn load(&self) -> Result<Option<Credentials>, AccountError> {
         let encrypted = match std::fs::read(&self.path) {
             Ok(bytes) => bytes,
@@ -149,8 +121,12 @@ impl AccountStore {
             }
         };
         let plaintext = dpapi::unprotect(&encrypted).map_err(AccountError::Storage)?;
-        let credentials = serde_json::from_slice(&plaintext)
+        let credentials: Credentials = serde_json::from_slice(&plaintext)
             .map_err(|error| AccountError::Storage(format!("解析登录凭据失败: {error}")))?;
+        if credentials.auth_method != AuthMethod::PersonalAccessToken {
+            self.remove()?;
+            return Ok(None);
+        }
         Ok(Some(credentials))
     }
 
@@ -178,30 +154,19 @@ impl AccountStore {
 
 /// Account manager shared by the Tauri command layer.
 pub struct AccountManager {
-    http: Client,
     store: AccountStore,
-    platform_url: String,
-    client_id: String,
     credentials: Mutex<Option<Credentials>>,
     status: Mutex<AccountStatus>,
 }
 
 impl AccountManager {
-    /// Creates a manager and loads any saved credentials.
+    /// Creates a manager and loads any saved PAT.
     pub fn new() -> Arc<Self> {
-        let platform_url = std::env::var("CNB_BRIDGE_PLATFORM_URL")
-            .unwrap_or_else(|_| DEFAULT_PLATFORM_URL.into());
-        let client_id =
-            std::env::var("CNB_BRIDGE_CLIENT_ID").unwrap_or_else(|_| DEFAULT_CLIENT_ID.into());
-        Self::with_store(AccountStore::default_path(), platform_url, client_id)
+        Self::with_store(AccountStore::default_path())
     }
 
-    /// Creates a manager with explicit storage and OAuth configuration.
-    pub fn with_store(
-        store: AccountStore,
-        platform_url: impl Into<String>,
-        client_id: impl Into<String>,
-    ) -> Arc<Self> {
+    /// Creates a manager with explicit storage.
+    pub fn with_store(store: AccountStore) -> Arc<Self> {
         let (credentials, status) = match store.load() {
             Ok(Some(credentials)) => {
                 let status = AccountStatus::connected(&credentials);
@@ -211,19 +176,12 @@ impl AccountManager {
             Err(error) => {
                 let mut status = AccountStatus::signed_out();
                 status.state = AccountState::Failed;
-                status.error = Some(format!("保存的登录信息无法读取，请重新登录: {error}"));
+                status.error = Some(format!("保存的登录信息无法读取，请重新扫码: {error}"));
                 (None, status)
             }
         };
-
         Arc::new(Self {
-            http: Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
             store,
-            platform_url: platform_url.into().trim_end_matches('/').to_string(),
-            client_id: client_id.into(),
             credentials: Mutex::new(credentials),
             status: Mutex::new(status),
         })
@@ -233,285 +191,68 @@ impl AccountManager {
     pub fn status(&self) -> AccountStatus {
         self.status
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
 
-    /// Requests a device challenge and marks the account as signing in.
-    pub async fn start_device_login(&self) -> Result<DeviceCode, AccountError> {
-        let device = self.request_device_code().await?;
-        let mut status = AccountStatus {
-            state: AccountState::SigningIn,
-            username: None,
-            verification_url: Some(device.verification_uri_complete.clone()),
-            user_code: Some(device.user_code.clone()),
-            error: None,
-        };
-        if let Some(existing) = self.current_credentials() {
-            status.username = existing.username.clone();
-        }
-        *self
-            .status
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = status;
-        Ok(device)
+    /// Marks WebView authorization as in progress.
+    pub fn begin_token_login(&self) {
+        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = AccountStatus::signing_in();
     }
 
-    /// Polls the token endpoint until the user finishes authorization.
-    pub async fn finish_device_login(
+    /// Saves a PAT created by the WebView authorization flow.
+    pub fn complete_token_login(
         &self,
-        device: &DeviceCode,
-        cancel: Arc<AtomicBool>,
+        access_token: impl Into<String>,
+        username: Option<String>,
     ) -> Result<AccountStatus, AccountError> {
-        let mut interval = Duration::from_secs(device.interval.max(1));
-        let deadline =
-            std::time::Instant::now() + Duration::from_secs(device.expires_in.max(10) as u64);
-
-        loop {
-            if cancel.load(Ordering::SeqCst) {
-                return self.fail_login(AccountError::Cancelled);
-            }
-            if std::time::Instant::now() >= deadline {
-                return self.fail_login(AccountError::Authorization("设备码已过期".to_string()));
-            }
-
-            tokio::time::sleep(interval).await;
-            if cancel.load(Ordering::SeqCst) {
-                return self.fail_login(AccountError::Cancelled);
-            }
-
-            match self.request_token(device).await? {
-                TokenPoll::Ready(credentials) => {
-                    self.store
-                        .save(&credentials)
-                        .map_err(|error| AccountError::Storage(error.to_string()))?;
-                    let status = AccountStatus::connected(&credentials);
-                    *self
-                        .credentials
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(credentials);
-                    *self
-                        .status
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = status.clone();
-                    return Ok(status);
-                }
-                TokenPoll::Pending => {}
-                TokenPoll::SlowDown => interval += Duration::from_secs(5),
-            }
-        }
-    }
-
-    /// Returns a valid access token, refreshing it when necessary.
-    pub async fn access_token(&self) -> Result<String, AccountError> {
-        let current = self.current_credentials();
-        let Some(current) = current else {
-            return Err(AccountError::Authorization("尚未登录".to_string()));
+        let credentials = Credentials {
+            access_token: access_token.into(),
+            username,
+            auth_method: AuthMethod::PersonalAccessToken,
         };
-        if !current.needs_refresh() {
-            return Ok(current.access_token);
-        }
-
-        let Some(refresh_token) = current.refresh_token.clone() else {
+        if credentials.access_token.trim().is_empty() {
             return Err(AccountError::Authorization(
-                "登录已过期，请重新登录".to_string(),
+                "CNB 未返回访问令牌".to_string(),
             ));
-        };
-        let refreshed = self.refresh_access_token(&refresh_token).await?;
-        self.store
-            .save(&refreshed)
-            .map_err(|error| AccountError::Storage(error.to_string()))?;
-        *self
-            .credentials
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(refreshed.clone());
-        *self
-            .status
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            AccountStatus::connected(&refreshed);
-        Ok(refreshed.access_token)
+        }
+        self.store.save(&credentials)?;
+        *self.credentials.lock().unwrap_or_else(|e| e.into_inner()) = Some(credentials.clone());
+        let status = AccountStatus::connected(&credentials);
+        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status.clone();
+        Ok(status)
     }
 
-    /// Sets the display username after the CNB profile is read.
-    pub fn set_username(&self, username: impl Into<String>) {
-        let username = username.into();
-        let mut credentials = self
-            .credentials
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(current) = credentials.as_mut() {
-            current.username = Some(username.clone());
-            let _ = self.store.save(current);
-        }
-        let mut status = self
-            .status
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        status.username = Some(username);
+    /// Marks WebView authorization as failed.
+    pub fn fail_token_login(&self, error: impl Into<String>) {
+        let mut status = AccountStatus::signed_out();
+        status.state = AccountState::Failed;
+        status.error = Some(error.into());
+        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
+    }
+
+    /// Returns the saved PAT.
+    pub async fn access_token(&self) -> Result<String, AccountError> {
+        self.current_credentials()
+            .map(|credentials| credentials.access_token)
+            .ok_or_else(|| AccountError::Authorization("尚未扫码绑定".to_string()))
     }
 
     /// Clears all saved credentials.
     pub fn logout(&self) -> Result<AccountStatus, AccountError> {
-        *self
-            .credentials
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        *self.credentials.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.store.remove()?;
         let status = AccountStatus::signed_out();
-        *self
-            .status
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = status.clone();
+        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status.clone();
         Ok(status)
     }
 
     fn current_credentials(&self) -> Option<Credentials> {
         self.credentials
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
-
-    fn fail_login<T>(&self, error: AccountError) -> Result<T, AccountError> {
-        let mut status = self.status();
-        status.state = AccountState::Failed;
-        status.error = Some(error.to_string());
-        *self
-            .status
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = status;
-        Err(error)
-    }
-
-    async fn request_device_code(&self) -> Result<DeviceCode, AccountError> {
-        let body = serde_urlencoded::to_string([("client_id", self.client_id.as_str())])
-            .map_err(|error| AccountError::InvalidResponse(error.to_string()))?;
-        let response = self
-            .http
-            .post(format!("{}/oauth2/device/auth", self.platform_url))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(body)
-            .send()
-            .await?;
-        if !response.status().is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(AccountError::Authorization(format!(
-                "设备授权请求失败: {text}"
-            )));
-        }
-        response
-            .json::<DeviceCode>()
-            .await
-            .map_err(|error| AccountError::InvalidResponse(error.to_string()))
-    }
-
-    async fn request_token(&self, device: &DeviceCode) -> Result<TokenPoll, AccountError> {
-        let body = serde_urlencoded::to_string([
-            ("grant_type", DEVICE_GRANT),
-            ("device_code", device.device_code.as_str()),
-            ("client_id", self.client_id.as_str()),
-        ])
-        .map_err(|error| AccountError::InvalidResponse(error.to_string()))?;
-        let response = self
-            .http
-            .post(format!("{}/oauth2/token", self.platform_url))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(body)
-            .send()
-            .await?;
-
-        let value: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|error| AccountError::InvalidResponse(error.to_string()))?;
-        if let Some(error) = value.get("error").and_then(|v| v.as_str()) {
-            return match error {
-                "authorization_pending" => Ok(TokenPoll::Pending),
-                "slow_down" => Ok(TokenPoll::SlowDown),
-                "access_denied" => Err(AccountError::Authorization("用户拒绝了授权".to_string())),
-                "expired_token" => Err(AccountError::Authorization("设备码已过期".to_string())),
-                other => Err(AccountError::Authorization(format!(
-                    "{other}: {}",
-                    value
-                        .get("error_description")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                ))),
-            };
-        }
-
-        let access_token = value
-            .get("access_token")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| AccountError::InvalidResponse("缺少 access_token".to_string()))?;
-        let expires_in = value
-            .get("expires_in")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(3600);
-        Ok(TokenPoll::Ready(Credentials {
-            access_token: access_token.to_string(),
-            refresh_token: value
-                .get("refresh_token")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            expires_at_ms: Utc::now().timestamp_millis() + expires_in * 1000,
-            username: None,
-        }))
-    }
-
-    async fn refresh_access_token(&self, refresh_token: &str) -> Result<Credentials, AccountError> {
-        let body = serde_urlencoded::to_string([
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-            ("client_id", self.client_id.as_str()),
-        ])
-        .map_err(|error| AccountError::InvalidResponse(error.to_string()))?;
-        let response = self
-            .http
-            .post(format!("{}/oauth2/token", self.platform_url))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(body)
-            .send()
-            .await?;
-        if !response.status().is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(AccountError::Authorization(format!("刷新登录失败: {text}")));
-        }
-        let value: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|error| AccountError::InvalidResponse(error.to_string()))?;
-        let access_token = value
-            .get("access_token")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                AccountError::InvalidResponse("刷新响应缺少 access_token".to_string())
-            })?;
-        let expires_in = value
-            .get("expires_in")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(3600);
-        let username = self
-            .current_credentials()
-            .and_then(|credentials| credentials.username);
-        Ok(Credentials {
-            access_token: access_token.to_string(),
-            refresh_token: value
-                .get("refresh_token")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .or_else(|| Some(refresh_token.to_string())),
-            expires_at_ms: Utc::now().timestamp_millis() + expires_in * 1000,
-            username,
-        })
-    }
-}
-
-enum TokenPoll {
-    Ready(Credentials),
-    Pending,
-    SlowDown,
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AccountError> {
@@ -528,22 +269,39 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AccountError> {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+    use crate::dpapi;
 
     #[test]
-    fn store_round_trips_and_does_not_write_plaintext() {
+    fn store_round_trips_pat_and_hides_plaintext() {
         let dir = tempfile::tempdir().unwrap();
         let store = AccountStore::new(dir.path().join("account-auth.bin"));
         let credentials = Credentials {
-            access_token: "access-secret".to_string(),
-            refresh_token: Some("refresh-secret".to_string()),
-            expires_at_ms: 1_800_000_000_000,
+            access_token: "personal-access-token".to_string(),
             username: Some("tester".to_string()),
+            auth_method: AuthMethod::PersonalAccessToken,
         };
         store.save(&credentials).unwrap();
-        assert_eq!(store.load().unwrap(), Some(credentials.clone()));
+        assert_eq!(store.load().unwrap(), Some(credentials));
         let raw = std::fs::read(store.path()).unwrap();
         let text = String::from_utf8_lossy(&raw);
-        assert!(!text.contains("access-secret"));
-        assert!(!text.contains("refresh-secret"));
+        assert!(!text.contains("personal-access-token"));
+    }
+
+    #[test]
+    fn rejects_legacy_oauth_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("account-auth.bin");
+        let legacy = serde_json::json!({
+            "accessToken": "oauth-token",
+            "refreshToken": "oauth-refresh",
+            "expiresAtMs": 1_800_000_000_000_i64,
+            "username": "legacy-user"
+        });
+        let encrypted = dpapi::protect(serde_json::to_string(&legacy).unwrap().as_bytes()).unwrap();
+        std::fs::write(&path, encrypted).unwrap();
+        let store = AccountStore::new(&path);
+
+        assert_eq!(store.load().unwrap(), None);
+        assert!(!path.exists());
     }
 }

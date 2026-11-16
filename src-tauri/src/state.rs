@@ -83,7 +83,11 @@ pub fn initialize(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
         let state = handle.state::<DesktopState>();
         let account_status = state.account.status();
         if account_status.state == cnb_bridge::account::AccountState::Connected {
-            let _ = state.bridge.start().await;
+            if let Err(error) = state.bridge.start().await {
+                state
+                    .logger
+                    .log("error", format!("自动启动桥接失败: {error}"));
+            }
             let _ = handle.emit("cnb-bridge://snapshot", ());
         }
     });

@@ -1,4 +1,5 @@
 export type AccountState = "signedOut" | "signingIn" | "connected" | "failed";
+export type AuthMethod = "oauth" | "personalAccessToken";
 
 export type BridgeState =
   | "signedOut"
@@ -16,8 +17,7 @@ export type BridgeState =
 export interface AccountStatus {
   state: AccountState;
   username?: string | null;
-  verificationUrl?: string | null;
-  userCode?: string | null;
+  authMethod?: AuthMethod | null;
   error?: string | null;
 }
 

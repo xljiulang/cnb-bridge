@@ -1,13 +1,11 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-
 use cnb_bridge::account::AccountStatus;
 use cnb_bridge::api::Namespace;
 use cnb_bridge::logging::LogEntry;
 use cnb_bridge::settings::Settings;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
+use crate::auth_webview;
 use crate::state::{self, AppSnapshot, DesktopState};
 
 /// Serializable command error.
@@ -55,48 +53,19 @@ pub async fn save_settings(
 
 #[tauri::command]
 pub async fn start_login(state: State<'_, DesktopState>) -> Result<AccountStatus, CommandError> {
-    let device = state
-        .account
-        .start_device_login()
-        .await
-        .map_err(|error| CommandError::new("login_start_failed", error.to_string()))?;
-    let _ = tauri_plugin_opener::open_url(&device.verification_uri_complete, None::<&str>);
-
-    let cancel = Arc::new(AtomicBool::new(false));
-    *state
-        .login_cancel
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&cancel));
-    let generation = state.login_generation.fetch_add(1, Ordering::SeqCst) + 1;
-    let account = Arc::clone(&state.account);
-    let bridge = Arc::clone(&state.bridge);
-    let app = state.app.clone();
-    tauri::async_runtime::spawn(async move {
-        let result = account.finish_device_login(&device, cancel).await;
-        if result.is_ok() {
-            let _ = bridge.start().await;
-        }
-        let _ = app.emit("cnb-bridge://snapshot", generation);
-    });
-    Ok(state.account.status())
+    auth_webview::launch(state.app.clone())
+        .map_err(|error| CommandError::new("login_start_failed", error))
 }
 
 #[tauri::command]
 pub fn cancel_login(state: State<'_, DesktopState>) -> AccountStatus {
-    if let Some(cancel) = state
-        .login_cancel
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take()
-    {
-        cancel.store(true, Ordering::SeqCst);
-    }
-    state.account.status()
+    auth_webview::cancel(&state.app)
 }
 
 #[tauri::command]
 pub async fn logout(state: State<'_, DesktopState>) -> Result<AccountStatus, CommandError> {
     let _ = state.bridge.stop().await;
+    auth_webview::clear_web_data(&state.app);
     state
         .account
         .logout()
@@ -120,23 +89,6 @@ pub async fn stop_bridge(state: State<'_, DesktopState>) -> Result<AppSnapshot, 
 }
 
 #[tauri::command]
-pub fn ensure_ssh_key(state: State<'_, DesktopState>) -> Result<String, CommandError> {
-    state
-        .bridge
-        .ensure_ssh_key()
-        .map_err(|message| CommandError::new("ssh_key_failed", message))
-}
-
-#[tauri::command]
-pub async fn regenerate_ssh_key(state: State<'_, DesktopState>) -> Result<String, CommandError> {
-    state
-        .bridge
-        .regenerate_ssh_key()
-        .await
-        .map_err(|message| CommandError::new("ssh_key_regenerate_failed", message))
-}
-
-#[tauri::command]
 pub async fn list_namespaces(
     state: State<'_, DesktopState>,
 ) -> Result<Vec<Namespace>, CommandError> {
@@ -145,12 +97,6 @@ pub async fn list_namespaces(
         .list_namespaces()
         .await
         .map_err(|error| CommandError::new("namespaces_load_failed", error.to_string()))
-}
-
-#[tauri::command]
-pub fn open_ssh_keys_page() -> Result<(), CommandError> {
-    tauri_plugin_opener::open_url("https://cnb.cool/profile/ssh-keys/create", None::<&str>)
-        .map_err(|error| CommandError::new("open_ssh_page_failed", error.to_string()))
 }
 
 #[tauri::command]

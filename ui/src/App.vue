@@ -3,15 +3,12 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   cancelLogin,
-  ensureSshKey,
   getLogs,
   getSnapshot,
   listNamespaces,
   logout,
   openExternal,
   openLogsFolder,
-  openSshKeysPage,
-  regenerateSshKey,
   saveSettings,
   startBridge,
   startLogin,
@@ -71,6 +68,9 @@ async function refresh() {
   try {
     const next = await getSnapshot();
     snapshot.value = next;
+    if (next.account.state === "failed" && next.account.error) {
+      error.value = next.account.error;
+    }
     if (!settingsDirty.value) {
       settingsDraft.repoNamespace = next.settings.repoNamespace;
       settingsDraft.repoName = next.settings.repoName;
@@ -114,12 +114,6 @@ async function copyText(value: string, message: string) {
   }
 }
 
-async function makeKey() {
-  await run(async () => {
-    await ensureSshKey();
-  });
-}
-
 async function loadNamespaces() {
   if (accountState.value !== "connected") {
     namespaces.value = [];
@@ -149,12 +143,6 @@ async function openRepoCreation() {
   }
 }
 
-async function remakeKey() {
-  await run(async () => {
-    await regenerateSshKey();
-  }, "已生成新的 SSH 密钥，请重新添加到 CNB 公钥管理");
-}
-
 async function save() {
   const portError = validatePort(Number(settingsDraft.localPort));
   if (portError) {
@@ -180,7 +168,6 @@ async function loadLogs() {
 
 onMounted(async () => {
   await refresh();
-  await makeKey();
   await loadLogs();
   timer = window.setInterval(() => {
     void refresh();
@@ -228,7 +215,7 @@ onBeforeUnmount(() => {
         <span class="status-dot" :class="{ live: ready }" />
         <div>
           <strong>{{ statusLabel }}</strong>
-          <small>{{ accountState === "connected" ? "CNB 已登录" : "等待登录" }}</small>
+          <small>{{ accountState === "connected" ? "CNB 已绑定" : "等待扫码" }}</small>
         </div>
       </div>
     </aside>
@@ -297,20 +284,8 @@ onBeforeUnmount(() => {
               <span class="pill" :class="accountState">{{ accountState === "connected" ? "已登录" : "未登录" }}</span>
             </div>
             <p class="muted">
-              {{ snapshot?.account.username || "使用系统浏览器完成 CNB 设备授权。" }}
+              {{ snapshot?.account.username || "在客户端内扫码，自动创建访问令牌并配置 SSH 公钥。" }}
             </p>
-            <div v-if="snapshot?.account.userCode" class="device-code">
-              <span>设备码</span>
-              <strong>{{ snapshot.account.userCode }}</strong>
-              <button class="ghost" @click="copyText(snapshot.account.userCode!, '设备码已复制')">复制</button>
-            </div>
-            <button
-              v-if="snapshot?.account.verificationUrl"
-              class="link link-button"
-              @click="openExternal(snapshot.account.verificationUrl!)"
-            >
-              重新打开授权页面
-            </button>
             <div class="card-actions">
               <button
                 v-if="accountState !== 'connected'"
@@ -318,7 +293,7 @@ onBeforeUnmount(() => {
                 :disabled="busy || accountState === 'signingIn'"
                 @click="login"
               >
-                登录 CNB
+                {{ accountState === "signingIn" ? "等待扫码" : "扫码绑定 CNB" }}
               </button>
               <button v-else class="secondary" :disabled="busy" @click="run(logout)">
                 退出登录
@@ -329,7 +304,7 @@ onBeforeUnmount(() => {
                 :disabled="busy"
                 @click="run(cancelLogin)"
               >
-                取消
+                取消扫码
               </button>
             </div>
           </article>
@@ -347,8 +322,6 @@ onBeforeUnmount(() => {
               <button class="secondary" :disabled="!publicKey" @click="copyText(publicKey!, 'SSH 公钥已复制')">
                 复制公钥
               </button>
-              <button class="secondary" @click="run(openSshKeysPage)">打开 CNB 公钥管理</button>
-              <button class="ghost" :disabled="busy" @click="remakeKey">重新生成</button>
             </div>
           </article>
         </div>
@@ -433,13 +406,6 @@ onBeforeUnmount(() => {
             <span>登录 Windows 时自动启动</span>
             <input v-model="settingsDraft.launchAtLogin" type="checkbox" @change="settingsDirty = true" />
           </label>
-          <div class="danger-zone">
-            <div>
-              <strong>重新生成 SSH 密钥</strong>
-              <small>生成后需要到 CNB 公钥管理页重新添加。</small>
-            </div>
-            <button class="ghost" :disabled="busy" @click="remakeKey">重新生成</button>
-          </div>
         </article>
       </section>
 

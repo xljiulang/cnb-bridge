@@ -1,3 +1,4 @@
+mod auth_webview;
 mod commands;
 mod state;
 mod tray;
@@ -24,6 +25,9 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() != "main" {
+                    return;
+                }
                 let app = window.app_handle();
                 let minimize = app
                     .try_state::<DesktopState>()
@@ -45,10 +49,7 @@ pub fn run() {
             commands::logout,
             commands::start_bridge,
             commands::stop_bridge,
-            commands::ensure_ssh_key,
-            commands::regenerate_ssh_key,
             commands::list_namespaces,
-            commands::open_ssh_keys_page,
             commands::open_external,
             commands::open_logs_folder,
             commands::get_logs,

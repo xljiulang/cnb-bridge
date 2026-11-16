@@ -1,6 +1,6 @@
 # CNB Bridge
 
-CNB Bridge 是一个 Windows 本机 AI 桥接客户端：通过 CNB 设备码登录，自动在当前用户命名空间下创建/复用 `cnb-ai-bridge` 仓库，启动 CNB 云原生开发工作空间，经纯 Rust `russh` 建立 SSH 本地端口转发，把工作空间内的 OpenAI 兼容 agent 暴露到：
+CNB Bridge 是一个 Windows 本机 AI 桥接客户端：通过 CNB WebView 扫码绑定，自动创建个人访问令牌并配置 SSH 公钥，在当前用户命名空间下创建/复用 `cnb-ai-bridge` 仓库，启动 CNB 云原生开发工作空间，经纯 Rust `russh` 建立 SSH 本地端口转发，把工作空间内的 OpenAI 兼容 agent 暴露到：
 
 ```
 http://127.0.0.1:11233/v1
@@ -12,7 +12,7 @@ http://127.0.0.1:11233/v1
 
 | 目录 | 作用 |
 |---|---|
-| `src/` | Rust 核心：OAuth 设备码、DPAPI 凭据、CNB API、建仓、工作空间、russh 隧道、状态机 |
+| `src/` | Rust 核心：WebView PAT 授权、DPAPI 凭据、CNB API、建仓、工作空间、russh 隧道、状态机 |
 | `src-tauri/` | Tauri 2 桌面壳：托盘、单实例、自动启动、命令层 |
 | `ui/` | Vue 3 + Vite 界面 |
 | `templates/cnb-ai-bridge/` | 自动推送到用户 CNB 仓库的工作空间模板与 Node agent |
@@ -64,27 +64,25 @@ $env:PATH = "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\C
 
 ## 运行流程
 
-1. 首次启动点击“登录 CNB”，系统浏览器打开设备授权页并显示设备码。
-2. 授权成功后客户端静默刷新 token，自动生成专用 Ed25519 密钥并展示公钥。
-3. 首次使用需把公钥添加到 [CNB 公钥管理](https://cnb.cool/profile/ssh-keys/create)。
-4. 客户端在可用的 CNB 命名空间中复用或创建私有仓库 `cnb-ai-bridge`；有多个 Owner 命名空间时可在设置中指定。OAuth 应用无权建仓时，客户端会引导用户在浏览器创建空仓库，确认模板已推送到 `main` 分支后，再启动工作空间和建立 SSH 转发。
+1. 首次启动点击“扫码绑定 CNB”，客户端 WebView 打开 `https://cnb.cool/?s_url=%2Fprofile%2Ftoken`。
+2. 微信扫码成功后，客户端自动获取个人命名空间、上传专用 Ed25519 公钥并创建永久 PAT。
+3. PAT 通过 DPAPI 加密保存，扫码会话随后清理，后续启动无需再次扫码。
+4. 客户端在可用的 CNB 命名空间中复用或创建私有仓库 `cnb-ai-bridge`，确认模板已推送到 `main` 分支后启动工作空间和 SSH 转发。
 5. 状态变为“桥接就绪”后，把任意 OpenAI 兼容客户端的 base URL 指向 `http://127.0.0.1:11233/v1`。
 6. 关闭窗口最小化到托盘；托盘“退出并关闭云主机”会断开隧道并停止工作空间。
 
 ## 配置
 
-通过环境变量可覆盖默认 OAuth/API 地址，便于企业版或测试：
+通过环境变量可覆盖 CNB 平台/API 地址，便于企业版或测试：
 
-- `CNB_BRIDGE_CLIENT_ID`：OAuth client_id，默认使用 CNB CLI 的公开 `cnb_cli`
 - `CNB_BRIDGE_PLATFORM_URL`：默认 `https://cnb.cool`
 - `CNB_BRIDGE_API_URL`：默认 `https://api.cnb.cool`
 - `CNB_BRIDGE_DATA_DIR`：覆盖本地数据目录（测试/便携模式）
 
 ## 已知边界
 
-- 需要 WebView2 Runtime 承载 Tauri UI；登录页本身始终使用系统浏览器。
-- CNB CLI 的公共 OAuth 应用缺少 `group-resource:rw`，首次建仓需按客户端引导在浏览器创建一次空仓库。
-- CNB 暂无 SSH 公钥 OpenAPI，首次需手动在 CNB 网页添加客户端生成的公钥。
+- 需要 WebView2 Runtime 承载 Tauri UI 和 CNB 扫码授权页。
+- PAT 与公钥自动化依赖 CNB 网页内部接口，CNB 前端升级后可能需要适配。
 - 云原生开发环境有 18 小时会话上限和凌晨 4–6 点强制回收；客户端会自动重建并重连。
 - v1 单工作空间，不做多环境额度优选。
 

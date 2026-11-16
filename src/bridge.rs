@@ -125,7 +125,6 @@ impl Bridge {
                 return Err(BridgeError::Api(error));
             }
         };
-        self.account.set_username(user.username.clone());
         self.runtime.lock().await.username = Some(user.username.clone());
 
         let public_key = self.keys.ensure().map_err(BridgeError::Other)?;
@@ -205,6 +204,8 @@ impl Bridge {
         let tunnel = match start_tunnel(&remote_ssh, &private_key, settings.local_port).await {
             Ok(tunnel) => tunnel,
             Err(error) => {
+                self.logger
+                    .log("error", format!("SSH 隧道建立失败: {error}"));
                 let needs_key = error.contains("公钥")
                     || error.contains("认证")
                     || error.to_ascii_lowercase().contains("auth");

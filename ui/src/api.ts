@@ -22,13 +22,7 @@ export const startBridge = () => invoke<AppSnapshot>("start_bridge");
 
 export const stopBridge = () => invoke<AppSnapshot>("stop_bridge");
 
-export const ensureSshKey = () => invoke<string>("ensure_ssh_key");
-
-export const regenerateSshKey = () => invoke<string>("regenerate_ssh_key");
-
 export const listNamespaces = () => invoke<Namespace[]>("list_namespaces");
-
-export const openSshKeysPage = () => invoke<void>("open_ssh_keys_page");
 
 export const openExternal = (url: string) =>
   invoke<void>("open_external", { url });

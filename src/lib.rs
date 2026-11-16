@@ -14,8 +14,9 @@ pub mod paths;
 pub mod settings;
 pub mod ssh_key;
 pub mod tunnel;
+pub mod web_auth;
 pub mod workspace;
 
-pub use account::{AccountManager, AccountStatus, Credentials};
+pub use account::{AccountManager, AccountStatus, AuthMethod, Credentials};
 pub use bridge::{Bridge, BridgeSnapshot, BridgeState};
 pub use settings::{Settings, SettingsStore};

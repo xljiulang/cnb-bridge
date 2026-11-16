@@ -5,12 +5,14 @@ use russh::keys::{HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertifi
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
+use tokio::time::{timeout, Duration};
 
 /// Official CNB cloud development host key fingerprint.
 pub const CNB_HOST_KEY_FINGERPRINT: &str = "SHA256:fnWZvpqd+VAIRJxaZdV1KVMFfDgcCjYrP2VSWQ68T/E";
 
 /// Default loopback port used by the desktop shell and the workspace agent.
 pub const DEFAULT_TUNNEL_PORT: u16 = 11233;
+const SSH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
 struct ClientHandler;
 
@@ -85,18 +87,33 @@ pub async fn start_tunnel(
         .map_err(|error| format!("解析专用 SSH 私钥失败: {error}"))?;
 
     let config = Arc::new(client::Config::default());
-    let mut session = client::connect(config, (host.as_str(), port), ClientHandler)
+    let mut session = timeout(
+        SSH_HANDSHAKE_TIMEOUT,
+        client::connect(config, (host.as_str(), port), ClientHandler),
+    )
+    .await
+    .map_err(|_| "连接 CNB SSH 超时".to_string())?
+    .map_err(|error| format!("连接 CNB SSH 失败: {error}"))?;
+    let none_auth = timeout(SSH_HANDSHAKE_TIMEOUT, session.authenticate_none(&user))
         .await
-        .map_err(|error| format!("连接 CNB SSH 失败: {error}"))?;
-    let auth = session
-        .authenticate_publickey(
-            user,
-            PrivateKeyWithHashAlg::new(Arc::new(private_key), None),
+        .map_err(|_| "CNB SSH 认证超时".to_string())?
+        .map_err(|error| format!("SSH 认证失败: {error}"))?;
+    let auth = if none_auth.success() {
+        none_auth
+    } else {
+        timeout(
+            SSH_HANDSHAKE_TIMEOUT,
+            session.authenticate_publickey(
+                &user,
+                PrivateKeyWithHashAlg::new(Arc::new(private_key), None),
+            ),
         )
         .await
-        .map_err(|error| format!("SSH 公钥认证失败: {error}"))?;
+        .map_err(|_| "CNB SSH 认证超时".to_string())?
+        .map_err(|error| format!("SSH 公钥认证失败: {error}"))?
+    };
     if !auth.success() {
-        return Err("SSH 公钥认证失败：该密钥可能尚未添加到 CNB 公钥管理页".to_string());
+        return Err("SSH 公钥认证失败：请重新扫码绑定以同步公钥".to_string());
     }
 
     let session = Arc::new(session);

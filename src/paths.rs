@@ -34,7 +34,7 @@ pub fn settings_path() -> PathBuf {
     data_dir().join("settings.json")
 }
 
-/// Path of the DPAPI encrypted OAuth credentials.
+/// Path of the DPAPI encrypted personal access token.
 pub fn account_path() -> PathBuf {
     data_dir().join("account-auth.bin")
 }
@@ -47,4 +47,9 @@ pub fn ssh_key_path() -> PathBuf {
 /// Path of the OpenSSH public key shown to the user.
 pub fn ssh_public_key_path() -> PathBuf {
     data_dir().join("ssh-key.pub")
+}
+
+/// Persistent WebView2 profile used only for CNB web authorization.
+pub fn auth_webview_dir() -> PathBuf {
+    data_dir().join("auth-webview")
 }

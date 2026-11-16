@@ -941,6 +941,11 @@ mod tests {
         assert!(error.contains("NotFastForward"), "{error}");
     }
 
+    #[test]
+    fn libgit2_has_https_transport() {
+        assert!(git2::Version::get().https());
+    }
+
     #[tokio::test]
     async fn initializes_empty_repo_on_main_and_verifies_the_push() {
         let remote_root = tempfile::tempdir().unwrap();
