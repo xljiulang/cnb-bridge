@@ -50,8 +50,9 @@ agent 从云会话继承 `CNB_TOKEN`，只监听 loopback。客户端侧传入�
 
 - `harness`：处理 DeepSeek Harness 品牌和已确认会触发上游 `11128` 的 `@` 路径提示句。
 - `codex`：处理 Codex 品牌，并为未来 Codex 专属规则保留独立 profile。
+- `gate/developer-role`：把消息里的 `developer` 角色改写为 `system`。实测携带 `developer` 的 Chat 请求会被上游以 `11128` 拒绝，改成 `system` 后可以通过。
 
-所有 profile 按 `harness`、`codex` 顺序执行，仅修改 system/developer 提示，不修改用户消息、工具参数或模型输出。规则幂等，可安全重复执行。
+所有 profile 按 `harness`、`codex` 顺序执行，仅修改 system/developer 提示并统一角色名，不修改用户消息、工具参数或模型输出。规则幂等，可安全重复执行。
 
 发往上游的 User-Agent 会统一覆盖为 `WorkBuddy/<客户端版本>`，当前版本为 `WorkBuddy/0.1.0`。Authorization、Cookie、会话头和其他客户端头保持不变。
 

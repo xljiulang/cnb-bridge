@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 /// User-Agent sent to the upstream agent for compatibility.
 pub(crate) const WORKBUDDY_USER_AGENT: &str = concat!("WorkBuddy/", env!("CARGO_PKG_VERSION"));
 const PROMPT_GATE_BLOCK_CODE: i64 = 11128;
+const DEVELOPER_ROLE_RULE: &str = "gate/developer-role";
 const PATH_INSTRUCTION_REPLACEMENT: &str = concat!(
     "Paths beginning with @ refer to resources the user explicitly named. ",
     "Relative paths are resolved from the workspace root; ",
@@ -97,7 +98,8 @@ const PROFILES: &[GateProfile] = &[
     },
 ];
 
-/// Applies all registered profiles to system/developer message text.
+/// Applies all registered profiles to system/developer message text and maps
+/// the `developer` role to `system`, which the upstream channel accepts.
 pub(crate) fn normalize_chat(body: &mut Value) -> GateReport {
     let mut report = GateReport::default();
     for profile in PROFILES {
@@ -106,11 +108,20 @@ pub(crate) fn normalize_chat(body: &mut Value) -> GateReport {
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
         return report;
     };
+    let mut converted_roles = 0;
     for message in messages {
         let Some(role) = message.get("role").and_then(Value::as_str) else {
             continue;
         };
-        if !role.eq_ignore_ascii_case("system") && !role.eq_ignore_ascii_case("developer") {
+        let is_developer = role.eq_ignore_ascii_case("developer");
+        let is_system = role.eq_ignore_ascii_case("system");
+        if is_developer {
+            if let Some(object) = message.as_object_mut() {
+                object.insert("role".to_string(), Value::String("system".to_string()));
+                converted_roles += 1;
+            }
+        }
+        if !is_system && !is_developer {
             continue;
         }
         let Some(content) = message.get_mut("content") else {
@@ -118,6 +129,7 @@ pub(crate) fn normalize_chat(body: &mut Value) -> GateReport {
         };
         normalize_content(content, &mut report);
     }
+    report.record_hit(DEVELOPER_ROLE_RULE, converted_roles);
     report
 }
 
@@ -330,6 +342,29 @@ mod tests {
         assert_eq!(body["messages"][1]["content"], "Codex DeepSeek Harness");
         assert_eq!(body["messages"][2]["content"], "Codex");
         assert_eq!(body["messages"][3]["content"], "Codex");
+    }
+
+    #[test]
+    fn maps_developer_role_to_system() {
+        let mut body = json!({
+            "messages": [{
+                "role": "developer",
+                "content": "Create a concise title for the session."
+            }, {
+                "role": "user",
+                "content": "你好"
+            }, {
+                "role": "System",
+                "content": "Answer briefly."
+            }]
+        });
+
+        let report = normalize_chat(&mut body);
+
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert_eq!(body["messages"][2]["role"], "System");
+        assert_eq!(report.hit_count("gate/developer-role"), 1);
     }
 
     #[test]

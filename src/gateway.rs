@@ -1940,6 +1940,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn developer_role_is_forwarded_as_system() {
+        let captured = Arc::new(Mutex::new(None::<Value>));
+        let captured_for_upstream = Arc::clone(&captured);
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(move |body: Bytes| {
+                let captured = Arc::clone(&captured_for_upstream);
+                async move {
+                    *captured.lock().unwrap() = Some(serde_json::from_slice(&body).unwrap());
+                    Json(json!({ "choices": [] })).into_response()
+                }
+            }),
+        );
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_port = listener.local_addr().unwrap().port();
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+        let (_temp, bridge, gateway) = test_gateway_with_upstream(upstream_port).await;
+
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{}/v1/chat/completions",
+                gateway.port()
+            ))
+            .json(&json!({
+                "model": "deepseek-v4.1-flash",
+                "messages": [{
+                    "role": "developer",
+                    "content": "Create a concise title for an AI coding-assistant session."
+                }, {
+                    "role": "user",
+                    "content": "你好"
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let forwarded = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(forwarded["messages"][0]["role"], "system");
+        assert_eq!(forwarded["messages"][1]["role"], "user");
+        gateway.stop().await;
+
+        let logs = bridge
+            .logger_handle()
+            .recent(20)
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(logs.contains("rules=gate/developer-role:1"));
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
     async fn upstream_errors_are_recorded_as_raw_http_messages() {
         let upstream = Router::new().route(
             "/chat/completions",
