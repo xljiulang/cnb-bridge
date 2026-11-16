@@ -8,8 +8,10 @@ use crate::ssh_key::SshKeyStore;
 use crate::tunnel::{start_tunnel, TunnelHandle, DEFAULT_TUNNEL_PORT};
 use crate::workspace::{RepoProvisionError, RepoProvisioner, WorkspaceManager};
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::time::{Duration, Instant};
 
 /// High-level bridge state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
@@ -22,11 +24,22 @@ pub enum BridgeState {
     PreparingRepo,
     StartingWorkspace,
     Connecting,
+    Reconnecting,
     Ready,
     NeedsSshKey,
     NeedsRepoCreation,
     Stopping,
     Failed,
+}
+
+fn recovery_retry_delay(failed_attempts: u32) -> std::time::Duration {
+    let seconds = match failed_attempts {
+        0 | 1 => 5,
+        2 => 15,
+        3 => 30,
+        _ => 60,
+    };
+    std::time::Duration::from_secs(seconds)
 }
 
 /// Serializable state shown by the desktop UI.
@@ -67,6 +80,7 @@ pub struct Bridge {
     logger: Arc<Logger>,
     runtime: Mutex<Runtime>,
     transition: Mutex<()>,
+    recovery_cancelled: AtomicBool,
 }
 
 #[derive(Default)]
@@ -98,6 +112,7 @@ impl Bridge {
             logger,
             runtime: Mutex::new(Runtime::default()),
             transition: Mutex::new(()),
+            recovery_cancelled: AtomicBool::new(false),
         }
     }
 
@@ -106,6 +121,7 @@ impl Bridge {
         let Ok(_transition) = self.transition.try_lock() else {
             return Ok(self.snapshot().await);
         };
+        self.recovery_cancelled.store(false, Ordering::SeqCst);
         let already_ready = {
             let mut runtime = self.runtime.lock().await;
             if runtime.state == Some(BridgeState::Ready) {
@@ -256,6 +272,7 @@ impl Bridge {
 
     /// Stops the tunnel and the cloud workspace.
     pub async fn stop(&self) -> BridgeSnapshot {
+        self.recovery_cancelled.store(true, Ordering::SeqCst);
         let _transition = self.transition.lock().await;
         self.stop_locked().await
     }
@@ -286,6 +303,115 @@ impl Bridge {
         self.set_state(BridgeState::SignedOut).await;
         self.runtime.lock().await.repo_creation_url = None;
         self.snapshot().await
+    }
+
+    /// Supervises a ready bridge and automatically recovers a closed workspace.
+    pub async fn supervise(&self) {
+        let mut consecutive_health_failures = 0_u8;
+        let mut failed_recovery_attempts = 0_u32;
+        let mut next_health_check = Instant::now();
+        let mut next_recovery_attempt = Instant::now();
+
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if self.recovery_cancelled.load(Ordering::SeqCst) {
+                consecutive_health_failures = 0;
+                failed_recovery_attempts = 0;
+                continue;
+            }
+
+            match self.current_state().await {
+                BridgeState::Ready => {
+                    failed_recovery_attempts = 0;
+                    if let Some(reason) = self.tunnel_failure().await {
+                        self.logger
+                            .log("warn", format!("本机隧道已失效，准备自动恢复: {reason}"));
+                        match self.recover_once(Some(reason)).await {
+                            Ok(_) => {
+                                consecutive_health_failures = 0;
+                                next_health_check = Instant::now() + Duration::from_secs(10);
+                            }
+                            Err(error) => {
+                                failed_recovery_attempts = 1;
+                                next_recovery_attempt =
+                                    Instant::now() + recovery_retry_delay(failed_recovery_attempts);
+                                self.logger.log(
+                                    "warn",
+                                    format!(
+                                        "自动恢复第 {failed_recovery_attempts} 次失败: {error}"
+                                    ),
+                                );
+                            }
+                        }
+                    } else if Instant::now() >= next_health_check {
+                        next_health_check = Instant::now() + Duration::from_secs(10);
+                        let settings = self.settings.load().unwrap_or_default();
+                        match check_health_once(settings.local_port).await {
+                            Ok(()) => consecutive_health_failures = 0,
+                            Err(error) => {
+                                consecutive_health_failures =
+                                    consecutive_health_failures.saturating_add(1);
+                                if consecutive_health_failures >= 2 {
+                                    self.logger.log(
+                                        "warn",
+                                        format!("连续两次健康检查失败，准备自动恢复: {error}"),
+                                    );
+                                    match self.recover_once(Some(error)).await {
+                                        Ok(_) => {
+                                            consecutive_health_failures = 0;
+                                            next_health_check =
+                                                Instant::now() + Duration::from_secs(10);
+                                        }
+                                        Err(error) => {
+                                            failed_recovery_attempts = 1;
+                                            next_recovery_attempt = Instant::now()
+                                                + recovery_retry_delay(failed_recovery_attempts);
+                                            self.logger.log(
+                                                "warn",
+                                                format!(
+                                                    "自动恢复第 {failed_recovery_attempts} 次失败: {error}"
+                                                ),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                BridgeState::Reconnecting => {
+                    if Instant::now() >= next_recovery_attempt {
+                        match self.recover_once(None).await {
+                            Ok(_) => {
+                                consecutive_health_failures = 0;
+                                failed_recovery_attempts = 0;
+                                next_health_check = Instant::now() + Duration::from_secs(10);
+                                self.logger.log("info", "桥接自动恢复成功");
+                            }
+                            Err(error) => {
+                                failed_recovery_attempts =
+                                    failed_recovery_attempts.saturating_add(1);
+                                let delay = recovery_retry_delay(failed_recovery_attempts);
+                                next_recovery_attempt = Instant::now() + delay;
+                                self.logger.log(
+                                    "warn",
+                                    format!(
+                                        "自动恢复第 {failed_recovery_attempts} 次失败，{} 秒后重试: {error}",
+                                        delay.as_secs()
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    consecutive_health_failures = 0;
+                    failed_recovery_attempts = 0;
+                    next_health_check = Instant::now() + Duration::from_secs(10);
+                    next_recovery_attempt = Instant::now();
+                }
+            }
+        }
     }
 
     /// Returns the current UI snapshot.
@@ -341,19 +467,73 @@ impl Bridge {
         runtime.error = Some(error);
         runtime.repo_creation_url = None;
     }
+
+    async fn current_state(&self) -> BridgeState {
+        self.runtime
+            .lock()
+            .await
+            .state
+            .unwrap_or(BridgeState::SignedOut)
+    }
+
+    async fn tunnel_failure(&self) -> Option<String> {
+        self.runtime
+            .lock()
+            .await
+            .tunnel
+            .as_ref()
+            .and_then(TunnelHandle::failure_reason)
+    }
+
+    async fn recover_once(&self, reason: Option<String>) -> Result<BridgeSnapshot, BridgeError> {
+        let _transition = self.transition.lock().await;
+        if self.recovery_cancelled.load(Ordering::SeqCst) {
+            return Ok(self.snapshot().await);
+        }
+        if !matches!(
+            self.current_state().await,
+            BridgeState::Ready | BridgeState::Reconnecting
+        ) {
+            return Ok(self.snapshot().await);
+        }
+
+        {
+            let mut runtime = self.runtime.lock().await;
+            runtime.state = Some(BridgeState::Reconnecting);
+            if reason.is_some() {
+                runtime.error = reason;
+            }
+        }
+
+        let tunnel = self.runtime.lock().await.tunnel.take();
+        if let Some(tunnel) = tunnel {
+            tunnel.stop().await;
+            self.logger.log("info", "旧本机隧道已关闭，端口已释放");
+        }
+
+        match self.start_locked().await {
+            Ok(snapshot) => Ok(snapshot),
+            Err(error) => {
+                let next_state = if matches!(&error, BridgeError::Account(_)) {
+                    BridgeState::SignedOut
+                } else {
+                    BridgeState::Reconnecting
+                };
+                let mut runtime = self.runtime.lock().await;
+                runtime.state = Some(next_state);
+                if runtime.error.is_none() {
+                    runtime.error = Some(error.to_string());
+                }
+                Err(error)
+            }
+        }
+    }
 }
 
 async fn wait_for_health(port: u16) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .map_err(|error| error.to_string())?;
     for _ in 0..30 {
-        let url = format!("http://127.0.0.1:{port}/healthz");
-        if let Ok(response) = client.get(&url).send().await {
-            if response.status().is_success() {
-                return Ok(());
-            }
+        if check_health_once(port).await.is_ok() {
+            return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
@@ -362,10 +542,32 @@ async fn wait_for_health(port: u16) -> Result<(), String> {
     ))
 }
 
+async fn check_health_once(port: u16) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let url = format!("http://127.0.0.1:{port}/healthz");
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|error| format!("本机端点健康检查失败: {error}"))?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "本机端点健康检查返回 HTTP {}",
+            response.status()
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::account::AccountStore;
+    use std::time::Duration;
 
     fn test_bridge(temp: &tempfile::TempDir) -> Bridge {
         let account = AccountManager::with_store(AccountStore::new(
@@ -387,6 +589,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&BridgeState::NeedsRepoCreation).unwrap(),
             r#""needsRepoCreation""#
+        );
+        assert_eq!(
+            serde_json::to_string(&BridgeState::Reconnecting).unwrap(),
+            r#""reconnecting""#
         );
     }
 
@@ -410,5 +616,29 @@ mod tests {
         let snapshot = bridge.start().await.unwrap();
 
         assert_eq!(snapshot.state, BridgeState::SignedOut);
+    }
+
+    #[test]
+    fn recovery_backoff_is_capped_at_sixty_seconds() {
+        assert_eq!(recovery_retry_delay(1), Duration::from_secs(5));
+        assert_eq!(recovery_retry_delay(2), Duration::from_secs(15));
+        assert_eq!(recovery_retry_delay(3), Duration::from_secs(30));
+        assert_eq!(recovery_retry_delay(4), Duration::from_secs(60));
+        assert_eq!(recovery_retry_delay(8), Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn cancelled_recovery_returns_without_starting_network_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&temp);
+        bridge.runtime.lock().await.state = Some(BridgeState::Ready);
+        bridge.recovery_cancelled.store(true, Ordering::SeqCst);
+
+        let snapshot = bridge
+            .recover_once(Some("workspace closed".to_string()))
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.state, BridgeState::Ready);
     }
 }

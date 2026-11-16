@@ -25,9 +25,14 @@ describe("format helpers", () => {
     expect(isBridgeTransitioning("startingWorkspace")).toBe(true);
     expect(isBridgeTransitioning("connecting")).toBe(true);
     expect(isBridgeTransitioning("stopping")).toBe(true);
+    expect(isBridgeTransitioning("reconnecting")).toBe(true);
     expect(isBridgeTransitioning("failed")).toBe(false);
     expect(isBridgeTransitioning("needsRepoCreation")).toBe(false);
     expect(isBridgeTransitioning("ready")).toBe(false);
+  });
+
+  it("labels the automatic recovery state", () => {
+    expect(bridgeLabel("reconnecting")).toBe("正在恢复连接");
   });
 
   it("formats command errors", () => {

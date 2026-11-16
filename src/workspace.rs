@@ -1018,4 +1018,82 @@ mod tests {
         let remote = Repository::open_bare(&remote_path).unwrap();
         assert!(remote.find_reference("refs/heads/main").is_ok());
     }
+
+    #[tokio::test]
+    async fn starts_a_closed_workspace_and_returns_its_connection_detail() {
+        let server = MockServer::start().await;
+        let list_reads = Arc::new(AtomicUsize::new(0));
+        let list_reads_for_response = Arc::clone(&list_reads);
+        Mock::given(method("GET"))
+            .and(path("/workspace/list"))
+            .respond_with(move |_request: &wiremock::Request| {
+                if list_reads_for_response.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({ "list": [] }))
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "list": [{ "sn": "ws-new", "status": "running" }]
+                    }))
+                }
+            })
+            .mount(&server)
+            .await;
+        let start_calls = Arc::new(AtomicUsize::new(0));
+        let start_calls_for_response = Arc::clone(&start_calls);
+        Mock::given(method("POST"))
+            .and(path("/xljiulang/cnb-ai-bridge/-/workspace/start"))
+            .respond_with(move |_request: &wiremock::Request| {
+                start_calls_for_response.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({}))
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/xljiulang/cnb-ai-bridge/-/workspace/detail/ws-new",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "remoteSsh": "cnb@example.test"
+            })))
+            .mount(&server)
+            .await;
+        let api = CnbApi::with_base_url(server.uri());
+
+        let session = WorkspaceManager::new(&api)
+            .ensure_running("token", "xljiulang/cnb-ai-bridge", "main")
+            .await
+            .unwrap();
+
+        assert_eq!(session.sn, "ws-new");
+        assert_eq!(session.detail.remote_ssh.as_deref(), Some("cnb@example.test"));
+        assert_eq!(start_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn reuses_a_running_workspace_without_starting_another() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/workspace/list"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "list": [{ "sn": "ws-running", "status": "running" }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/xljiulang/cnb-ai-bridge/-/workspace/detail/ws-running",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "remoteSsh": "cnb@example.test"
+            })))
+            .mount(&server)
+            .await;
+        let api = CnbApi::with_base_url(server.uri());
+
+        let session = WorkspaceManager::new(&api)
+            .ensure_running("token", "xljiulang/cnb-ai-bridge", "main")
+            .await
+            .unwrap();
+
+        assert_eq!(session.sn, "ws-running");
+    }
 }

@@ -36,6 +36,8 @@ pub struct TunnelHandle {
     local_port: u16,
     shutdown: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
+    keepalive_task: tokio::task::JoinHandle<()>,
+    failure: watch::Receiver<Option<String>>,
 }
 
 impl TunnelHandle {
@@ -44,11 +46,18 @@ impl TunnelHandle {
         self.local_port
     }
 
+    /// Returns the first fatal tunnel error, if one has occurred.
+    pub fn failure_reason(&self) -> Option<String> {
+        self.failure.borrow().clone()
+    }
+
     /// Stops forwarding and releases the local port.
     pub async fn stop(self) {
         let _ = self.shutdown.send(true);
         self.task.abort();
+        self.keepalive_task.abort();
         let _ = self.task.await;
+        let _ = self.keepalive_task.await;
     }
 }
 
@@ -121,8 +130,11 @@ pub async fn start_tunnel(
         .await
         .map_err(|error| format!("绑定本机端口 {local_port} 失败: {error}"))?;
     let (shutdown, mut shutdown_rx) = watch::channel(false);
+    let (failure_tx, failure_rx) = watch::channel(None::<String>);
 
     let accept_session = Arc::clone(&session);
+    let accept_failure_tx = failure_tx.clone();
+    let mut accept_failure_rx = failure_rx.clone();
     let task = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -131,22 +143,39 @@ pub async fn start_tunnel(
                         break;
                     }
                 }
-                accepted = listener.accept() => {
-                    let Ok((mut socket, _peer)) = accepted else {
+                changed = accept_failure_rx.changed() => {
+                    if changed.is_err() || accept_failure_rx.borrow().is_some() {
                         break;
+                    }
+                }
+                accepted = listener.accept() => {
+                    let (mut socket, _peer) = match accepted {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            let _ = accept_failure_tx.send(Some(format!(
+                                "本机隧道监听失败: {error}"
+                            )));
+                            break;
+                        }
                     };
                     let session = Arc::clone(&accept_session);
+                    let failure_tx = accept_failure_tx.clone();
                     tokio::spawn(async move {
-                        let Ok(channel) = session
+                        let channel = match session
                             .channel_open_direct_tcpip(
                                 "127.0.0.1",
                                 11233,
                                 "127.0.0.1",
                                 local_port as u32,
                             )
-                            .await
-                        else {
-                            return;
+                            .await {
+                                Ok(channel) => channel,
+                                Err(error) => {
+                                    let _ = failure_tx.send(Some(format!(
+                                        "CNB SSH 通道已失效: {error}"
+                                    )));
+                                    return;
+                                }
                         };
                         let mut stream = channel.into_stream();
                         let _ = tokio::io::copy_bidirectional(&mut socket, &mut stream).await;
@@ -157,10 +186,12 @@ pub async fn start_tunnel(
     });
 
     let keepalive = Arc::clone(&session);
-    tokio::spawn(async move {
+    let keepalive_failure_tx = failure_tx;
+    let keepalive_task = tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(15)).await;
             if keepalive.send_keepalive(true).await.is_err() {
+                let _ = keepalive_failure_tx.send(Some("CNB SSH keepalive 失败".to_string()));
                 break;
             }
         }
@@ -170,6 +201,8 @@ pub async fn start_tunnel(
         local_port,
         shutdown,
         task,
+        keepalive_task,
+        failure: failure_rx,
     })
 }
 
@@ -187,5 +220,41 @@ mod tests {
             parse_remote_ssh("ssh user@example.test:2222").unwrap(),
             ("user".to_string(), "example.test".to_string(), 2222)
         );
+    }
+
+    #[tokio::test]
+    async fn failure_signal_releases_the_listener_and_reports_the_reason() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (shutdown, _) = watch::channel(false);
+        let (failure_tx, failure_rx) = watch::channel(None::<String>);
+        let mut listener_failure = failure_rx.clone();
+        let task = tokio::spawn(async move {
+            let _listener = listener;
+            let _ = listener_failure.changed().await;
+        });
+        let keepalive_task = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        let handle = TunnelHandle {
+            local_port: address.port(),
+            shutdown,
+            task,
+            keepalive_task,
+            failure: failure_rx,
+        };
+
+        failure_tx.send(Some("SSH channel closed".to_string())).unwrap();
+        let reason = handle.failure_reason();
+        let task = handle.task;
+        let keepalive_task = handle.keepalive_task;
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        keepalive_task.abort();
+
+        assert_eq!(reason.as_deref(), Some("SSH channel closed"));
+        assert!(TcpListener::bind(address).await.is_ok());
     }
 }

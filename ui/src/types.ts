@@ -8,6 +8,7 @@ export type BridgeState =
   | "preparingRepo"
   | "startingWorkspace"
   | "connecting"
+  | "reconnecting"
   | "ready"
   | "needsSshKey"
   | "needsRepoCreation"

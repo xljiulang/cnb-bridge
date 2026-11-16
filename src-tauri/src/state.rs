@@ -67,6 +67,10 @@ pub fn initialize(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
         SshKeyStore::default_path(),
         Arc::clone(&logger),
     ));
+    let supervisor = Arc::clone(&bridge);
+    tauri::async_runtime::spawn(async move {
+        supervisor.supervise().await;
+    });
 
     app.manage(DesktopState {
         app: app.handle().clone(),
