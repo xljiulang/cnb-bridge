@@ -105,8 +105,6 @@ let usageTimer: number | undefined;
 let usageGeneration = 0;
 let unlisten: UnlistenFn | undefined;
 
-const GITHUB_PROJECT_URL = "https://github.com/xljiulang/cyarp-cnb";
-
 const ready = computed(() => snapshot.value?.bridge.state === "ready");
 const bridgeState = computed(() => snapshot.value?.bridge.state ?? "signedOut");
 const bridgeTransitioning = computed(() => isBridgeTransitioning(bridgeState.value));
@@ -476,14 +474,6 @@ function httpTraceLabel(trace: HttpTraceSummary): string {
   return `${trace.method} ${trace.path}，状态 ${trace.status}，请求 ${formatBytes(
     trace.requestBytes,
   )}，响应 ${formatBytes(trace.responseBytes)}，耗时 ${trace.elapsedMs} 毫秒`;
-}
-
-async function openAboutResource(url: string) {
-  try {
-    await openExternal(url);
-  } catch (cause) {
-    error.value = formatError(cause);
-  }
 }
 
 onMounted(async () => {
@@ -1220,19 +1210,7 @@ watch(
             </div>
             <div><dt>运行方式</dt><dd>Tauri 桌面客户端</dd></div>
             <div><dt>本机端点</dt><dd><code>{{ baseUrl }}</code></dd></div>
-            <div>
-              <dt>项目主页</dt>
-              <dd>
-                <button
-                  type="button"
-                  class="secondary compact project-link"
-                  @click="openAboutResource(GITHUB_PROJECT_URL)"
-                >
-                  <ExternalLink :size="15" aria-hidden="true" />
-                  打开项目主页
-                </button>
-              </dd>
-            </div>
+            <div><dt>作者</dt><dd>老九</dd></div>
           </dl>
         </article>
       </section>

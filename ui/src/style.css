@@ -1336,10 +1336,6 @@ select:focus {
   overflow-wrap: anywhere;
 }
 
-.project-link {
-  justify-self: start;
-}
-
 code {
   font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
   font-size: 12px;

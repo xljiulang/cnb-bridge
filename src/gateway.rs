@@ -266,15 +266,10 @@ impl GatewayHandle {
 
 fn router(state: GatewayState) -> Router {
     Router::new()
-        .route("/healthz", get(handle_health))
         .route("/v1/healthz", get(handle_health))
-        .route("/models", get(handle_models))
         .route("/v1/models", get(handle_models))
-        .route("/models/{id}", get(handle_model))
         .route("/v1/models/{id}", get(handle_model))
-        .route("/chat/completions", post(handle_chat))
         .route("/v1/chat/completions", post(handle_chat))
-        .route("/responses", post(handle_responses))
         .route("/v1/responses", post(handle_responses))
         .fallback(handle_not_found)
         .method_not_allowed_fallback(handle_method_not_allowed)
@@ -487,17 +482,9 @@ fn with_cors(mut response: Response<Body>) -> Response<Body> {
 fn is_known_path(path: &str) -> bool {
     matches!(
         path,
-        "/healthz"
-            | "/v1/healthz"
-            | "/models"
-            | "/v1/models"
-            | "/chat/completions"
-            | "/v1/chat/completions"
-            | "/responses"
-            | "/v1/responses"
+        "/v1/healthz" | "/v1/models" | "/v1/chat/completions" | "/v1/responses"
     ) || path
-        .strip_prefix("/models/")
-        .or_else(|| path.strip_prefix("/v1/models/"))
+        .strip_prefix("/v1/models/")
         .is_some_and(|id| !id.is_empty() && !id.contains('/'))
 }
 
@@ -1465,7 +1452,7 @@ mod tests {
             .await
             .unwrap();
         stream
-            .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .write_all(b"GET /v1/healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             .await
             .unwrap();
         let mut response = String::new();
@@ -1507,7 +1494,7 @@ mod tests {
         }
 
         let detail = client
-            .get(format!("{base}/models/deepseek-v4.1-flash"))
+            .get(format!("{base}/v1/models/deepseek-v4.1-flash"))
             .send()
             .await
             .unwrap();
@@ -1517,13 +1504,13 @@ mod tests {
             "deepseek-v4.1-flash"
         );
         let deepseek_flash = client
-            .get(format!("{base}/models/deepseek-flash"))
+            .get(format!("{base}/v1/models/deepseek-flash"))
             .send()
             .await
             .unwrap();
         assert_eq!(deepseek_flash.status(), reqwest::StatusCode::NOT_FOUND);
         let missing = client
-            .get(format!("{base}/models/other"))
+            .get(format!("{base}/v1/models/other"))
             .send()
             .await
             .unwrap();
@@ -1596,7 +1583,7 @@ mod tests {
         assert_eq!(body["model"], "another-model");
 
         let response = client
-            .post(format!("{base}/responses"))
+            .post(format!("{base}/v1/responses"))
             .json(&json!({
                 "model": "deepseek-v4.1-flash",
                 "instructions": concat!(
@@ -1752,7 +1739,11 @@ mod tests {
             "*"
         );
 
-        let wrong_method = client.post(format!("{base}/models")).send().await.unwrap();
+        let wrong_method = client
+            .post(format!("{base}/v1/models"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(
             wrong_method.status(),
             reqwest::StatusCode::METHOD_NOT_ALLOWED
@@ -1760,6 +1751,43 @@ mod tests {
         let missing = client.get(format!("{base}/missing")).send().await.unwrap();
         assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
         assert!(missing.headers().contains_key(REQUEST_ID_HEADER));
+        gateway.stop().await;
+        assert!(HttpTraceStore::new(temp.path().join("http-trace"))
+            .list(10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn removes_all_routes_without_the_v1_prefix() {
+        let (temp, _bridge, gateway) = test_gateway().await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{}", gateway.port());
+
+        let root_requests = [
+            client.get(format!("{base}/healthz")).send(),
+            client
+                .request(reqwest::Method::OPTIONS, format!("{base}/healthz"))
+                .send(),
+            client.get(format!("{base}/models")).send(),
+            client
+                .get(format!("{base}/models/deepseek-v4.1-flash"))
+                .send(),
+            client
+                .post(format!("{base}/chat/completions"))
+                .json(&json!({ "messages": [] }))
+                .send(),
+            client
+                .post(format!("{base}/responses"))
+                .json(&json!({ "input": "hello" }))
+                .send(),
+        ];
+        for response in root_requests {
+            let response = response.await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+            assert!(response.headers().contains_key(REQUEST_ID_HEADER));
+        }
+
         gateway.stop().await;
         assert!(HttpTraceStore::new(temp.path().join("http-trace"))
             .list(10)
@@ -1804,7 +1832,7 @@ mod tests {
         });
         let (temp, _bridge, gateway) = test_gateway_with_upstream(upstream_port).await;
         let response = reqwest::Client::new()
-            .post(format!("http://127.0.0.1:{}/responses", gateway.port()))
+            .post(format!("http://127.0.0.1:{}/v1/responses", gateway.port()))
             .json(&json!({
                 "model": "deepseek-v4.1-flash",
                 "input": "hello",
@@ -1848,7 +1876,7 @@ mod tests {
         let (temp, _bridge, gateway) = test_gateway_with_upstream(upstream_port).await;
         let response = reqwest::Client::new()
             .post(format!(
-                "http://127.0.0.1:{}/chat/completions",
+                "http://127.0.0.1:{}/v1/chat/completions",
                 gateway.port()
             ))
             .json(&json!({
@@ -1921,7 +1949,7 @@ mod tests {
         let (temp, _bridge, gateway) = test_gateway_with_upstream(port).await;
         let response = reqwest::Client::new()
             .post(format!(
-                "http://127.0.0.1:{}/chat/completions",
+                "http://127.0.0.1:{}/v1/chat/completions",
                 gateway.port()
             ))
             .json(&json!({
@@ -1975,7 +2003,7 @@ mod tests {
         let (temp, bridge, gateway) = test_gateway_with_upstream(port).await;
         let response = reqwest::Client::new()
             .post(format!(
-                "http://127.0.0.1:{}/chat/completions",
+                "http://127.0.0.1:{}/v1/chat/completions",
                 gateway.port()
             ))
             .header(header::USER_AGENT, "deepseek-harness/0.2.1-rc.5")
@@ -2044,7 +2072,7 @@ mod tests {
         let (activation_temp, _bridge, activation_gateway) = test_gateway().await;
         let activation_response = reqwest::Client::new()
             .post(format!(
-                "http://127.0.0.1:{}/chat/completions",
+                "http://127.0.0.1:{}/v1/chat/completions",
                 activation_gateway.port()
             ))
             .json(&json!({ "messages": [] }))
@@ -2067,7 +2095,7 @@ mod tests {
             test_gateway_with_upstream(unused_port).await;
         let network_response = reqwest::Client::new()
             .post(format!(
-                "http://127.0.0.1:{}/chat/completions",
+                "http://127.0.0.1:{}/v1/chat/completions",
                 network_gateway.port()
             ))
             .json(&json!({ "messages": [] }))

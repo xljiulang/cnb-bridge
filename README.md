@@ -30,15 +30,17 @@ agent 是零 npm 依赖的 Node 单文件，由 CNB 云原生开发会话启动�
 
 agent 从云会话继承 `CNB_TOKEN`，只监听 loopback。客户端侧传入的 API key 可以是任意值或留空；agent 会覆盖为工作空间 token。
 
-桌面客户端提供完整公开接口，根路径和 `/v1` 前缀等价：
+桌面客户端只提供带 `/v1` 前缀的公开接口：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/healthz` | 本机健康检查，不启动工作空间 |
-| GET | `/models`、`/models/{id}` | 客户端内置模型目录，包含 `deepseek-v4.1-flash` |
-| POST | `/chat/completions` | PromptGate 兼容处理后转发 Chat Completions |
-| POST | `/responses` | Responses 入、Chat 出并回译 |
-| OPTIONS | 已知公开路径 | CORS 预检 |
+| GET | `/v1/healthz` | 本机健康检查，不启动工作空间 |
+| GET | `/v1/models`、`/v1/models/{id}` | 客户端内置模型目录，包含 `deepseek-v4.1-flash` |
+| POST | `/v1/chat/completions` | PromptGate 兼容处理后转发 Chat Completions |
+| POST | `/v1/responses` | Responses 入、Chat 出并回译 |
+| OPTIONS | 已知 `/v1` 公开路径 | CORS 预检 |
+
+无 `/v1` 前缀的旧路径直接返回 404，不做重定向。
 
 模型目录通过编译内置的 `resources/models.json` 提供。`deepseek-v4.1-flash` 声明文本/图像输入、流式输出、工具调用、reasoning summary 和 1,048,576 token 上下文；推理请求仍允许显式传入其它模型 ID。
 
