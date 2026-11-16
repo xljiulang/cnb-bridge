@@ -14,6 +14,7 @@ pub mod http_trace;
 pub mod lifecycle;
 pub mod logging;
 pub mod model_catalog;
+pub mod net;
 pub mod paths;
 pub mod prompt_gate;
 pub mod responses;

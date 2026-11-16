@@ -5,14 +5,20 @@ use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+use crate::net;
+
 /// Default CNB OpenAPI endpoint.
 pub const DEFAULT_API_URL: &str = "https://api.cnb.cool";
 
 /// Errors returned by the CNB API.
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
-    #[error("网络请求失败: {0}")]
-    Http(#[from] reqwest::Error),
+    #[error("网络请求失败: {message}")]
+    Http {
+        message: String,
+        #[source]
+        source: reqwest::Error,
+    },
     #[error("CNB API 返回 {status}: {message}")]
     Remote {
         status: StatusCode,
@@ -21,6 +27,15 @@ pub enum ApiError {
     },
     #[error("响应格式无效: {0}")]
     InvalidResponse(String),
+}
+
+impl From<reqwest::Error> for ApiError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Http {
+            message: net::format_error_chain(&error),
+            source: error,
+        }
+    }
 }
 
 /// The current CNB user.
@@ -290,22 +305,22 @@ impl CnbApi {
             "{}/{slug}/-/git/contents/{file_path}?ref={reference}",
             self.base_url
         );
-        let response = self
-            .http
-            .get(url)
-            .bearer_auth(token)
-            .header("Accept", "application/vnd.cnb.api+json")
-            .send()
-            .await?;
-        let status = response.status();
+        let response = net::send_idempotent(|| {
+            self.http
+                .get(&url)
+                .bearer_auth(token)
+                .header("Accept", "application/vnd.cnb.api+json")
+                .send()
+        })
+        .await?;
+        let status = response.status;
         if status.is_success() {
             return Ok(true);
         }
         if status == StatusCode::NOT_FOUND {
             return Ok(false);
         }
-        let text = response.text().await?;
-        let (code, message) = parse_remote_error(&text);
+        let (code, message) = parse_remote_error(&response.text);
         Err(ApiError::Remote {
             status,
             code,
@@ -431,6 +446,17 @@ impl CnbApi {
         B: Serialize + ?Sized,
     {
         let url = format!("{}{}", self.base_url, path);
+        if method == Method::GET {
+            let response = net::send_idempotent(|| {
+                self.http
+                    .get(&url)
+                    .bearer_auth(token)
+                    .header("Accept", "application/vnd.cnb.api+json")
+                    .send()
+            })
+            .await?;
+            return parse_json_response(response.status, &response.text);
+        }
         let mut request = self
             .http
             .request(method, url)
@@ -444,21 +470,27 @@ impl CnbApi {
         let response = request.send().await?;
         let status = response.status();
         let text = response.text().await?;
-        if !status.is_success() {
-            let (code, message) = parse_remote_error(&text);
-            return Err(ApiError::Remote {
-                status,
-                code,
-                message,
-            });
-        }
-        if text.trim().is_empty() {
-            serde_json::from_str("null")
-                .map_err(|error| ApiError::InvalidResponse(error.to_string()))
-        } else {
-            serde_json::from_str(&text)
-                .map_err(|error| ApiError::InvalidResponse(format!("{error}: {text}")))
-        }
+        parse_json_response(status, &text)
+    }
+}
+
+fn parse_json_response<T>(status: StatusCode, text: &str) -> Result<T, ApiError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    if !status.is_success() {
+        let (code, message) = parse_remote_error(text);
+        return Err(ApiError::Remote {
+            status,
+            code,
+            message,
+        });
+    }
+    if text.trim().is_empty() {
+        serde_json::from_str("null").map_err(|error| ApiError::InvalidResponse(error.to_string()))
+    } else {
+        serde_json::from_str(text)
+            .map_err(|error| ApiError::InvalidResponse(format!("{error}: {text}")))
     }
 }
 
@@ -529,6 +561,29 @@ mod tests {
                 access_role: "Owner".to_string(),
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn retries_transient_current_user_reads() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "username": "cnb.new-user"
+            })))
+            .mount(&server)
+            .await;
+        let api = CnbApi::with_base_url(server.uri());
+
+        let user = api.current_user("token").await.unwrap();
+
+        assert_eq!(user.username, "cnb.new-user");
     }
 
     #[tokio::test]

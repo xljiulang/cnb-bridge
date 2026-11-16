@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
 
+use crate::net;
+
 /// Minimal scopes required by the bridge runtime.
 pub const AUTH_SCOPES: &str = "account-profile:r,account-engage:rw,group-manage:rw,group-resource:rw,repo-code:rw,repo-basic-info:r,repo-cnb-trigger:rw,repo-cnb-detail:rw";
 
@@ -37,12 +39,25 @@ pub struct CreatedPat {
 /// Errors returned by CNB web-session endpoints.
 #[derive(Debug, thiserror::Error)]
 pub enum WebAuthError {
-    #[error("网络请求失败: {0}")]
-    Http(#[from] reqwest::Error),
+    #[error("网络请求失败: {message}")]
+    Http {
+        message: String,
+        #[source]
+        source: reqwest::Error,
+    },
     #[error("CNB 网页接口返回 {status}: {message}")]
     Remote { status: StatusCode, message: String },
     #[error("CNB 网页接口响应无效: {0}")]
     InvalidResponse(String),
+}
+
+impl From<reqwest::Error> for WebAuthError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Http {
+            message: net::format_error_chain(&error),
+            source: error,
+        }
+    }
 }
 
 /// Client for CNB browser-session endpoints.
@@ -251,9 +266,22 @@ impl WebAuthClient {
         session: &WebSession,
         body: Option<Value>,
     ) -> Result<Value, WebAuthError> {
+        let url = format!("{}{}", self.base_url, path);
+        if method == Method::GET {
+            let response = net::send_idempotent(|| {
+                self.http
+                    .get(&url)
+                    .header("Accept", "application/vnd.cnb.web+json")
+                    .header("Cookie", &session.cookie_header)
+                    .header("Csrftoken", &session.csrf_token)
+                    .send()
+            })
+            .await?;
+            return parse_web_response(response.status, &response.text);
+        }
         let mut request = self
             .http
-            .request(method, format!("{}{}", self.base_url, path))
+            .request(method, url)
             .header("Accept", "application/vnd.cnb.web+json")
             .header("Cookie", &session.cookie_header)
             .header("Csrftoken", &session.csrf_token);
@@ -263,24 +291,28 @@ impl WebAuthClient {
         let response = request.send().await?;
         let status = response.status();
         let text = response.text().await?;
-        if !status.is_success() {
-            let message = serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("errmsg")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .unwrap_or(text);
-            return Err(WebAuthError::Remote { status, message });
-        }
-        if text.trim().is_empty() {
-            return Ok(Value::Null);
-        }
-        serde_json::from_str(&text)
-            .map_err(|error| WebAuthError::InvalidResponse(format!("{error}: {text}")))
+        parse_web_response(status, &text)
     }
+}
+
+fn parse_web_response(status: StatusCode, text: &str) -> Result<Value, WebAuthError> {
+    if !status.is_success() {
+        let message = serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("errmsg")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| text.to_string());
+        return Err(WebAuthError::Remote { status, message });
+    }
+    if text.trim().is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_str(text)
+        .map_err(|error| WebAuthError::InvalidResponse(format!("{error}: {text}")))
 }
 
 impl Default for WebAuthClient {
@@ -547,6 +579,68 @@ mod tests {
 
         assert_eq!(namespaces.len(), 1);
         assert_eq!(namespaces[0].path, "xljiulang");
+    }
+
+    #[tokio::test]
+    async fn retries_transient_owned_namespace_reads() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/groups"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user/groups"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "name": "xljiulang",
+                    "path": "xljiulang",
+                    "access_role": "Owner"
+                }
+            ])))
+            .mount(&server)
+            .await;
+        let client = WebAuthClient::with_base_url(server.uri());
+
+        let namespaces = client.owned_namespaces(&session()).await.unwrap();
+
+        assert_eq!(namespaces[0].path, "xljiulang");
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_ssh_key_creation_posts() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/sign-ssh-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/user/sign-ssh-keys"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/user/sign-ssh-keys"))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+        let client = WebAuthClient::with_base_url(server.uri());
+
+        let error = client
+            .ensure_ssh_key(&session(), "CNB Bridge", "ssh-ed25519 public-key")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            WebAuthError::Remote {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                ..
+            }
+        ));
     }
 
     #[test]
