@@ -60,7 +60,7 @@ test("proxies arbitrary credentials and bodies and overrides authorization", asy
       method: "POST",
       headers: { authorization: "Bearer client-anything", "content-type": "application/json" },
       body: JSON.stringify({
-        model: "deepseek-v4-flash",
+        model: "deepseek-v4.1-flash",
         custom: { value: 42 },
         stream: false,
       }),
@@ -70,7 +70,7 @@ test("proxies arbitrary credentials and bodies and overrides authorization", asy
     assert.equal(received.url, "/tester/cnb-ai-bridge/-/ai/chat/completions?trace=1");
     assert.equal(received.headers.authorization, "Bearer test-token");
     assert.deepEqual(JSON.parse(received.body), {
-      model: "deepseek-v4-flash",
+      model: "deepseek-v4.1-flash",
       custom: { value: 42 },
       stream: false,
     });
@@ -121,7 +121,7 @@ test("only exposes health and chat completion routes", async () => {
     const chatMethod = await fetch(`http://127.0.0.1:${port}/chat/completions`);
     assert.equal(chatMethod.status, 405);
 
-    for (const path of ["/models", "/models/deepseek-v4-flash", "/v1/chat/completions", "/"]) {
+    for (const path of ["/models", "/models/deepseek-v4.1-flash", "/v1/chat/completions", "/"]) {
       const response = await fetch(`http://127.0.0.1:${port}${path}`);
       assert.equal(response.status, 404, path);
     }

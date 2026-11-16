@@ -474,6 +474,10 @@ impl Bridge {
         Ok(key)
     }
 
+    pub(crate) fn logger_handle(&self) -> Arc<Logger> {
+        Arc::clone(&self.logger)
+    }
+
     /// Regenerates the dedicated key pair.
     pub async fn regenerate_ssh_key(&self) -> Result<String, String> {
         let key = self.keys.regenerate()?;

@@ -7,8 +7,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const MISSING_TOOL_OUTPUT: &str =
     "Tool output was missing from conversation history and has been replaced by the proxy.";
-const BRAND_REPLACEMENTS: [&str; 2] = ["DeepSeek Harness", "Codex"];
-const BRAND_REPLACEMENT: &str = "WorkBuddy";
 
 /// Tool declarations and their Responses-only shapes for one request.
 #[derive(Default, Clone)]
@@ -125,97 +123,7 @@ pub fn responses_to_chat(request: &Value, want_stream: bool) -> Result<Value, St
     if let Some(choice) = translate_tool_choice(request.get("tool_choice")) {
         chat["tool_choice"] = choice;
     }
-    rewrite_system_prompt_brands(&mut chat);
     Ok(chat)
-}
-
-/// Rewrites brand terms in system/developer messages while preserving other roles.
-pub(crate) fn rewrite_system_prompt_brands(body: &mut Value) -> bool {
-    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
-        return false;
-    };
-    let mut changed = false;
-    for message in messages {
-        let Some(role) = message.get("role").and_then(Value::as_str) else {
-            continue;
-        };
-        if !role.eq_ignore_ascii_case("system") && !role.eq_ignore_ascii_case("developer") {
-            continue;
-        }
-        let Some(content) = message.get_mut("content") else {
-            continue;
-        };
-        changed |= rewrite_prompt_content(content);
-    }
-    changed
-}
-
-fn rewrite_prompt_content(content: &mut Value) -> bool {
-    match content {
-        Value::String(text) => {
-            let rewritten = rewrite_brand_text(text);
-            if rewritten == *text {
-                false
-            } else {
-                *text = rewritten;
-                true
-            }
-        }
-        Value::Array(parts) => {
-            let mut changed = false;
-            for part in parts {
-                changed |= rewrite_prompt_content(part);
-            }
-            changed
-        }
-        Value::Object(object) => {
-            let mut changed = false;
-            if let Some(text) = object.get_mut("text") {
-                changed |= rewrite_prompt_content(text);
-            }
-            if let Some(content) = object.get_mut("content") {
-                changed |= rewrite_prompt_content(content);
-            }
-            changed
-        }
-        _ => false,
-    }
-}
-
-fn rewrite_brand_text(text: &str) -> String {
-    BRAND_REPLACEMENTS
-        .into_iter()
-        .fold(text.to_string(), |value, term| {
-            replace_at_ascii_letter_boundaries(&value, term, BRAND_REPLACEMENT)
-        })
-}
-
-fn replace_at_ascii_letter_boundaries(text: &str, needle: &str, replacement: &str) -> String {
-    let haystack = text.to_ascii_lowercase();
-    let needle = needle.to_ascii_lowercase();
-    let bytes = haystack.as_bytes();
-    let mut result = String::with_capacity(text.len());
-    let mut copied = 0;
-    let mut search = 0;
-    while search < haystack.len() {
-        let Some(offset) = haystack[search..].find(&needle) else {
-            break;
-        };
-        let start = search + offset;
-        let end = start + needle.len();
-        let boundary_before = start == 0 || !bytes[start - 1].is_ascii_alphabetic();
-        let boundary_after = end == bytes.len() || !bytes[end].is_ascii_alphabetic();
-        if boundary_before && boundary_after {
-            result.push_str(&text[copied..start]);
-            result.push_str(replacement);
-            copied = end;
-            search = end;
-        } else {
-            search = start + 1;
-        }
-    }
-    result.push_str(&text[copied..]);
-    result
 }
 
 fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) {
@@ -1271,7 +1179,7 @@ mod tests {
     #[test]
     fn translates_instructions_messages_images_and_tools() {
         let request = json!({
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-v4.1-flash",
             "instructions": "Be concise",
             "input": [{
                 "type": "message",
@@ -1357,7 +1265,7 @@ mod tests {
             }
         });
 
-        let response = chat_to_responses(&chat, "deepseek-v4-flash", &shape).unwrap();
+        let response = chat_to_responses(&chat, "deepseek-v4.1-flash", &shape).unwrap();
         assert_eq!(response["object"], "response");
         assert_eq!(response["output"][0]["content"][0]["text"], "done");
         assert_eq!(response["output"][1]["type"], "function_call");
@@ -1372,7 +1280,7 @@ mod tests {
     #[test]
     fn streams_text_and_terminal_events_in_order() {
         let mut stream =
-            ResponsesStream::new("resp_1".to_string(), "deepseek-v4-flash".to_string());
+            ResponsesStream::new("resp_1".to_string(), "deepseek-v4.1-flash".to_string());
         let mut events = stream.push(&json!({
             "choices": [{
                 "delta": { "content": "hello" },
@@ -1413,7 +1321,7 @@ mod tests {
     #[test]
     fn repairs_missing_tool_outputs_in_history() {
         let request = json!({
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-v4.1-flash",
             "input": [
                 {
                     "type": "function_call",
@@ -1456,87 +1364,5 @@ mod tests {
         assert!(joined.contains("event: response.failed"));
         assert!(!joined.contains("event: response.completed"));
         assert!(joined.contains("malformed_tool_call_arguments"));
-    }
-
-    #[test]
-    fn rewrites_system_brand_terms_only_at_ascii_letter_boundaries() {
-        let mut body = json!({
-            "messages": [{
-                "role": "system",
-                "content": "Codex, codex; CODEX中文 Codex2 (DeepSeek Harness) deepseek HARNESS. codexui opencode CodexBridge myCodex XDeepSeek Harness DeepSeek HarnessY 中文DeepSeek Harness中文 Codex5"
-            }, {
-                "role": "developer",
-                "content": [
-                    { "type": "text", "text": "Codex and Codex" },
-                    { "type": "text", "text": "codexui stays" }
-                ]
-            }, {
-                "role": "user",
-                "content": "Codex stays in user content"
-            }, {
-                "role": "assistant",
-                "content": "Codex stays in assistant content"
-            }, {
-                "role": "tool",
-                "content": "Codex stays in tool content"
-            }]
-        });
-
-        rewrite_system_prompt_brands(&mut body);
-
-        assert_eq!(
-            body["messages"][0]["content"],
-            "WorkBuddy, WorkBuddy; WorkBuddy中文 WorkBuddy2 (WorkBuddy) WorkBuddy. codexui opencode CodexBridge myCodex XDeepSeek Harness DeepSeek HarnessY 中文WorkBuddy中文 WorkBuddy5"
-        );
-        assert_eq!(
-            body["messages"][1]["content"][0]["text"],
-            "WorkBuddy and WorkBuddy"
-        );
-        assert_eq!(body["messages"][1]["content"][1]["text"], "codexui stays");
-        assert_eq!(
-            body["messages"][2]["content"],
-            "Codex stays in user content"
-        );
-        assert_eq!(
-            body["messages"][3]["content"],
-            "Codex stays in assistant content"
-        );
-        assert_eq!(
-            body["messages"][4]["content"],
-            "Codex stays in tool content"
-        );
-    }
-
-    #[test]
-    fn responses_translation_rewrites_instructions_and_system_messages() {
-        let request = json!({
-            "model": "deepseek-v4-flash",
-            "instructions": "Codex assistant for DeepSeek Harness",
-            "input": [{
-                "type": "message",
-                "role": "developer",
-                "content": [{
-                    "type": "input_text",
-                    "text": "Use CODEX with 中文边界"
-                }]
-            }, {
-                "type": "message",
-                "role": "user",
-                "content": "Codex user text"
-            }],
-            "stream": false
-        });
-
-        let chat = responses_to_chat(&request, false).unwrap();
-
-        assert_eq!(
-            chat["messages"][0]["content"],
-            "WorkBuddy assistant for WorkBuddy"
-        );
-        assert_eq!(
-            chat["messages"][1]["content"],
-            "Use WorkBuddy with 中文边界"
-        );
-        assert_eq!(chat["messages"][2]["content"], "Codex user text");
     }
 }

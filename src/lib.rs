@@ -13,6 +13,7 @@ pub mod gateway;
 pub mod http_trace;
 pub mod logging;
 pub mod paths;
+pub mod prompt_gate;
 pub mod responses;
 pub mod settings;
 pub mod ssh_key;

@@ -2,9 +2,9 @@
 
 use crate::bridge::Bridge;
 use crate::http_trace::{HttpTraceSession, HttpTraceStore};
-use crate::responses::{
-    chat_to_responses, responses_to_chat, rewrite_system_prompt_brands, ResponsesStream, ToolShape,
-};
+use crate::logging::Logger;
+use crate::prompt_gate::{apply_headers, detect_gate_block, normalize_chat, GateReport};
+use crate::responses::{chat_to_responses, responses_to_chat, ResponsesStream, ToolShape};
 use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri};
@@ -125,6 +125,7 @@ struct GatewayState {
     client: reqwest::Client,
     upstream_override: Option<u16>,
     trace_store: HttpTraceStore,
+    logger: Arc<Logger>,
 }
 
 /// Handle owning one gateway listener and its monitoring task.
@@ -183,6 +184,7 @@ impl GatewayHandle {
                 .map_err(|error| format!("创建本地 HTTP 客户端失败: {error}"))?,
             upstream_override,
             trace_store: HttpTraceStore::new(trace_root),
+            logger: bridge.logger_handle(),
         };
         let app = router(state);
         let mut shutdown_rx = shutdown.subscribe();
@@ -537,7 +539,7 @@ async fn handle_model(State(state): State<GatewayState>, Path(id): Path<String>)
 async fn handle_chat(
     State(state): State<GatewayState>,
     uri: Uri,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     body: Body,
 ) -> Response<Body> {
     let bytes = match to_bytes(body, BODY_LIMIT).await {
@@ -550,33 +552,39 @@ async fn handle_chat(
             )
         }
     };
-    let bytes = rewrite_chat_request_body(bytes);
+    let (bytes, mut gate_report, normalized) = prepare_chat_request(bytes);
+    if normalized {
+        apply_headers(&mut headers, &mut gate_report);
+    }
     let exchange = match send_chat_request(&state, &headers, &uri, bytes).await {
         Ok(exchange) => exchange,
         Err(response) => return response,
     };
     let trace = begin_upstream_trace(&state, "chat", &exchange);
     let request_id = response_request_id(&trace);
+    log_gate_report(&state, &request_id, &gate_report);
     if !exchange.response.status().is_success() {
-        return upstream_error_response(exchange, trace, &request_id).await;
+        return upstream_error_response(&state, exchange, trace, &request_id, &gate_report).await;
     }
     traced_upstream_response(exchange.response, trace, &request_id)
 }
 
-fn rewrite_chat_request_body(bytes: Bytes) -> Bytes {
+fn prepare_chat_request(bytes: Bytes) -> (Bytes, GateReport, bool) {
     let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) else {
-        return bytes;
+        return (bytes, GateReport::default(), false);
     };
-    if !rewrite_system_prompt_brands(&mut value) {
-        return bytes;
+    let report = normalize_chat(&mut value);
+    if !report.changed() {
+        return (bytes, report, true);
     }
-    serde_json::to_vec(&value).map(Bytes::from).unwrap_or(bytes)
+    let encoded = serde_json::to_vec(&value).map(Bytes::from).unwrap_or(bytes);
+    (encoded, report, true)
 }
 
 async fn handle_responses(
     State(state): State<GatewayState>,
     uri: Uri,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     body: Body,
 ) -> Response<Body> {
     let bytes = match to_bytes(body, BODY_LIMIT).await {
@@ -616,6 +624,8 @@ async fn handle_responses(
     if chat.get("stream_options").is_none() {
         chat["stream_options"] = json!({ "include_usage": true });
     }
+    let mut gate_report = normalize_chat(&mut chat);
+    apply_headers(&mut headers, &mut gate_report);
     let exchange = loop {
         let encoded = match serde_json::to_vec(&chat) {
             Ok(encoded) => Bytes::from(encoded),
@@ -677,15 +687,24 @@ async fn handle_responses(
             },
         );
         let request_id = response_request_id(&trace);
+        log_gate_report(&state, &request_id, &gate_report);
         if let Some(mut trace) = trace {
             trace.write_response_chunk(&body).ok();
             let elapsed = trace.elapsed();
             trace.finish(status.as_u16(), "failed", elapsed).ok();
         }
-        return upstream_error_from_text(status, retry_after, text, &request_id);
+        return upstream_error_from_text(
+            status,
+            retry_after,
+            text,
+            &request_id,
+            &gate_report,
+            &state.logger,
+        );
     };
     let mut trace = begin_upstream_trace(&state, "responses", &exchange);
     let request_id = response_request_id(&trace);
+    log_gate_report(&state, &request_id, &gate_report);
     let status = status_from_reqwest(exchange.response.status());
     let content_type = exchange
         .response
@@ -851,9 +870,11 @@ fn forwarded_request_headers(headers: &HeaderMap, port: u16, content_length: usi
 }
 
 async fn upstream_error_response(
+    state: &GatewayState,
     exchange: UpstreamExchange,
     mut trace: Option<HttpTraceSession>,
     request_id: &str,
+    gate_report: &GateReport,
 ) -> Response<Body> {
     let status = status_from_reqwest(exchange.response.status());
     let retry_after = exchange
@@ -872,6 +893,8 @@ async fn upstream_error_response(
         retry_after,
         String::from_utf8_lossy(&body).into_owned(),
         request_id,
+        gate_report,
+        &state.logger,
     )
 }
 
@@ -880,7 +903,25 @@ fn upstream_error_from_text(
     retry_after: Option<HeaderValue>,
     text: String,
     request_id: &str,
+    gate_report: &GateReport,
+    logger: &Logger,
 ) -> Response<Body> {
+    if let Some(block) = detect_gate_block(&text) {
+        logger.log(
+            "warn",
+            format!(
+                "prompt_gate.miss request_id={request_id};upstream_request_id={};{}",
+                block.upstream_request_id.as_deref().unwrap_or("-"),
+                gate_report.summary()
+            ),
+        );
+        return error_response_with_id(
+            status,
+            "prompt_gate_blocked",
+            block.message,
+            request_id.to_string(),
+        );
+    }
     let message = serde_json::from_str::<Value>(&text)
         .ok()
         .and_then(|value| {
@@ -913,6 +954,20 @@ fn upstream_error_from_text(
             .insert(header::RETRY_AFTER, retry_after);
     }
     response
+}
+
+fn log_gate_report(state: &GatewayState, request_id: &str, report: &GateReport) {
+    if !report.changed() && !report.user_agent_overridden() {
+        return;
+    }
+    state.logger.log(
+        "info",
+        format!(
+            "prompt_gate.applied request_id={request_id};profiles={};{}",
+            report.profile_order().join(","),
+            report.summary()
+        ),
+    );
 }
 
 fn status_from_reqwest(status: reqwest::StatusCode) -> StatusCode {
@@ -1455,18 +1510,39 @@ mod tests {
         assert_eq!(list.status(), reqwest::StatusCode::OK);
         let payload: serde_json::Value = list.json().await.unwrap();
         assert_eq!(payload["object"], "list");
-        assert_eq!(payload["data"].as_array().unwrap().len(), 1);
-        assert_eq!(payload["data"][0]["id"], "deepseek-v4-flash");
+        assert_eq!(payload["data"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["data"][0]["id"], "deepseek-v4.1-flash");
+        assert_eq!(payload["data"][1]["id"], "deepseek-flash");
+        for model in payload["data"].as_array().unwrap() {
+            assert_eq!(model["context_window"], 1_048_576);
+            assert_eq!(model["max_context_window"], 1_048_576);
+            assert_eq!(model["input_modalities"], json!(["text", "image"]));
+            assert_eq!(model["output_modalities"], json!(["text"]));
+            assert_eq!(model["supports_images"], true);
+            assert_eq!(model["supports_tools"], true);
+            assert_eq!(model["supports_streaming"], true);
+            assert_eq!(model["capabilities"]["image_input"], true);
+        }
 
         let detail = client
-            .get(format!("{base}/models/deepseek-v4-flash"))
+            .get(format!("{base}/models/deepseek-v4.1-flash"))
             .send()
             .await
             .unwrap();
         assert_eq!(detail.status(), reqwest::StatusCode::OK);
         assert_eq!(
             detail.json::<serde_json::Value>().await.unwrap()["id"],
-            "deepseek-v4-flash"
+            "deepseek-v4.1-flash"
+        );
+        let deepseek_flash = client
+            .get(format!("{base}/models/deepseek-flash"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(deepseek_flash.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            deepseek_flash.json::<serde_json::Value>().await.unwrap()["id"],
+            "deepseek-flash"
         );
         let missing = client
             .get(format!("{base}/models/other"))
@@ -1493,7 +1569,12 @@ mod tests {
                     let value: Value = serde_json::from_slice(&body).unwrap();
                     *captured.lock().unwrap() =
                         Some((uri.query().unwrap_or_default().to_string(), value.clone()));
-                    if value["messages"][0]["content"] == "hello" {
+                    if value["messages"]
+                        .as_array()
+                        .is_some_and(|messages| messages.iter().any(|message| {
+                            message.get("content").and_then(Value::as_str) == Some("hello")
+                        }))
+                    {
                         (
                             [(header::CONTENT_TYPE, "text/event-stream")],
                             "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\ndata: [DONE]\n\n",
@@ -1539,7 +1620,13 @@ mod tests {
         let response = client
             .post(format!("{base}/responses"))
             .json(&json!({
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-v4.1-flash",
+                "instructions": concat!(
+                    "DeepSeek Harness and Codex. ",
+                    "Tokens prefixed with @ are paths the user explicitly referenced. ",
+                    "Relative paths resolve from the workspace root; ",
+                    "absolute paths identify files or directories on the host."
+                ),
                 "input": "hello",
                 "stream": false
             }))
@@ -1553,7 +1640,16 @@ mod tests {
         assert_eq!(payload["usage"]["input_tokens"], 3);
         let (_, translated) = captured.lock().unwrap().clone().unwrap();
         assert_eq!(translated["stream"], true);
-        assert_eq!(translated["messages"][0]["content"], "hello");
+        assert_eq!(
+            translated["messages"][0]["content"],
+            concat!(
+                "WorkBuddy and WorkBuddy. ",
+                "Paths beginning with @ refer to resources the user explicitly named. ",
+                "Relative paths are resolved from the workspace root; ",
+                "absolute paths refer to host files or directories."
+            )
+        );
+        assert_eq!(translated["messages"][1]["content"], "hello");
 
         gateway.stop().await;
         let store = HttpTraceStore::new(temp.path().join("http-trace"));
@@ -1623,7 +1719,7 @@ mod tests {
         let response = client
             .post(format!("{base}/v1/responses"))
             .json(&json!({
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-v4.1-flash",
                 "input": "stream please",
                 "stream": true
             }))
@@ -1732,7 +1828,7 @@ mod tests {
         let response = reqwest::Client::new()
             .post(format!("http://127.0.0.1:{}/responses", gateway.port()))
             .json(&json!({
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-v4.1-flash",
                 "input": "hello",
                 "stream": false
             }))
@@ -1778,7 +1874,7 @@ mod tests {
                 gateway.port()
             ))
             .json(&json!({
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-v4.1-flash",
                 "messages": [{
                     "role": "system",
                     "content": "Codex via DeepSeek Harness"
@@ -1817,7 +1913,10 @@ mod tests {
     #[test]
     fn non_json_chat_bodies_are_not_reencoded() {
         let body = Bytes::from_static(b"Codex is not JSON");
-        assert_eq!(rewrite_chat_request_body(body.clone()), body);
+        let (prepared, report, normalized) = prepare_chat_request(body.clone());
+        assert_eq!(prepared, body);
+        assert!(!report.changed());
+        assert!(!normalized);
     }
 
     #[tokio::test]
@@ -1848,7 +1947,7 @@ mod tests {
                 gateway.port()
             ))
             .json(&json!({
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-v4.1-flash",
                 "messages": []
             }))
             .send()
@@ -1863,6 +1962,102 @@ mod tests {
         let response_http = std::fs::read_to_string(response_path).unwrap();
         assert!(response_http.contains("retry-after: 17"));
         assert!(response_http.contains(r#"{"error":{"message":"busy"}}"#));
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn prompt_gate_applies_profiles_fixed_ua_and_reports_11128_misses() {
+        let captured = Arc::new(Mutex::new(None::<(HeaderMap, Value)>));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let captured_for_upstream = Arc::clone(&captured);
+        let calls_for_upstream = Arc::clone(&calls);
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(move |headers: HeaderMap, body: Bytes| {
+                let captured = Arc::clone(&captured_for_upstream);
+                let calls = Arc::clone(&calls_for_upstream);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    *captured.lock().unwrap() =
+                        Some((headers, serde_json::from_slice(&body).unwrap()));
+                    (
+                        StatusCode::BAD_REQUEST,
+                        [(header::CONTENT_TYPE, "application/json")],
+                        r#"{"code":11128,"msg":"Illegal API invocation from an unapproved channel","requestId":"upstream-gate-1"}"#,
+                    )
+                        .into_response()
+                }
+            }),
+        );
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+        let (temp, bridge, gateway) = test_gateway_with_upstream(port).await;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{}/chat/completions",
+                gateway.port()
+            ))
+            .header(header::USER_AGENT, "deepseek-harness/0.2.1-rc.5")
+            .json(&json!({
+                "model": "deepseek-v4.1-flash",
+                "messages": [{
+                    "role": "system",
+                    "content": concat!(
+                        "DeepSeek Harness and Codex. ",
+                        "Tokens prefixed with @ are paths the user explicitly referenced. ",
+                        "Relative paths resolve from the workspace root; ",
+                        "absolute paths identify files or directories on the host."
+                    )
+                }, {
+                    "role": "user",
+                    "content": "Codex stays"
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let payload: Value = response.json().await.unwrap();
+        assert_eq!(payload["error"]["code"], "prompt_gate_blocked");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let (headers, body) = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            headers.get(header::USER_AGENT).unwrap(),
+            crate::prompt_gate::WORKBUDDY_USER_AGENT
+        );
+        assert_eq!(
+            body["messages"][0]["content"],
+            concat!(
+                "WorkBuddy and WorkBuddy. ",
+                "Paths beginning with @ refer to resources the user explicitly named. ",
+                "Relative paths are resolved from the workspace root; ",
+                "absolute paths refer to host files or directories."
+            )
+        );
+        assert_eq!(body["messages"][1]["content"], "Codex stays");
+        gateway.stop().await;
+
+        let store = HttpTraceStore::new(temp.path().join("http-trace"));
+        let summary = store.list(1).unwrap().remove(0);
+        let (request_path, _) = store.record_paths(&summary.id).unwrap();
+        let request = std::fs::read_to_string(request_path).unwrap();
+        assert!(request.contains("user-agent: WorkBuddy/0.1.0"));
+        let logs = bridge
+            .logger_handle()
+            .recent(20)
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(logs.contains("prompt_gate.applied"));
+        assert!(logs.contains("harness/path-instructions:1"));
+        assert!(logs.contains("prompt_gate.miss"));
+        assert!(logs.contains("upstream-gate-1"));
+        assert!(!logs.contains("Tokens prefixed with @"));
         upstream_task.abort();
     }
 

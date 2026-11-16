@@ -35,12 +35,25 @@ agent 从云会话继承 `CNB_TOKEN`，只监听 loopback。客户端侧传入�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/healthz` | 本机健康检查，不启动工作空间 |
-| GET | `/models`、`/models/{id}` | 客户端内置模型目录，仅包含 `deepseek-v4-flash` |
-| POST | `/chat/completions` | Chat Completions 透传 |
+| GET | `/models`、`/models/{id}` | 客户端内置模型目录，包含 `deepseek-v4.1-flash` 和 `deepseek-flash` |
+| POST | `/chat/completions` | PromptGate 兼容处理后转发 Chat Completions |
 | POST | `/responses` | Responses 入、Chat 出并回译 |
 | OPTIONS | 已知公开路径 | CORS 预检 |
 
-模型目录通过编译内置的 `resources/models.json` 提供；推理请求仍允许显式传入其它模型 ID。
+模型目录通过编译内置的 `resources/models.json` 提供。两个模型都声明文本/图像输入、流式输出、工具调用、reasoning summary 和 1,048,576 token 上下文；推理请求仍允许显式传入其它模型 ID。
+
+## PromptGate 兼容层
+
+客户端的 Chat/Responses 请求在发往 workspace agent 前会执行编译内置的品牌 profile：
+
+- `harness`：处理 DeepSeek Harness 品牌和已确认会触发上游 `11128` 的 `@` 路径提示句。
+- `codex`：处理 Codex 品牌，并为未来 Codex 专属规则保留独立 profile。
+
+所有 profile 按 `harness`、`codex` 顺序执行，仅修改 system/developer 提示，不修改用户消息、工具参数或模型输出。规则幂等，可安全重复执行。
+
+发往上游的 User-Agent 会统一覆盖为 `WorkBuddy/<客户端版本>`，当前版本为 `WorkBuddy/0.1.0`。Authorization、Cookie、会话头和其他客户端头保持不变。
+
+如果上游仍返回 `11128`，客户端不会自动重试，而是返回稳定的 `prompt_gate_blocked` 错误，并在运行日志记录命中的 profile/rule 和上游 request ID。
 
 ## HTTP 日志
 
