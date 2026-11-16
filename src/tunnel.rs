@@ -2,10 +2,13 @@
 
 use russh::client;
 use russh::keys::{HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
+use std::future::Future;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::time::{timeout, Duration};
+
+use crate::logging::Logger;
 
 /// Official CNB cloud development host key fingerprint.
 pub const CNB_HOST_KEY_FINGERPRINT: &str = "SHA256:fnWZvpqd+VAIRJxaZdV1KVMFfDgcCjYrP2VSWQ68T/E";
@@ -13,6 +16,82 @@ pub const CNB_HOST_KEY_FINGERPRINT: &str = "SHA256:fnWZvpqd+VAIRJxaZdV1KVMFfDgcC
 /// Default loopback port used by the desktop shell and the workspace agent.
 pub const DEFAULT_TUNNEL_PORT: u16 = 11233;
 const SSH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+const SSH_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(500), Duration::from_millis(1500)];
+
+fn tunnel_client_config() -> client::Config {
+    client::Config {
+        nodelay: true,
+        keepalive_interval: Some(Duration::from_secs(30)),
+        keepalive_max: 3,
+        ..client::Config::default()
+    }
+}
+
+fn is_retryable_connect_error(error: &russh::Error) -> bool {
+    matches!(
+        error,
+        russh::Error::IO(_)
+            | russh::Error::HUP
+            | russh::Error::ConnectionTimeout
+            | russh::Error::Disconnect
+    )
+}
+
+struct TunnelAttemptError {
+    message: String,
+    retryable: bool,
+}
+
+impl TunnelAttemptError {
+    fn retryable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: true,
+        }
+    }
+
+    fn fatal(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: false,
+        }
+    }
+}
+
+async fn connect_with_retry<T, F, Fut>(mut attempt: F, logger: Option<&Logger>) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, TunnelAttemptError>>,
+{
+    let max_attempts = SSH_RETRY_DELAYS.len() + 1;
+    for (index, delay) in SSH_RETRY_DELAYS
+        .iter()
+        .copied()
+        .map(Some)
+        .chain([None])
+        .enumerate()
+    {
+        match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(error) if error.retryable && delay.is_some() => {
+                if let Some(logger) = logger {
+                    logger.log(
+                        "warn",
+                        format!(
+                            "SSH 连接尝试 {}/{} 失败，正在重试: {}",
+                            index + 1,
+                            max_attempts,
+                            error.message
+                        ),
+                    );
+                }
+                tokio::time::sleep(delay.unwrap_or_default()).await;
+            }
+            Err(error) => return Err(error.message),
+        }
+    }
+    unreachable!()
+}
 
 struct ClientHandler;
 
@@ -88,18 +167,45 @@ pub async fn start_tunnel(
     private_key_text: &str,
     local_port: u16,
 ) -> Result<TunnelHandle, String> {
+    start_tunnel_with_logger(remote_ssh, private_key_text, local_port, None).await
+}
+
+/// Starts a local forwarding tunnel and records retry attempts in `logger`.
+pub async fn start_tunnel_with_logger(
+    remote_ssh: &str,
+    private_key_text: &str,
+    local_port: u16,
+    logger: Option<&Logger>,
+) -> Result<TunnelHandle, String> {
     let (user, host, port) = parse_remote_ssh(remote_ssh)?;
     let private_key = PrivateKey::from_openssh(private_key_text)
         .map_err(|error| format!("解析专用 SSH 私钥失败: {error}"))?;
 
-    let config = Arc::new(client::Config::default());
-    let mut session = timeout(
-        SSH_HANDSHAKE_TIMEOUT,
-        client::connect(config, (host.as_str(), port), ClientHandler),
+    let mut session = connect_with_retry(
+        || {
+            let config = Arc::new(tunnel_client_config());
+            let host = host.as_str();
+            async move {
+                match timeout(
+                    SSH_HANDSHAKE_TIMEOUT,
+                    client::connect(config, (host, port), ClientHandler),
+                )
+                .await
+                {
+                    Ok(Ok(session)) => Ok(session),
+                    Ok(Err(error)) if is_retryable_connect_error(&error) => Err(
+                        TunnelAttemptError::retryable(format!("连接 CNB SSH 失败: {error}")),
+                    ),
+                    Ok(Err(error)) => Err(TunnelAttemptError::fatal(format!(
+                        "连接 CNB SSH 失败: {error}"
+                    ))),
+                    Err(_) => Err(TunnelAttemptError::retryable("连接 CNB SSH 超时")),
+                }
+            }
+        },
+        logger,
     )
-    .await
-    .map_err(|_| "连接 CNB SSH 超时".to_string())?
-    .map_err(|error| format!("连接 CNB SSH 失败: {error}"))?;
+    .await?;
     let none_auth = timeout(SSH_HANDSHAKE_TIMEOUT, session.authenticate_none(&user))
         .await
         .map_err(|_| "CNB SSH 认证超时".to_string())?
@@ -197,6 +303,8 @@ pub async fn start_tunnel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logging::Logger;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn parses_default_and_explicit_ports() {
@@ -240,5 +348,100 @@ mod tests {
 
         assert_eq!(reason.as_deref(), Some("SSH channel closed"));
         assert!(TcpListener::bind(address).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn retries_a_transient_connection_failure_until_success() {
+        let calls = AtomicUsize::new(0);
+        let logger = Logger::new(8);
+
+        let result = connect_with_retry(
+            || {
+                let attempt = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                async move {
+                    if attempt == 1 {
+                        Err(TunnelAttemptError::retryable(
+                            "连接 CNB SSH 失败: connection reset",
+                        ))
+                    } else {
+                        Ok("connected")
+                    }
+                }
+            },
+            Some(&logger),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, "connected");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let logs = logger.recent(8);
+        assert!(logs.iter().any(|entry| entry.level == "warn"
+            && entry.message.contains("SSH 连接尝试 1/3 失败")
+            && entry.message.contains("connection reset")));
+    }
+
+    #[tokio::test]
+    async fn stops_after_three_transient_failures() {
+        let calls = AtomicUsize::new(0);
+
+        let error = connect_with_retry::<(), _, _>(
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Err(TunnelAttemptError::retryable("connection reset")) }
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(error, "connection reset");
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_fatal_connection_failures() {
+        let calls = AtomicUsize::new(0);
+
+        let error = connect_with_retry::<(), _, _>(
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Err(TunnelAttemptError::fatal("SSH 公钥认证失败")) }
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(error, "SSH 公钥认证失败");
+    }
+
+    #[test]
+    fn client_configures_keepalive_and_low_latency() {
+        let config = tunnel_client_config();
+
+        assert!(config.nodelay);
+        assert_eq!(config.keepalive_interval, Some(Duration::from_secs(30)));
+        assert_eq!(config.keepalive_max, 3);
+    }
+
+    #[test]
+    fn classifies_connection_resets_as_retryable() {
+        let reset = russh::Error::IO(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "remote closed",
+        ));
+
+        assert!(is_retryable_connect_error(&reset));
+        assert!(!is_retryable_connect_error(&russh::Error::UnknownKey));
+        assert!(!is_retryable_connect_error(&russh::Error::WrongServerSig));
+    }
+
+    #[test]
+    fn classifies_windows_remote_disconnect_as_retryable() {
+        let error = russh::Error::IO(std::io::Error::from_raw_os_error(10054));
+
+        assert!(is_retryable_connect_error(&error));
     }
 }

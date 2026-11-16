@@ -6,7 +6,7 @@ use crate::gateway::{GatewayConfig, GatewayHandle};
 use crate::logging::Logger;
 use crate::settings::SettingsStore;
 use crate::ssh_key::SshKeyStore;
-use crate::tunnel::{start_tunnel, TunnelHandle, DEFAULT_TUNNEL_PORT};
+use crate::tunnel::{start_tunnel_with_logger, TunnelHandle, DEFAULT_TUNNEL_PORT};
 use crate::workspace::{RepoProvisionError, RepoProvisioner, WorkspaceManager};
 use serde::Serialize;
 use std::sync::Arc;
@@ -259,7 +259,14 @@ impl Bridge {
             .ok_or_else(|| BridgeError::Other("CNB 未返回 SSH 地址".to_string()))?;
         self.set_state(BridgeState::Connecting).await;
         let private_key = self.keys.private_key_text().map_err(BridgeError::Other)?;
-        let tunnel = match start_tunnel(&remote_ssh, &private_key, 0).await {
+        let tunnel = match start_tunnel_with_logger(
+            &remote_ssh,
+            &private_key,
+            0,
+            Some(&self.logger),
+        )
+        .await
+        {
             Ok(tunnel) => tunnel,
             Err(error) => {
                 self.logger
