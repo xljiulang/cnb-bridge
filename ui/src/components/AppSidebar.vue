@@ -33,7 +33,7 @@ defineProps<{ app: DesktopApp }>();
         :class="{ active: app.tab === 'connect' }"
         @click="app.openConnect"
       >
-        <Cable :size="17" aria-hidden="true" />
+        <Cable :size="16" aria-hidden="true" />
         <span>连接</span>
         <span class="nav-status" :class="{ live: app.ready }" />
       </button>
@@ -42,7 +42,7 @@ defineProps<{ app: DesktopApp }>();
         :class="{ active: app.tab === 'settings' }"
         @click="app.openSettings"
       >
-        <SettingsIcon :size="17" aria-hidden="true" />
+        <SettingsIcon :size="16" aria-hidden="true" />
         <span>设置</span>
       </button>
       <button
@@ -50,7 +50,7 @@ defineProps<{ app: DesktopApp }>();
         :class="{ active: app.tab === 'logs' }"
         @click="app.openLogs"
       >
-        <ScrollText :size="17" aria-hidden="true" />
+        <ScrollText :size="16" aria-hidden="true" />
         <span>日志</span>
       </button>
       <button
@@ -58,7 +58,7 @@ defineProps<{ app: DesktopApp }>();
         :class="{ active: app.tab === 'about' }"
         @click="app.openAbout"
       >
-        <Info :size="17" aria-hidden="true" />
+        <Info :size="16" aria-hidden="true" />
         <span>关于</span>
       </button>
     </nav>
@@ -103,7 +103,9 @@ defineProps<{ app: DesktopApp }>();
           }}
         </small>
       </div>
-      <span class="port-chip">{{ app.snapshot?.settings.localPort ?? 11233 }}</span>
+      <span class="badge mono muted">
+        {{ app.snapshot?.settings.localPort ?? 11233 }}
+      </span>
     </div>
   </aside>
 </template>

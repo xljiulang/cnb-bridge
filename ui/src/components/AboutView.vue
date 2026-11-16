@@ -19,9 +19,11 @@ defineProps<{ app: DesktopApp }>();
       <div class="section-head">
         <div>
           <span class="card-label">应用</span>
-          <h2>应用信息</h2>
+          <h2>
+            <Info :size="16" aria-hidden="true" />
+            应用信息
+          </h2>
         </div>
-        <Info :size="19" aria-hidden="true" />
       </div>
       <dl>
         <div>

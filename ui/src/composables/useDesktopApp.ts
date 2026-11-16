@@ -39,7 +39,6 @@ import type {
   CnbUsageSummary,
   HttpTraceSummary,
   LogEntry,
-  ModelSummary,
   Namespace,
   Settings,
 } from "../types";
@@ -64,7 +63,7 @@ export function useDesktopApp() {
   const namespaces = ref<Namespace[]>([]);
   const logFilter = ref("all");
   const logMode = ref<"runtime" | "http">("runtime");
-  const copiedModelId = ref<string | null>(null);
+  const copiedKey = ref<string | null>(null);
   const usage = ref<CnbUsageSummary | null>(null);
   const usageLoading = ref(false);
   const usageError = ref<string | null>(null);
@@ -78,7 +77,7 @@ export function useDesktopApp() {
   });
   let timer: number | undefined;
   let noticeTimer: number | undefined;
-  let modelCopyTimer: number | undefined;
+  let copyTimer: number | undefined;
   let usageTimer: number | undefined;
   let usageGeneration = 0;
   let unlisten: UnlistenFn | undefined;
@@ -334,24 +333,15 @@ export function useDesktopApp() {
     await run(() => openLogsFolderApi());
   }
 
-  async function copyText(value: string, message: string) {
+  async function copyValue(key: string, value: string) {
     try {
       await navigator.clipboard.writeText(value);
-      showNotice(message);
-    } catch (cause) {
-      error.value = formatError(cause);
-    }
-  }
-
-  async function copyModelId(model: ModelSummary) {
-    try {
-      await navigator.clipboard.writeText(model.id);
       clearNotice();
-      copiedModelId.value = model.id;
-      if (modelCopyTimer) window.clearTimeout(modelCopyTimer);
-      modelCopyTimer = window.setTimeout(() => {
-        copiedModelId.value = null;
-        modelCopyTimer = undefined;
+      copiedKey.value = key;
+      if (copyTimer) window.clearTimeout(copyTimer);
+      copyTimer = window.setTimeout(() => {
+        copiedKey.value = null;
+        copyTimer = undefined;
       }, 2500);
     } catch (cause) {
       error.value = formatError(cause);
@@ -375,9 +365,9 @@ export function useDesktopApp() {
 
   function clearTransientFeedback() {
     clearNotice();
-    if (modelCopyTimer) window.clearTimeout(modelCopyTimer);
-    modelCopyTimer = undefined;
-    copiedModelId.value = null;
+    if (copyTimer) window.clearTimeout(copyTimer);
+    copyTimer = undefined;
+    copiedKey.value = null;
   }
 
   function openConnect() {
@@ -568,7 +558,7 @@ export function useDesktopApp() {
     namespaces,
     logFilter,
     logMode,
-    copiedModelId,
+    copiedKey,
     usage,
     usageLoading,
     usageError,
@@ -607,8 +597,7 @@ export function useDesktopApp() {
     openConnect,
     openAbout,
     save,
-    copyText,
-    copyModelId,
+    copyValue,
     openRepoCreation,
     loadLogs,
     loadHttpTraces,

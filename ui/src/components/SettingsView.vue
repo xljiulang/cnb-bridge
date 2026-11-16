@@ -15,7 +15,7 @@ defineProps<{ app: DesktopApp }>();
 
 <template>
   <section class="page settings-page">
-    <header class="page-head settings-head">
+    <header class="page-head">
       <div class="page-title">
         <p class="eyebrow">SETTINGS</p>
         <h1>设置</h1>
@@ -37,7 +37,7 @@ defineProps<{ app: DesktopApp }>();
         <div class="section-head">
           <div>
             <span class="card-label">仓库</span>
-            <h2 class="settings-section-title">
+            <h2>
               <FolderGit2 :size="16" aria-hidden="true" />
               创建位置
             </h2>
@@ -66,7 +66,7 @@ defineProps<{ app: DesktopApp }>();
         <div class="section-head">
           <div>
             <span class="card-label">日志</span>
-            <h2 class="settings-section-title">
+            <h2>
               <ScrollText :size="16" aria-hidden="true" />
               HTTP 日志
             </h2>
@@ -86,7 +86,7 @@ defineProps<{ app: DesktopApp }>();
         <div class="section-head">
           <div>
             <span class="card-label">连接</span>
-            <h2 class="settings-section-title">
+            <h2>
               <Network :size="16" aria-hidden="true" />
               本机端口
             </h2>
@@ -107,7 +107,7 @@ defineProps<{ app: DesktopApp }>();
         <div class="section-head">
           <div>
             <span class="card-label">桌面</span>
-            <h2 class="settings-section-title">
+            <h2>
               <Power :size="16" aria-hidden="true" />
               启动行为
             </h2>

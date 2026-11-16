@@ -115,7 +115,10 @@ defineProps<{ app: DesktopApp }>();
             <small>{{ trace.startedAt }}</small>
           </span>
           <span class="http-log-protocol">{{ trace.protocol }}</span>
-          <span class="http-log-status" :class="{ failed: trace.status >= 400 }">
+          <span
+            class="badge mono http-log-status"
+            :class="trace.status >= 400 ? 'danger' : 'live'"
+          >
             {{ trace.status }}
           </span>
           <span class="http-log-size">
@@ -125,7 +128,7 @@ defineProps<{ app: DesktopApp }>();
           <span class="http-log-duration">{{ trace.elapsedMs }} ms</span>
           <span
             v-if="trace.requestTruncated || trace.responseTruncated"
-            class="http-log-truncated"
+            class="badge warn http-log-truncated"
           >
             已截断
           </span>

@@ -9,6 +9,7 @@ import {
   KeyRound,
   LoaderCircle,
   LogOut,
+  Network,
   Power,
   RefreshCw,
   ScanQrCode,
@@ -25,16 +26,15 @@ defineProps<{ app: DesktopApp }>();
 
 <template>
   <section class="page">
-    <header class="page-head hero-head">
+    <header class="page-head">
       <div class="page-title">
         <p class="eyebrow">CNB BRIDGE</p>
         <div class="title-row">
           <h1>连接</h1>
           <span
-            class="status-pill"
+            class="badge dot"
             :class="{ live: app.ready, busy: app.bridgeTransitioning || app.creatingOrganization }"
           >
-            <span />
             {{
               app.organizationRequired
                 ? "准备组织"
@@ -53,23 +53,23 @@ defineProps<{ app: DesktopApp }>();
         <button
           v-if="!app.ready"
           type="button"
-          class="primary large"
+          class="primary"
           :disabled="app.busy || app.bridgeTransitioning || !app.accountConnected"
           @click="app.startBridge"
         >
           <LoaderCircle
             v-if="app.bridgeTransitioning"
             class="spin"
-            :size="17"
+            :size="15"
             aria-hidden="true"
           />
-          <Power v-else :size="17" aria-hidden="true" />
+          <Power v-else :size="15" aria-hidden="true" />
           {{ app.mainActionLabel }}
         </button>
         <button
           v-else
           type="button"
-          class="danger large"
+          class="danger"
           :disabled="app.busy"
           @click="app.stopBridge"
         >
@@ -96,7 +96,18 @@ defineProps<{ app: DesktopApp }>();
                 <strong>{{ app.snapshot?.account.username || "尚未绑定" }}</strong>
               </div>
             </div>
-            <span class="pill" :class="app.accountState">
+            <span
+              class="badge"
+              :class="
+                app.accountConnected
+                  ? 'live'
+                  : app.accountState === 'signingIn'
+                    ? 'busy'
+                    : app.accountState === 'failed'
+                      ? 'danger'
+                      : 'muted'
+              "
+            >
               {{
                 app.accountConnected
                   ? app.organizationRequired
@@ -144,7 +155,7 @@ defineProps<{ app: DesktopApp }>();
               >
                 <ScanQrCode
                   :class="{ 'scan-waiting': app.accountState === 'signingIn' }"
-                  :size="17"
+                  :size="15"
                   aria-hidden="true"
                 />
                 {{ app.accountState === "signingIn" ? "等待扫码" : "扫码绑定 CNB" }}
@@ -189,16 +200,18 @@ defineProps<{ app: DesktopApp }>();
         </article>
 
         <template v-if="app.connectionDetailsVisible">
-          <article class="card model-card connect-card">
+          <article class="card connect-card model-card">
             <div class="section-head">
               <div>
                 <span class="card-label">模型目录</span>
-                <h2>可用于 Chat 与 Responses</h2>
+                <h2>
+                  <Cpu :size="16" aria-hidden="true" />
+                  可用于 Chat 与 Responses
+                </h2>
               </div>
-              <div class="section-icon">
-                <Cpu :size="19" aria-hidden="true" />
-                <span>{{ app.snapshot?.models.length ?? 0 }} 个模型</span>
-              </div>
+              <span class="card-meta">
+                {{ app.snapshot?.models.length ?? 0 }} 个模型
+              </span>
             </div>
             <div class="model-list">
               <section
@@ -210,22 +223,26 @@ defineProps<{ app: DesktopApp }>();
                   <div class="model-title">
                     <div class="model-name-row">
                       <code>{{ model.id }}</code>
-                      <span class="model-available">可用</span>
+                      <span class="badge live">可用</span>
                     </div>
                   </div>
                   <button
                     type="button"
-                    class="secondary compact model-copy"
+                    class="secondary compact copy-button"
                     :aria-label="
-                      app.copiedModelId === model.id
+                      app.copiedKey === `model:${model.id}`
                         ? `${model.id} 已复制`
                         : `复制模型 ID ${model.id}`
                     "
-                    @click="app.copyModelId(model)"
+                    @click="app.copyValue(`model:${model.id}`, model.id)"
                   >
-                    <CheckCircle2 v-if="app.copiedModelId === model.id" :size="15" aria-hidden="true" />
+                    <CheckCircle2
+                      v-if="app.copiedKey === `model:${model.id}`"
+                      :size="15"
+                      aria-hidden="true"
+                    />
                     <Copy v-else :size="15" aria-hidden="true" />
-                    {{ app.copiedModelId === model.id ? "已复制" : "复制 ID" }}
+                    {{ app.copiedKey === `model:${model.id}` ? "已复制" : "复制 ID" }}
                   </button>
                 </div>
                 <div class="model-capabilities" aria-label="模型能力">
@@ -242,13 +259,19 @@ defineProps<{ app: DesktopApp }>();
             </div>
           </article>
 
-          <article class="card connect-card endpoint-card" :class="{ live: app.ready }">
+          <article
+            class="card connect-card endpoint-card"
+            :class="{ 'is-live': app.ready }"
+          >
             <div class="section-head">
               <div>
                 <span class="card-label">接入端点</span>
-                <h2>本机 OpenAI 兼容地址</h2>
+                <h2>
+                  <Network :size="16" aria-hidden="true" />
+                  本机 OpenAI 兼容地址
+                </h2>
               </div>
-              <span class="endpoint-state">
+              <span class="badge" :class="app.ready ? 'live' : 'muted'">
                 {{ app.ready ? "监听中" : app.idle ? "按需启动" : "未连接" }}
               </span>
             </div>
@@ -256,11 +279,19 @@ defineProps<{ app: DesktopApp }>();
             <div class="endpoint-meta">
               <button
                 type="button"
-                class="secondary compact"
-                @click="app.copyText(app.baseUrl, 'Base URL 已复制')"
+                class="secondary compact copy-button"
+                :aria-label="
+                  app.copiedKey === 'endpoint' ? `${app.baseUrl} 已复制` : '复制本机端点地址'
+                "
+                @click="app.copyValue('endpoint', app.baseUrl)"
               >
-                <Copy :size="15" aria-hidden="true" />
-                复制地址
+                <CheckCircle2
+                  v-if="app.copiedKey === 'endpoint'"
+                  :size="15"
+                  aria-hidden="true"
+                />
+                <Copy v-else :size="15" aria-hidden="true" />
+                {{ app.copiedKey === "endpoint" ? "已复制" : "复制地址" }}
               </button>
             </div>
           </article>
@@ -269,11 +300,11 @@ defineProps<{ app: DesktopApp }>();
             <div class="section-head">
               <div>
                 <span class="card-label">客户端鉴权</span>
-                <h2>API Key 可任意填写</h2>
+                <h2>
+                  <KeyRound :size="16" aria-hidden="true" />
+                  API Key 可任意填写
+                </h2>
               </div>
-              <span class="icon-tile">
-                <KeyRound :size="17" aria-hidden="true" />
-              </span>
             </div>
             <p>
               网关不校验客户端 API Key，可填写 <code>local</code>、任意占位值或留空。
@@ -289,7 +320,7 @@ defineProps<{ app: DesktopApp }>();
             <span class="card-label">启动链路</span>
             <h2>自动连接状态</h2>
           </div>
-          <span class="muted small">
+          <span class="card-meta">
             端口 {{ app.snapshot?.settings.localPort ?? 11233 }}
           </span>
         </div>

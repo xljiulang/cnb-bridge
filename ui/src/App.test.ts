@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { clearMocks, mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import App from "./App.vue";
@@ -34,40 +34,56 @@ const snapshot = {
   version: "0.1.0",
   logsPath: "logs",
   httpLogsPath: "http-logs",
-  models: [],
+  models: [
+    {
+      id: "deepseek-v4.1-flash",
+      displayName: "DeepSeek V4.1 Flash",
+      description: null,
+      contextWindow: 1048576,
+      inputModalities: ["text", "image"],
+      supportsTools: true,
+      supportsStreaming: true,
+      supportsReasoningSummaries: true,
+    },
+  ],
 };
 
 afterEach(() => {
   clearMocks();
+  vi.useRealTimers();
 });
+
+function mockSnapshotIpc() {
+  mockWindows("main");
+  mockIPC(
+    (command) => {
+      switch (command) {
+        case "get_snapshot":
+          return snapshot;
+        case "get_logs":
+          return [{ time: "2026-11-17 01:00:00", level: "info", message: "ready" }];
+        case "list_http_traces":
+        case "list_namespaces":
+          return [];
+        case "get_cnb_usage":
+          return {
+            namespace: "tester",
+            month: "2026-11",
+            creditsUsedMilli: 0,
+            creditsTotalMilli: 1000,
+            fetchedAt: "2026-11-17T00:00:00Z",
+          };
+        default:
+          return null;
+      }
+    },
+    { shouldMockEvents: true },
+  );
+}
 
 describe("App shell", () => {
   it("switches between all views through the sidebar", async () => {
-    mockWindows("main");
-    mockIPC(
-      (command) => {
-        switch (command) {
-          case "get_snapshot":
-            return snapshot;
-          case "get_logs":
-            return [{ time: "2026-11-17 01:00:00", level: "info", message: "ready" }];
-          case "list_http_traces":
-          case "list_namespaces":
-            return [];
-          case "get_cnb_usage":
-            return {
-              namespace: "tester",
-              month: "2026-11",
-              creditsUsedMilli: 0,
-              creditsTotalMilli: 1000,
-              fetchedAt: "2026-11-17T00:00:00Z",
-            };
-          default:
-            return null;
-        }
-      },
-      { shouldMockEvents: true },
-    );
+    mockSnapshotIpc();
     const wrapper = mount(App);
     await flushPromises();
     expect(wrapper.find(".account-main").text()).toContain("tester");
@@ -83,6 +99,41 @@ describe("App shell", () => {
     await wrapper.findAll("nav button")[3].trigger("click");
     await flushPromises();
     expect(wrapper.find(".details-card").text()).toContain("作者");
+    wrapper.unmount();
+  });
+
+  it("shows in-place copy feedback for both endpoint and model id", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    vi.useFakeTimers();
+    mockSnapshotIpc();
+
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const copyButtons = wrapper.findAll(".copy-button");
+    expect(copyButtons).toHaveLength(2);
+
+    await copyButtons[0].trigger("click");
+    await flushPromises();
+    expect(writeText).toHaveBeenCalledWith("deepseek-v4.1-flash");
+    expect(copyButtons[0].text()).toContain("已复制");
+    expect(wrapper.find(".banner.notice").exists()).toBe(false);
+
+    await copyButtons[1].trigger("click");
+    await flushPromises();
+    expect(writeText).toHaveBeenCalledWith("http://127.0.0.1:11233/v1");
+    expect(copyButtons[1].text()).toContain("已复制");
+    expect(copyButtons[0].text()).toContain("复制 ID");
+    expect(wrapper.find(".banner.notice").exists()).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(2500);
+    await flushPromises();
+    expect(copyButtons[1].text()).toContain("复制地址");
+
     wrapper.unmount();
   });
 });
