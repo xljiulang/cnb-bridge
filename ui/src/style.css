@@ -624,6 +624,33 @@ small {
   line-height: 1.6;
 }
 
+.account-usage {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 9px;
+  margin: 13px 0 0 53px;
+}
+
+.account-usage span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.account-usage strong {
+  overflow: hidden;
+  color: #cce9ff;
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-usage.unavailable strong {
+  color: var(--muted);
+}
+
 .account-actions {
   display: flex;
   align-items: center;
@@ -1504,7 +1531,8 @@ code {
     min-height: 0;
   }
 
-  .account-intro {
+  .account-intro,
+  .account-usage {
     margin-left: 0;
   }
 

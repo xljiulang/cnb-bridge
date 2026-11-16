@@ -59,6 +59,14 @@ export interface ModelSummary {
   supportsReasoningSummaries: boolean;
 }
 
+export interface CnbUsageSummary {
+  namespace: string;
+  month: string;
+  creditsUsedMilli: number;
+  creditsTotalMilli: number;
+  fetchedAt: string;
+}
+
 export interface AppSnapshot {
   account: AccountStatus;
   bridge: BridgeSnapshot;

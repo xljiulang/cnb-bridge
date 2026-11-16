@@ -73,6 +73,18 @@ export function formatInputModalities(modalities: string[]): string {
   return modalities.map((modality) => labels[modality] ?? modality).join(" / ");
 }
 
+export function formatCreditsUsage(usedMilli: number, totalMilli: number): string {
+  if (!Number.isFinite(usedMilli) || !Number.isFinite(totalMilli) || totalMilli <= 0) {
+    return "-- / --";
+  }
+  const used = Math.max(0, usedMilli) / 1000;
+  const total = totalMilli / 1000;
+  const percent = ((used / total) * 100)
+    .toFixed(1)
+    .replace(/\.0$/, "");
+  return `${used} / ${total} Credits (${percent}%)`;
+}
+
 export function validatePort(value: number): string | null {
   if (!Number.isInteger(value) || value < 1 || value > 65535) {
     return "端口必须是 1–65535 之间的整数";

@@ -60,6 +60,7 @@ pub fn run() {
             commands::start_bridge,
             commands::stop_bridge,
             commands::list_namespaces,
+            commands::get_cnb_usage,
             commands::open_external,
             commands::open_logs_folder,
             commands::get_logs,

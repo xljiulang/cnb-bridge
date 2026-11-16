@@ -3,6 +3,7 @@ import {
   bridgeLabel,
   formatError,
   formatContextWindow,
+  formatCreditsUsage,
   formatInputModalities,
   isBridgeTransitioning,
   settingsEqual,
@@ -81,5 +82,11 @@ describe("format helpers", () => {
     expect(settingsEqual({ ...savedSettings, localPort: 12000 }, savedSettings)).toBe(false);
     expect(settingsEqual({ ...savedSettings, minimizeToTray: false }, savedSettings)).toBe(false);
     expect(settingsEqual({ ...savedSettings, launchAtLogin: true }, savedSettings)).toBe(false);
+  });
+
+  it("formats total AI Credit usage and ignores surplus percentage", () => {
+    expect(formatCreditsUsage(22_540, 1_166_000)).toBe("22.54 / 1166 Credits (1.9%)");
+    expect(formatCreditsUsage(1_500, 1_000)).toBe("1.5 / 1 Credits (150%)");
+    expect(formatCreditsUsage(0, 0)).toBe("-- / --");
   });
 });

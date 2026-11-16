@@ -1,5 +1,5 @@
 use cnb_bridge::account::AccountStatus;
-use cnb_bridge::api::Namespace;
+use cnb_bridge::api::{ApiError, CnbApi, CnbUsageSummary, Namespace};
 use cnb_bridge::http_trace::{HttpTraceStore, HttpTraceSummary};
 use cnb_bridge::logging::LogEntry;
 use cnb_bridge::settings::Settings;
@@ -111,6 +111,37 @@ pub async fn list_namespaces(
         .list_namespaces()
         .await
         .map_err(|error| CommandError::new("namespaces_load_failed", error.to_string()))
+}
+
+/// Returns current-month AI Credits usage without activating the workspace.
+#[tauri::command]
+pub async fn get_cnb_usage(
+    state: State<'_, DesktopState>,
+) -> Result<CnbUsageSummary, CommandError> {
+    let token = state.account.access_token().await.map_err(|error| {
+        CommandError::new(
+            "usage_account_required",
+            format!("读取用量前请先登录 CNB: {error}"),
+        )
+    })?;
+    let repo_namespace = state.settings().repo_namespace;
+    let preferred = (!repo_namespace.trim().is_empty()).then_some(repo_namespace.as_str());
+    CnbApi::new()
+        .usage_summary(&token, preferred)
+        .await
+        .map_err(map_usage_error)
+}
+
+fn map_usage_error(error: ApiError) -> CommandError {
+    match &error {
+        ApiError::Remote { status, .. } if status.as_u16() == 401 => {
+            CommandError::new("usage_account_required", "CNB 登录凭据已失效，请重新登录")
+        }
+        ApiError::Remote { status, .. } if status.as_u16() == 403 => {
+            CommandError::new("usage_forbidden", "当前 CNB 账号无权读取组织用量")
+        }
+        _ => CommandError::new("usage_load_failed", format!("读取 CNB 用量失败: {error}")),
+    }
 }
 
 #[tauri::command]

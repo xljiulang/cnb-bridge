@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AccountStatus,
   AppSnapshot,
+  CnbUsageSummary,
   HttpTraceSummary,
   LogEntry,
   Namespace,
@@ -24,6 +25,8 @@ export const startBridge = () => invoke<AppSnapshot>("start_bridge");
 export const stopBridge = () => invoke<AppSnapshot>("stop_bridge");
 
 export const listNamespaces = () => invoke<Namespace[]>("list_namespaces");
+
+export const getCnbUsage = () => invoke<CnbUsageSummary>("get_cnb_usage");
 
 export const openExternal = (url: string) =>
   invoke<void>("open_external", { url });

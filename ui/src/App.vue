@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   Activity,
@@ -34,6 +34,7 @@ import {
 } from "@lucide/vue";
 import {
   cancelLogin,
+  getCnbUsage,
   getLogs,
   getSnapshot,
   listHttpTraces,
@@ -52,6 +53,7 @@ import {
   bridgeLabel,
   formatError,
   formatContextWindow,
+  formatCreditsUsage,
   formatInputModalities,
   isBridgeTransitioning,
   settingsEqual,
@@ -60,6 +62,7 @@ import {
 } from "./format";
 import type {
   AppSnapshot,
+  CnbUsageSummary,
   HttpTraceSummary,
   LogEntry,
   ModelSummary,
@@ -87,6 +90,9 @@ const namespaces = ref<Namespace[]>([]);
 const logFilter = ref("all");
 const logMode = ref<"runtime" | "http">("runtime");
 const copiedModelId = ref<string | null>(null);
+const usage = ref<CnbUsageSummary | null>(null);
+const usageLoading = ref(false);
+const usageError = ref<string | null>(null);
 const settingsDraft = reactive<Settings>({
   repoNamespace: "",
   repoName: "cnb-ai-bridge",
@@ -97,6 +103,8 @@ const settingsDraft = reactive<Settings>({
 let timer: number | undefined;
 let noticeTimer: number | undefined;
 let modelCopyTimer: number | undefined;
+let usageTimer: number | undefined;
+let usageGeneration = 0;
 let unlisten: UnlistenFn | undefined;
 
 const GITHUB_PROJECT_URL = "https://github.com/xljiulang/cyarp-cnb";
@@ -132,6 +140,16 @@ const filteredLogs = computed(() =>
     ? logs.value
     : logs.value.filter((entry) => entry.level === logFilter.value),
 );
+const creditsUsageLabel = computed(() => {
+  if (usage.value) {
+    return formatCreditsUsage(
+      usage.value.creditsUsedMilli,
+      usage.value.creditsTotalMilli,
+    );
+  }
+  if (usageError.value) return "用量暂不可用";
+  return usageLoading.value ? "正在获取…" : "-- / --";
+});
 const statusDescription = computed(() => {
   if (ready.value) return "本机 OpenAI 兼容端点已就绪，可以直接连接你的 AI 客户端。";
   if (repoCreationNeeded.value) {
@@ -228,6 +246,23 @@ async function refresh() {
   }
 }
 
+async function loadUsage() {
+  if (accountState.value !== "connected" || usageLoading.value) return;
+  const generation = ++usageGeneration;
+  usageLoading.value = true;
+  try {
+    const next = await getCnbUsage();
+    if (generation !== usageGeneration || accountState.value !== "connected") return;
+    usage.value = next;
+    usageError.value = null;
+  } catch (cause) {
+    if (generation !== usageGeneration || accountState.value !== "connected") return;
+    usageError.value = formatError(cause);
+  } finally {
+    if (generation === usageGeneration) usageLoading.value = false;
+  }
+}
+
 function applySettingsDraft(settings: Settings) {
   settingsDraft.repoNamespace = settings.repoNamespace;
   settingsDraft.repoName = settings.repoName;
@@ -313,6 +348,12 @@ function openConnect() {
 function openAbout() {
   clearTransientFeedback();
   tab.value = "about";
+}
+
+function handleVisibilityChange() {
+  if (document.visibilityState === "visible" && accountState.value === "connected") {
+    void loadUsage();
+  }
 }
 
 async function loadNamespaces() {
@@ -413,6 +454,7 @@ async function openAboutResource(url: string) {
 
 onMounted(async () => {
   await refresh();
+  if (accountState.value === "connected") void loadUsage();
   await Promise.all([loadLogs(), loadHttpTraces()]);
   timer = window.setInterval(() => {
     void refresh();
@@ -421,6 +463,10 @@ onMounted(async () => {
       else void loadHttpTraces();
     }
   }, 1500);
+  usageTimer = window.setInterval(() => {
+    if (accountState.value === "connected") void loadUsage();
+  }, 60_000);
+  document.addEventListener("visibilitychange", handleVisibilityChange);
   unlisten = await listen("cnb-bridge://snapshot", () => {
     void refresh();
   });
@@ -428,8 +474,21 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (timer) window.clearInterval(timer);
+  if (usageTimer) window.clearInterval(usageTimer);
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
   clearTransientFeedback();
   unlisten?.();
+});
+
+watch(accountState, (state) => {
+  if (state === "connected") {
+    void loadUsage();
+  } else {
+    usageGeneration += 1;
+    usage.value = null;
+    usageError.value = null;
+    usageLoading.value = false;
+  }
 });
 </script>
 
@@ -611,9 +670,16 @@ onBeforeUnmount(() => {
               <p v-if="!connectionDetailsVisible" class="account-intro">
                 扫码完成 CNB 授权后，即可查看模型、本机接入地址并启动桥接。
               </p>
-              <p v-else class="account-intro">
-                登录态用于 CNB 工作空间与 Agent 鉴权。
-              </p>
+              <div
+                v-else
+                class="account-usage"
+                :class="{ unavailable: !usage || usageError }"
+                :title="usageError ?? undefined"
+                aria-live="polite"
+              >
+                <span>AI Credits</span>
+                <strong>{{ creditsUsageLabel }}</strong>
+              </div>
               <div class="account-actions">
                 <button
                   v-if="!connectionDetailsVisible"

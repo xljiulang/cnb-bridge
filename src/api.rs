@@ -96,6 +96,35 @@ pub struct WorkspaceDetail {
     pub jump_url: Option<String>,
 }
 
+/// AI Credits summary for one CNB organization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CnbUsageSummary {
+    pub namespace: String,
+    pub month: String,
+    pub credits_used_milli: i64,
+    pub credits_total_milli: i64,
+    pub fetched_at: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct QuotaItem {
+    #[serde(default)]
+    total: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UsageQuota {
+    #[serde(default)]
+    credit_in_milli: QuotaItem,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UsageVolume {
+    #[serde(default)]
+    credit_in_milli: i64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct FileContent {
     #[serde(default)]
@@ -152,6 +181,43 @@ impl CnbApi {
                     && !namespace.path.trim().is_empty()
             })
             .collect())
+    }
+
+    /// Returns the current month total AI Credits quota and usage.
+    ///
+    /// This is a control-plane request and never starts a workspace.
+    pub async fn usage_summary(
+        &self,
+        token: &str,
+        preferred_namespace: Option<&str>,
+    ) -> Result<CnbUsageSummary, ApiError> {
+        let namespaces = self.list_owned_namespaces(token).await?;
+        let namespace = preferred_namespace
+            .filter(|preferred| {
+                namespaces
+                    .iter()
+                    .any(|namespace| namespace.path == *preferred)
+            })
+            .map(str::to_string)
+            .or_else(|| namespaces.first().map(|namespace| namespace.path.clone()))
+            .ok_or_else(|| {
+                ApiError::InvalidResponse("当前账号没有可读取用量的 Owner 组织".to_string())
+            })?;
+        let quota_path = format!("/{namespace}/-/charge/quota");
+        let volume_path = format!("/{namespace}/-/charge/volume");
+        let (quota, volume) = tokio::join!(
+            self.send_json::<UsageQuota, ()>(Method::GET, &quota_path, token, None),
+            self.send_json::<UsageVolume, ()>(Method::GET, &volume_path, token, None)
+        );
+        let quota = quota?;
+        let volume = volume?;
+        Ok(CnbUsageSummary {
+            namespace,
+            month: chrono::Local::now().format("%Y-%m").to_string(),
+            credits_used_milli: volume.credit_in_milli,
+            credits_total_milli: quota.credit_in_milli.total,
+            fetched_at: chrono::Utc::now().to_rfc3339(),
+        })
     }
 
     /// Returns whether a file exists on a specific branch.
@@ -485,5 +551,76 @@ mod tests {
             .unwrap();
 
         assert_eq!(result["sn"], "pipeline-1");
+    }
+
+    #[tokio::test]
+    async fn loads_usage_for_preferred_owner_namespace() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/groups"))
+            .and(query_param("page", "1"))
+            .and(query_param("page_size", "100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "name": "first", "path": "first", "access_role": "Owner" },
+                { "name": "preferred", "path": "preferred", "access_role": "Owner" }
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/preferred/-/charge/quota"))
+            .and(header("authorization", "Bearer token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "credit_in_milli": { "total": 1166000, "free": 500000 }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/preferred/-/charge/volume"))
+            .and(header("authorization", "Bearer token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "credit_in_milli": 22540
+            })))
+            .mount(&server)
+            .await;
+        let api = CnbApi::with_base_url(server.uri());
+
+        let usage = api.usage_summary("token", Some("preferred")).await.unwrap();
+
+        assert_eq!(usage.namespace, "preferred");
+        assert_eq!(usage.credits_used_milli, 22540);
+        assert_eq!(usage.credits_total_milli, 1166000);
+    }
+
+    #[tokio::test]
+    async fn loads_usage_for_first_owner_without_preference() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/groups"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "name": "first", "path": "first", "access_role": "Owner" },
+                { "name": "second", "path": "second", "access_role": "Owner" }
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/first/-/charge/quota"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "credit_in_milli": { "total": 500000, "free": 500000 }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/first/-/charge/volume"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "credit_in_milli": 0
+            })))
+            .mount(&server)
+            .await;
+        let api = CnbApi::with_base_url(server.uri());
+
+        let usage = api.usage_summary("token", None).await.unwrap();
+
+        assert_eq!(usage.namespace, "first");
+        assert_eq!(usage.credits_used_milli, 0);
     }
 }
