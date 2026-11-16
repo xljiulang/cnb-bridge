@@ -41,8 +41,8 @@ pub fn launch(app: tauri::AppHandle) -> Result<AccountStatus, String> {
     let url = Url::parse(AUTH_URL).map_err(|error| error.to_string())?;
     if let Err(error) = WebviewWindowBuilder::new(&app, WINDOW_LABEL, WebviewUrl::External(url))
         .title("CNB 扫码绑定")
-        .inner_size(560.0, 780.0)
-        .min_inner_size(420.0, 600.0)
+        .inner_size(680.0, 700.0)
+        .min_inner_size(520.0, 560.0)
         .resizable(true)
         .center()
         .data_directory(paths::auth_webview_dir())
