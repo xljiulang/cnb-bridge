@@ -1,0 +1,22 @@
+{
+  "models": [
+    {
+      "id": "deepseek-v4-flash",
+      "object": "model",
+      "created": 0,
+      "owned_by": "cnb"
+    },
+    {
+      "id": "glm-5.3-flash",
+      "object": "model",
+      "created": 0,
+      "owned_by": "cnb"
+    },
+    {
+      "id": "kimi-k3",
+      "object": "model",
+      "created": 0,
+      "owned_by": "cnb"
+    }
+  ]
+}

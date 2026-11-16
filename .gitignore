@@ -1,51 +1,12 @@
-# 操作系统
-Thumbs.db
-Desktop.ini
-.DS_Store
-
-# JetBrains / IntelliJ（IDEA、PyCharm、WebStorm、GoLand 等）
-.idea/
-*.iml
-
-# Eclipse
-.classpath
-.project
-.settings/
-
-# Visual Studio
-.vs/
-*.user
-*.suo
-*.userosscache
-*.sln.docstates
-*.VC.db
-*.VC.opendb
-
-# VS Code
-.vscode/
-*.code-workspace
-
-# Xcode
-xcuserdata/
-DerivedData/
-*.xcuserstate
-
-# 依赖与构建产物
-node_modules/
-dist/
-build/
-target/
-bin/
-obj/
+/target/
+/src-tauri/target/
+/src-tauri/gen/
+/ui/node_modules/
+/ui/dist/
+/node_modules/
+/installer/output/
+/templates/**/node_modules/
 *.log
-
-# 本仓库：发布产物目录（不入库）
-# artifacts/server/<rid>/ 是服务端单文件产物，artifacts/client/ 是 CNB 仓库的载荷镜像。
-# 这些都由 scripts/publish.ps1 生成；它们的源在 src/CYarpServer 与 src/CYarpClient。
-artifacts/
-*.dbg
-*.pdb
-cyarp-cnb.slnx
-
-# 客户端运行时的日志（cyarp.log 与 logs/log<yyyyMMdd>.txt；本地跑过就会出现）
-src/CYarpClient/logs/
+.DS_Store
+.idea/
+.vscode/

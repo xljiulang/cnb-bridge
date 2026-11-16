@@ -1,0 +1,21 @@
+//! Core library for CNB Bridge.
+//!
+//! The crate intentionally has no UI dependencies. The Tauri shell in
+//! `src-tauri` drives it through explicit commands so the same logic can be
+//! exercised by unit and integration tests.
+
+pub mod account;
+pub mod api;
+pub mod bridge;
+pub mod browser;
+pub mod dpapi;
+pub mod logging;
+pub mod paths;
+pub mod settings;
+pub mod ssh_key;
+pub mod tunnel;
+pub mod workspace;
+
+pub use account::{AccountManager, AccountStatus, Credentials};
+pub use bridge::{Bridge, BridgeSnapshot, BridgeState};
+pub use settings::{Settings, SettingsStore};
