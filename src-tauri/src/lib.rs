@@ -38,17 +38,8 @@ pub fn run() {
                 if window.label() != "main" {
                     return;
                 }
-                let app = window.app_handle();
-                let minimize = app
-                    .try_state::<DesktopState>()
-                    .map(|state| state.settings().minimize_to_tray)
-                    .unwrap_or(true);
                 api.prevent_close();
-                if minimize {
-                    let _ = window.hide();
-                } else {
-                    state::exit_with_shutdown(app.clone());
-                }
+                let _ = window.hide();
             }
         })
         .invoke_handler(tauri::generate_handler![

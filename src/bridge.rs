@@ -497,6 +497,13 @@ impl Bridge {
         Arc::clone(&self.logger)
     }
 
+    pub(crate) fn http_log_filter(&self) -> crate::settings::HttpLogFilter {
+        self.settings
+            .load()
+            .map(|settings| settings.http_log_filter)
+            .unwrap_or_default()
+    }
+
     /// Regenerates the dedicated key pair.
     pub async fn regenerate_ssh_key(&self) -> Result<String, String> {
         let key = self.keys.regenerate()?;
@@ -649,6 +656,29 @@ mod tests {
         bridge.runtime.lock().await.state = Some(BridgeState::Idle);
 
         assert!(!bridge.sleep_tunnel().await);
+    }
+
+    #[test]
+    fn http_log_filter_changes_take_effect_without_restarting_the_gateway() {
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&temp);
+        let store = SettingsStore::new(temp.path().join("settings.json"));
+        store.save(&crate::settings::Settings::default()).unwrap();
+        assert_eq!(
+            bridge.http_log_filter(),
+            crate::settings::HttpLogFilter::Abnormal
+        );
+
+        store
+            .save(&crate::settings::Settings {
+                http_log_filter: crate::settings::HttpLogFilter::All,
+                ..crate::settings::Settings::default()
+            })
+            .unwrap();
+        assert_eq!(
+            bridge.http_log_filter(),
+            crate::settings::HttpLogFilter::All
+        );
     }
 
     #[tokio::test]

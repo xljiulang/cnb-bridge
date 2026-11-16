@@ -61,6 +61,8 @@ agent 从云会话继承 `CNB_TOKEN`，只监听 loopback。客户端侧传入�
 
 客户端只为实际获得上游 HTTP 响应的 Chat/Responses 请求写入 `%AppData%\cnb-bridge\logs\http-trace`：
 
+设置页提供“HTTP 日志”策略：默认“仅异常”，只保留失败、截断、流中断或客户端断开的记录；选择“所有”会保留全部请求。修改后立即对后续请求生效。
+
 - 每个请求生成一对同前缀的 `*.request.http` 和 `*.response.http` 文件，不创建请求目录或 `meta.json`。
 - 请求文件以 `POST /chat/completions... HTTP/1.1` 开始，记录实际发往上游 agent 的请求头与正文。
 - 响应文件以 `HTTP/1.1 <status> <reason>` 开始，记录上游 agent 返回的响应头与正文。
@@ -123,7 +125,7 @@ $env:PATH = "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\C
 5. 客户端启动后只运行本机网关，不会立即启动 CNB 工作空间。
 6. 把任意 OpenAI 兼容客户端的 base URL 指向 `http://127.0.0.1:11233/v1`；首个请求会按需创建或连接工作空间。
 7. 最后一次请求结束 5 分钟后关闭 SSH 隧道，之后由 CNB 默认空闲规则回收工作空间。
-8. 关闭窗口最小化到托盘；托盘“退出客户端”只关闭本地资源，云主机由 CNB 稍后回收。
+8. 关闭窗口固定最小化到托盘；托盘“退出客户端”只关闭本地资源，云主机由 CNB 稍后回收。
 
 ## 配置
 

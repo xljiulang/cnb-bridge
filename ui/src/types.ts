@@ -40,9 +40,11 @@ export interface Settings {
   repoNamespace: string;
   repoName: string;
   localPort: number;
-  minimizeToTray: boolean;
+  httpLogFilter: HttpLogFilter;
   launchAtLogin: boolean;
 }
+
+export type HttpLogFilter = "abnormal" | "all";
 
 export interface Namespace {
   name: string;

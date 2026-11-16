@@ -331,7 +331,12 @@ fn begin_upstream_trace_parts(
 ) -> Option<HttpTraceSession> {
     let mut trace = state
         .trace_store
-        .start_at(parts.protocol, parts.started, parts.started_at)
+        .start_with_filter(
+            parts.protocol,
+            state.bridge.http_log_filter(),
+            parts.started,
+            parts.started_at,
+        )
         .ok()?;
     trace
         .write_request_http(
@@ -1423,7 +1428,16 @@ mod tests {
         ));
         let bridge = Arc::new(Bridge::new(
             account,
-            SettingsStore::new(temp.path().join("settings.json")),
+            {
+                let store = SettingsStore::new(temp.path().join("settings.json"));
+                store
+                    .save(&crate::settings::Settings {
+                        http_log_filter: crate::settings::HttpLogFilter::All,
+                        ..crate::settings::Settings::default()
+                    })
+                    .unwrap();
+                store
+            },
             SshKeyStore::new(
                 temp.path().join("id_ed25519"),
                 temp.path().join("id_ed25519.pub"),
@@ -2119,7 +2133,16 @@ mod tests {
         ));
         let bridge = Arc::new(Bridge::new(
             account,
-            SettingsStore::new(temp.path().join("settings.json")),
+            {
+                let store = SettingsStore::new(temp.path().join("settings.json"));
+                store
+                    .save(&crate::settings::Settings {
+                        http_log_filter: crate::settings::HttpLogFilter::All,
+                        ..crate::settings::Settings::default()
+                    })
+                    .unwrap();
+                store
+            },
             SshKeyStore::new(
                 temp.path().join("id_ed25519"),
                 temp.path().join("id_ed25519.pub"),

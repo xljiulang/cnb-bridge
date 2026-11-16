@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::settings::HttpLogFilter;
+
 /// Per-record and whole-directory retention limits.
 #[derive(Debug, Clone, Copy)]
 pub struct HttpTraceLimits {
@@ -84,13 +86,29 @@ impl HttpTraceStore {
 
     /// Starts one trace pair with the current time.
     pub fn start(&self, protocol: &str) -> Result<HttpTraceSession, String> {
-        self.start_at(protocol, std::time::Instant::now(), SystemTime::now())
+        self.start_with_filter(
+            protocol,
+            HttpLogFilter::All,
+            std::time::Instant::now(),
+            SystemTime::now(),
+        )
     }
 
     /// Starts one trace pair using the upstream attempt start time.
     pub fn start_at(
         &self,
         protocol: &str,
+        started: std::time::Instant,
+        started_at: SystemTime,
+    ) -> Result<HttpTraceSession, String> {
+        self.start_with_filter(protocol, HttpLogFilter::All, started, started_at)
+    }
+
+    /// Starts one trace pair using the configured abnormal/all policy.
+    pub fn start_with_filter(
+        &self,
+        protocol: &str,
+        filter: HttpLogFilter,
         started: std::time::Instant,
         started_at: SystemTime,
     ) -> Result<HttpTraceSession, String> {
@@ -106,6 +124,7 @@ impl HttpTraceStore {
             response_started: false,
             finished: false,
             limits: self.limits,
+            filter,
         })
     }
 
@@ -301,6 +320,17 @@ struct RecordGroup {
     paths: Vec<PathBuf>,
 }
 
+fn remove_file_if_present(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "删除 HTTP 报文文件 {} 失败: {error}",
+            path.display()
+        )),
+    }
+}
+
 fn remove_group(group: &RecordGroup) -> std::io::Result<()> {
     for path in &group.paths {
         if path.is_dir() {
@@ -321,6 +351,7 @@ pub struct HttpTraceSession {
     response_started: bool,
     finished: bool,
     limits: HttpTraceLimits,
+    filter: HttpLogFilter,
 }
 
 impl HttpTraceSession {
@@ -403,7 +434,7 @@ impl HttpTraceSession {
     pub fn finish(
         &mut self,
         status: u16,
-        _result: impl Into<String>,
+        result: impl Into<String>,
         _elapsed: Duration,
     ) -> Result<(), String> {
         if self.finished {
@@ -413,8 +444,29 @@ impl HttpTraceSession {
             let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
             self.write_response_http(code, &HeaderMap::new())?;
         }
+        if self.filter == HttpLogFilter::Abnormal {
+            let result = result.into();
+            let interrupted = matches!(
+                result.as_str(),
+                "stream_error" | "client_disconnected" | "incomplete"
+            );
+            if status < 400 && !interrupted && !self.is_truncated() {
+                remove_file_if_present(&self.request_path)?;
+                remove_file_if_present(&self.response_path)?;
+            }
+        }
         self.finished = true;
         Ok(())
+    }
+
+    fn is_truncated(&self) -> bool {
+        [&self.request_path, &self.response_path]
+            .iter()
+            .any(|path| {
+                fs::metadata(path)
+                    .map(|metadata| metadata.len() >= self.limits.file_bytes)
+                    .unwrap_or(false)
+            })
     }
 }
 
@@ -718,5 +770,112 @@ mod tests {
             .unwrap()
             .iter()
             .any(|summary| summary.id == "trace_legacy"));
+    }
+
+    #[test]
+    fn abnormal_filter_discards_successful_completed_exchange() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HttpTraceStore::new(dir.path());
+        let mut trace = store
+            .start_with_filter(
+                "chat",
+                HttpLogFilter::Abnormal,
+                std::time::Instant::now(),
+                SystemTime::now(),
+            )
+            .unwrap();
+        trace
+            .write_request_http("POST", "/chat/completions", &HeaderMap::new(), b"{}")
+            .unwrap();
+        trace
+            .write_response_http(StatusCode::OK, &HeaderMap::new())
+            .unwrap();
+        trace
+            .finish(200, "completed", std::time::Duration::from_millis(1))
+            .unwrap();
+
+        assert!(store.list(10).unwrap().is_empty());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn abnormal_filter_keeps_errors_and_interrupted_responses() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HttpTraceStore::new(dir.path());
+        for (protocol, status, result) in [
+            ("chat", 503, "failed"),
+            ("responses", 200, "stream_error"),
+            ("responses", 200, "client_disconnected"),
+        ] {
+            let mut trace = store
+                .start_with_filter(
+                    protocol,
+                    HttpLogFilter::Abnormal,
+                    std::time::Instant::now(),
+                    SystemTime::now(),
+                )
+                .unwrap();
+            trace
+                .write_request_http("POST", "/chat/completions", &HeaderMap::new(), b"{}")
+                .unwrap();
+            trace
+                .write_response_http(StatusCode::from_u16(status).unwrap(), &HeaderMap::new())
+                .unwrap();
+            trace
+                .finish(status, result, std::time::Duration::from_millis(1))
+                .unwrap();
+        }
+
+        assert_eq!(store.list(10).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn abnormal_filter_discards_redirects_without_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HttpTraceStore::new(dir.path());
+        let mut trace = store
+            .start_with_filter(
+                "chat",
+                HttpLogFilter::Abnormal,
+                std::time::Instant::now(),
+                SystemTime::now(),
+            )
+            .unwrap();
+        trace
+            .write_request_http("POST", "/chat/completions", &HeaderMap::new(), b"{}")
+            .unwrap();
+        trace
+            .write_response_http(StatusCode::TEMPORARY_REDIRECT, &HeaderMap::new())
+            .unwrap();
+        trace
+            .finish(307, "completed", std::time::Duration::from_millis(1))
+            .unwrap();
+
+        assert!(store.list(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn all_filter_keeps_successful_completed_exchange() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HttpTraceStore::new(dir.path());
+        let mut trace = store
+            .start_with_filter(
+                "chat",
+                HttpLogFilter::All,
+                std::time::Instant::now(),
+                SystemTime::now(),
+            )
+            .unwrap();
+        trace
+            .write_request_http("POST", "/chat/completions", &HeaderMap::new(), b"{}")
+            .unwrap();
+        trace
+            .write_response_http(StatusCode::OK, &HeaderMap::new())
+            .unwrap();
+        trace
+            .finish(200, "completed", std::time::Duration::from_millis(1))
+            .unwrap();
+
+        assert_eq!(store.list(10).unwrap().len(), 1);
     }
 }

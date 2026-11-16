@@ -9,6 +9,15 @@ pub const DEFAULT_REPO_NAME: &str = "cnb-ai-bridge";
 /// Default local port used by both the SSH forward and the workspace agent.
 pub const DEFAULT_LOCAL_PORT: u16 = 11233;
 
+/// Controls which upstream HTTP exchanges are persisted to disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HttpLogFilter {
+    #[default]
+    Abnormal,
+    All,
+}
+
 /// User controlled desktop settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -16,7 +25,7 @@ pub struct Settings {
     pub repo_namespace: String,
     pub repo_name: String,
     pub local_port: u16,
-    pub minimize_to_tray: bool,
+    pub http_log_filter: HttpLogFilter,
     pub launch_at_login: bool,
 }
 
@@ -26,7 +35,7 @@ impl Default for Settings {
             repo_namespace: String::new(),
             repo_name: DEFAULT_REPO_NAME.to_string(),
             local_port: DEFAULT_LOCAL_PORT,
-            minimize_to_tray: true,
+            http_log_filter: HttpLogFilter::Abnormal,
             launch_at_login: false,
         }
     }
@@ -129,9 +138,11 @@ mod tests {
         let settings = Settings::default();
         assert_eq!(settings.repo_name, "cnb-ai-bridge");
         assert_eq!(settings.local_port, 11233);
-        assert!(settings.minimize_to_tray);
+        assert_eq!(settings.http_log_filter, HttpLogFilter::Abnormal);
         let serialized = serde_json::to_value(settings).unwrap();
         assert_eq!(serialized["repoNamespace"], "");
+        assert_eq!(serialized["httpLogFilter"], "abnormal");
+        assert!(serialized.get("minimizeToTray").is_none());
     }
 
     #[test]
@@ -142,7 +153,7 @@ mod tests {
             repo_namespace: "xljiulang".to_string(),
             repo_name: "my-bridge".to_string(),
             local_port: 12000,
-            minimize_to_tray: false,
+            http_log_filter: HttpLogFilter::All,
             launch_at_login: true,
         };
         store.save(&settings).unwrap();
@@ -162,6 +173,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(settings.repo_namespace, "");
+        assert_eq!(settings.http_log_filter, HttpLogFilter::Abnormal);
     }
 
     #[test]

@@ -16,7 +16,7 @@ const savedSettings: Settings = {
   repoNamespace: "owner",
   repoName: "cnb-ai-bridge",
   localPort: 11233,
-  minimizeToTray: true,
+  httpLogFilter: "abnormal",
   launchAtLogin: false,
 };
 
@@ -81,7 +81,7 @@ describe("format helpers", () => {
 
   it("compares numeric ports and desktop switches", () => {
     expect(settingsEqual({ ...savedSettings, localPort: 12000 }, savedSettings)).toBe(false);
-    expect(settingsEqual({ ...savedSettings, minimizeToTray: false }, savedSettings)).toBe(false);
+    expect(settingsEqual({ ...savedSettings, httpLogFilter: "all" }, savedSettings)).toBe(false);
     expect(settingsEqual({ ...savedSettings, launchAtLogin: true }, savedSettings)).toBe(false);
   });
 

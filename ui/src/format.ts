@@ -51,7 +51,7 @@ export function settingsEqual(draft: Settings, persisted: Settings): boolean {
     draft.repoNamespace === persisted.repoNamespace &&
     draft.repoName === persisted.repoName &&
     Number(draft.localPort) === Number(persisted.localPort) &&
-    draft.minimizeToTray === persisted.minimizeToTray &&
+    draft.httpLogFilter === persisted.httpLogFilter &&
     draft.launchAtLogin === persisted.launchAtLogin
   );
 }

@@ -46,6 +46,7 @@ import {
   stopBridge,
 } from "./api";
 import appIcon from "./assets/cnb-favicon.svg";
+import SelectMenu from "./components/SelectMenu.vue";
 import {
   bridgeLabel,
   formatError,
@@ -95,7 +96,7 @@ const settingsDraft = reactive<Settings>({
   repoNamespace: "",
   repoName: "cnb-ai-bridge",
   localPort: 11233,
-  minimizeToTray: true,
+  httpLogFilter: "abnormal",
   launchAtLogin: false,
 });
 let timer: number | undefined;
@@ -150,6 +151,32 @@ const filteredLogs = computed(() =>
     ? logs.value
     : logs.value.filter((entry) => entry.level === logFilter.value),
 );
+const namespaceOptions = computed(() => {
+  const options = [{ value: "", label: "自动选择" }];
+  if (settingsDraft.repoNamespace && !namespaceAvailable.value) {
+    options.push({
+      value: settingsDraft.repoNamespace,
+      label: `${settingsDraft.repoNamespace}（当前配置不可用）`,
+    });
+  }
+  for (const namespace of namespaces.value) {
+    options.push({
+      value: namespace.path,
+      label: `${namespace.name}（${namespace.path}）`,
+    });
+  }
+  return options;
+});
+const logLevelOptions = [
+  { value: "all", label: "全部" },
+  { value: "info", label: "Info" },
+  { value: "warn", label: "Warn" },
+  { value: "error", label: "Error" },
+];
+const httpLogOptions = [
+  { value: "abnormal", label: "仅异常" },
+  { value: "all", label: "所有" },
+];
 const creditsUsageLabel = computed(() => {
   if (usage.value) {
     return formatCreditsUsage(
@@ -282,7 +309,7 @@ function applySettingsDraft(settings: Settings) {
   settingsDraft.repoNamespace = settings.repoNamespace;
   settingsDraft.repoName = settings.repoName;
   settingsDraft.localPort = settings.localPort;
-  settingsDraft.minimizeToTray = settings.minimizeToTray;
+  settingsDraft.httpLogFilter = settings.httpLogFilter;
   settingsDraft.launchAtLogin = settings.launchAtLogin;
 }
 
@@ -973,22 +1000,11 @@ watch(
             <div class="form-grid">
               <label>
                 <span>命名空间</span>
-                <select v-model="settingsDraft.repoNamespace">
-                  <option value="">自动选择</option>
-                  <option
-                    v-if="settingsDraft.repoNamespace && !namespaceAvailable"
-                    :value="settingsDraft.repoNamespace"
-                  >
-                    {{ settingsDraft.repoNamespace }}（当前配置不可用）
-                  </option>
-                  <option
-                    v-for="namespace in namespaces"
-                    :key="namespace.path"
-                    :value="namespace.path"
-                  >
-                    {{ namespace.name }}（{{ namespace.path }}）
-                  </option>
-                </select>
+                <SelectMenu
+                  v-model="settingsDraft.repoNamespace"
+                  :options="namespaceOptions"
+                  aria-label="仓库命名空间"
+                />
                 <small>单组织自动选择；多组织请手动指定。</small>
               </label>
               <label>
@@ -1000,6 +1016,25 @@ watch(
                 <small>默认 cnb-ai-bridge。</small>
               </label>
             </div>
+          </section>
+
+          <section class="form-section divided">
+            <div class="section-head">
+              <div>
+                <span class="card-label">日志</span>
+                <h2>HTTP 日志</h2>
+              </div>
+              <ScrollText :size="19" aria-hidden="true" />
+            </div>
+            <label class="narrow-field">
+              <span>记录策略</span>
+              <SelectMenu
+                v-model="settingsDraft.httpLogFilter"
+                :options="httpLogOptions"
+                aria-label="HTTP 日志记录策略"
+              />
+              <small>仅异常记录失败、截断或中途断开的请求。</small>
+            </label>
           </section>
 
           <section class="form-section divided">
@@ -1030,16 +1065,6 @@ watch(
               </div>
               <Power :size="19" aria-hidden="true" />
             </div>
-            <label class="switch-row">
-              <span>
-                <strong>关闭窗口时最小化到托盘</strong>
-                <small>关闭窗口后继续运行。</small>
-              </span>
-              <input
-                v-model="settingsDraft.minimizeToTray"
-                type="checkbox"
-              />
-            </label>
             <label class="switch-row">
               <span>
                 <strong>登录 Windows 时自动启动</strong>
@@ -1084,19 +1109,18 @@ watch(
                 HTTP 记录
               </button>
             </div>
-            <label
+            <div
               v-if="logMode === 'runtime'"
               class="filter-control"
               title="筛选日志级别"
             >
               <ListFilter :size="15" aria-hidden="true" />
-              <select v-model="logFilter" aria-label="日志级别">
-                <option value="all">全部</option>
-                <option value="info">Info</option>
-                <option value="warn">Warn</option>
-                <option value="error">Error</option>
-              </select>
-            </label>
+              <SelectMenu
+                v-model="logFilter"
+                :options="logLevelOptions"
+                aria-label="日志级别"
+              />
+            </div>
             <button
               type="button"
               class="secondary"
@@ -1135,6 +1159,7 @@ watch(
           <div class="trace-warning">
             <AlertTriangle :size="16" aria-hidden="true" />
             上游报文包含认证头、Cookie、API Key 和完整对话正文，请勿直接分享。
+            当前设置为记录{{ snapshot?.settings.httpLogFilter === "all" ? "所有请求" : "仅异常请求" }}。
           </div>
           <div class="http-log-list">
             <div v-if="httpTraces.length === 0" class="empty-state">
