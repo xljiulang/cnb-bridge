@@ -12,7 +12,7 @@ static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 pub fn setup(app: &mut App) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let exit = MenuItem::with_id(app, "exit", "退出并关闭云主机", true, None::<&str>)?;
+    let exit = MenuItem::with_id(app, "exit", "退出客户端", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &separator, &exit])?;
     let icon = app
         .default_window_icon()

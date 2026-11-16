@@ -6,8 +6,6 @@ $:
         cpus: 1
       services:
         - name: vscode
-          options:
-            keepAliveTimeout: 18h
         - docker
       stages:
         - name: start-cnb-ai-bridge

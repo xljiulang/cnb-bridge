@@ -9,6 +9,7 @@ pub mod api;
 pub mod bridge;
 pub mod browser;
 pub mod dpapi;
+pub mod gateway;
 pub mod logging;
 pub mod paths;
 pub mod settings;

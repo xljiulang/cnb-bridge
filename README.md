@@ -67,9 +67,10 @@ $env:PATH = "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\C
 1. 首次启动点击“扫码绑定 CNB”，客户端 WebView 打开 `https://cnb.cool/?s_url=%2Fprofile%2Ftoken`。
 2. 微信扫码成功后，客户端自动获取个人命名空间、上传专用 Ed25519 公钥并创建永久 PAT。
 3. PAT 通过 DPAPI 加密保存，扫码会话随后清理，后续启动无需再次扫码。
-4. 客户端在可用的 CNB 命名空间中复用或创建私有仓库 `cnb-ai-bridge`，确认模板已推送到 `main` 分支后启动工作空间和 SSH 转发。
-5. 状态变为“桥接就绪”后，把任意 OpenAI 兼容客户端的 base URL 指向 `http://127.0.0.1:11233/v1`。
-6. 关闭窗口最小化到托盘；托盘“退出并关闭云主机”会断开隧道并停止工作空间。
+4. 客户端启动后只运行本机网关，不会立即启动 CNB 工作空间。
+5. 把任意 OpenAI 兼容客户端的 base URL 指向 `http://127.0.0.1:11233/v1`；首个请求会按需创建或连接工作空间。
+6. 最后一次请求结束 60 秒后关闭 SSH 隧道，之后由 CNB 默认空闲规则回收工作空间。
+7. 关闭窗口最小化到托盘；托盘“退出客户端”只关闭本地资源，云主机由 CNB 稍后回收。
 
 ## 配置
 
@@ -83,7 +84,8 @@ $env:PATH = "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\C
 
 - 需要 WebView2 Runtime 承载 Tauri UI 和 CNB 扫码授权页。
 - PAT 与公钥自动化依赖 CNB 网页内部接口，CNB 前端升级后可能需要适配。
-- 云原生开发环境有 18 小时会话上限和凌晨 4–6 点强制回收；客户端会自动重建并重连。
+- 云原生开发环境有 18 小时会话上限和凌晨 4–6 点强制回收；下一次本地请求会自动重新拉活工作空间。
+- 客户端空闲时不轮询 CNB，也不发送 SSH keepalive。
 - v1 单工作空间，不做多环境额度优选。
 
 ## 测试

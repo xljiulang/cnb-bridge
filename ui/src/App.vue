@@ -79,7 +79,7 @@ let unlisten: UnlistenFn | undefined;
 const ready = computed(() => snapshot.value?.bridge.state === "ready");
 const bridgeState = computed(() => snapshot.value?.bridge.state ?? "signedOut");
 const bridgeTransitioning = computed(() => isBridgeTransitioning(bridgeState.value));
-const reconnecting = computed(() => bridgeState.value === "reconnecting");
+const idle = computed(() => bridgeState.value === "idle");
 const repoCreationNeeded = computed(() => bridgeState.value === "needsRepoCreation");
 const accountState = computed(() => snapshot.value?.account.state ?? "signedOut");
 const statusLabel = computed(() =>
@@ -103,8 +103,8 @@ const statusDescription = computed(() => {
   if (repoCreationNeeded.value) {
     return "请先在 CNB 创建私有空仓库，然后返回这里重新检查。";
   }
-  if (reconnecting.value) {
-    return "云主机连接已中断，正在自动恢复工作空间和本机通道。";
+  if (idle.value) {
+    return "本地端点已就绪。收到请求后会按需启动 CNB 云主机。";
   }
   if (bridgeTransitioning.value) return "正在准备仓库、云主机与本机通道，请稍候。";
   if (bridgeState.value === "failed" || bridgeState.value === "needsSshKey") {
@@ -118,6 +118,7 @@ const statusDescription = computed(() => {
 const mainActionLabel = computed(() => {
   if (bridgeTransitioning.value) return "正在启动…";
   if (repoCreationNeeded.value) return "重新检查仓库";
+  if (idle.value) return "立即启动";
   return "启动桥接";
 });
 const pipelineSteps = computed<ConnectionStep[]>(() => {
@@ -126,7 +127,6 @@ const pipelineSteps = computed<ConnectionStep[]>(() => {
   const repoDone = Boolean(snapshot.value?.bridge.repoSlug) && !repoCreationNeeded.value;
   const workspaceDone = ready.value;
   const tunnelActive = bridgeState.value === "connecting";
-  const recovering = reconnecting.value;
   const tone = (done: boolean, current: boolean): StepTone => {
     if (done) return "done";
     if (failed) return "error";
@@ -156,14 +156,17 @@ const pipelineSteps = computed<ConnectionStep[]>(() => {
         workspaceDone,
         Boolean(snapshot.value?.bridge.workspaceSn) ||
           bridgeState.value === "startingWorkspace" ||
-          tunnelActive ||
-          recovering,
+          tunnelActive,
       ),
     },
     {
       label: "本机端点",
-      detail: ready.value ? "端口已监听" : "等待建立通道",
-      tone: tone(ready.value, tunnelActive || recovering),
+      detail: ready.value
+        ? "端口已监听"
+        : idle.value
+          ? "收到请求后建立通道"
+          : "等待建立通道",
+      tone: tone(ready.value, tunnelActive),
     },
   ];
 });
@@ -176,7 +179,7 @@ async function refresh() {
       error.value = next.account.error;
     } else if (
       next.bridge.error &&
-      ["failed", "needsSshKey", "needsRepoCreation", "reconnecting"].includes(
+      ["failed", "needsSshKey", "needsRepoCreation"].includes(
         next.bridge.state,
       )
     ) {
@@ -354,7 +357,7 @@ onBeforeUnmount(() => {
         <span class="status-icon">
           <Activity v-if="ready" :size="16" aria-hidden="true" />
           <LoaderCircle
-            v-else-if="bridgeTransitioning || reconnecting"
+            v-else-if="bridgeTransitioning"
             class="spin"
             :size="16"
             aria-hidden="true"
@@ -409,8 +412,8 @@ onBeforeUnmount(() => {
                 {{
                   ready
                     ? "在线"
-                    : reconnecting
-                      ? "恢复中"
+                    : idle
+                      ? "待命"
                       : bridgeTransitioning
                         ? "处理中"
                         : "待连接"
@@ -421,17 +424,7 @@ onBeforeUnmount(() => {
           </div>
           <div class="head-actions">
             <button
-              v-if="reconnecting"
-              type="button"
-              class="danger large"
-              :disabled="busy"
-              @click="run(stopBridge)"
-            >
-              <Square :size="15" aria-hidden="true" />
-              停止重连
-            </button>
-            <button
-              v-else-if="!ready"
+              v-if="!ready"
               type="button"
               class="primary large"
               :disabled="busy || bridgeTransitioning || accountState !== 'connected'"
@@ -465,18 +458,15 @@ onBeforeUnmount(() => {
               <span class="icon-tile"><Terminal :size="16" aria-hidden="true" /></span>
               <span>本机 OpenAI 端点</span>
               <span class="endpoint-state">
-                {{ ready ? "监听中" : reconnecting ? "恢复中" : "未连接" }}
+                {{ ready ? "监听中" : idle ? "按需启动" : "未连接" }}
               </span>
             </div>
-            <code class="endpoint-url">
-              {{ reconnecting ? "暂不可用" : baseUrl }}
-            </code>
+            <code class="endpoint-url">{{ baseUrl }}</code>
             <div class="endpoint-meta">
               <span>127.0.0.1 · loopback only</span>
               <button
                 type="button"
                 class="secondary compact"
-                :disabled="reconnecting"
                 @click="copyText(baseUrl, 'Base URL 已复制')"
               >
                 <Copy :size="15" aria-hidden="true" />
@@ -660,7 +650,7 @@ onBeforeUnmount(() => {
                 max="65535"
                 @input="settingsDirty = true"
               />
-              <small>修改后需重新启动桥接。</small>
+              <small>修改后需等待当前请求结束。</small>
             </label>
           </section>
 

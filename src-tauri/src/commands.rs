@@ -39,10 +39,21 @@ pub async fn save_settings(
     settings
         .validate()
         .map_err(|message| CommandError::new("invalid_settings", message))?;
-    state
-        .settings_store
-        .save(&settings)
-        .map_err(|message| CommandError::new("settings_save_failed", message))?;
+    let previous = state.settings();
+    let port_changed = previous.local_port != settings.local_port;
+    if port_changed {
+        state
+            .bridge
+            .rebind_gateway(settings.local_port)
+            .await
+            .map_err(|error| CommandError::new("gateway_rebind_failed", error.to_string()))?;
+    }
+    if let Err(message) = state.settings_store.save(&settings) {
+        if port_changed {
+            let _ = state.bridge.rebind_gateway(previous.local_port).await;
+        }
+        return Err(CommandError::new("settings_save_failed", message));
+    }
     let autostart_warning = state::apply_autostart(&app, settings.launch_at_login).err();
     let mut snapshot = state.snapshot().await?;
     if let Some(warning) = autostart_warning {
@@ -66,10 +77,12 @@ pub fn cancel_login(state: State<'_, DesktopState>) -> AccountStatus {
 pub async fn logout(state: State<'_, DesktopState>) -> Result<AccountStatus, CommandError> {
     let _ = state.bridge.stop().await;
     auth_webview::clear_web_data(&state.app);
-    state
+    let status = state
         .account
         .logout()
-        .map_err(|error| CommandError::new("logout_failed", error.to_string()))
+        .map_err(|error| CommandError::new("logout_failed", error.to_string()))?;
+    state.bridge.account_signed_out().await;
+    Ok(status)
 }
 
 #[tauri::command]

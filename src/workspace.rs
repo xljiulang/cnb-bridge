@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 pub const REPO_DESCRIPTION: &str = "CNB Bridge workspace agent";
 
 const TEMPLATE_MARKER: &str = ".cnb-ai-bridge/workspace.json";
+const TEMPLATE_SCHEMA: u64 = 2;
 const DEFAULT_BRANCH: &str = "main";
 const LEGACY_BRANCH: &str = "master";
 
@@ -198,11 +199,19 @@ impl<'a> RepoProvisioner<'a> {
                     });
                 }
                 for branch in bridge_branch_candidates(&branches) {
-                    if self
-                        .api
-                        .file_exists(token, &slug, TEMPLATE_MARKER, branch)
-                        .await?
-                    {
+                    if self.api.file_exists(token, &slug, TEMPLATE_MARKER, branch).await? {
+                        let schema = template_schema(self.api, token, &slug, branch).await?;
+                        if schema < TEMPLATE_SCHEMA {
+                            let remote_url = format!("{}/{slug}", self.remote_base_url);
+                            sync_template_to_existing(
+                                token,
+                                &remote_url,
+                                &slug,
+                                branch,
+                            )
+                            .map_err(RepoProvisionError::Message)?;
+                            confirm_template_branch(self.api, token, &slug, branch).await?;
+                        }
                         return Ok(RepoInfo {
                             slug,
                             branch: branch.to_string(),
@@ -358,6 +367,79 @@ fn push_template_to_remote(
     result.map_err(|error| format!("推送分支 {branch} 失败: {error}"))
 }
 
+fn sync_template_to_existing(
+    token: &str,
+    remote_url: &str,
+    _slug: &str,
+    branch: &str,
+) -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let mut callbacks = credentials_callbacks(token);
+    callbacks.transfer_progress(|_| true);
+    let mut fetch_options = git2::FetchOptions::new();
+    fetch_options.remote_callbacks(callbacks);
+    let mut builder = git2::build::RepoBuilder::new();
+    builder.fetch_options(fetch_options);
+    let repo = builder
+        .clone(remote_url, dir.path())
+        .map_err(|error| format!("拉取现有仓库 {branch} 失败: {error}"))?;
+    let remote_branch = repo
+        .find_reference(&format!("refs/remotes/origin/{branch}"))
+        .map_err(|error| format!("现有仓库缺少分支 {branch}: {error}"))?;
+    let target = remote_branch
+        .target()
+        .ok_or_else(|| format!("现有仓库分支 {branch} 没有目标提交"))?;
+    repo.reference(
+        &format!("refs/heads/{branch}"),
+        target,
+        true,
+        "checkout managed template branch",
+    )
+    .map_err(|error| format!("切换现有仓库分支 {branch} 失败: {error}"))?;
+    repo.set_head(&format!("refs/heads/{branch}"))
+        .map_err(|error| format!("设置现有仓库分支 {branch} 失败: {error}"))?;
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .map_err(|error| format!("检出现有仓库分支 {branch} 失败: {error}"))?;
+    write_template(dir.path())?;
+
+    let mut index = repo.index().map_err(|error| error.to_string())?;
+    index
+        .add_all(["*"], git2::IndexAddOption::DEFAULT, None)
+        .map_err(|error| error.to_string())?;
+    index.write().map_err(|error| error.to_string())?;
+    let tree_id = index.write_tree().map_err(|error| error.to_string())?;
+    let head = repo
+        .head()
+        .and_then(|head| head.peel_to_commit())
+        .map_err(|error| format!("读取现有仓库提交失败: {error}"))?;
+    if head.tree_id() == tree_id {
+        return Ok(());
+    }
+
+    let tree = repo.find_tree(tree_id).map_err(|error| error.to_string())?;
+    let signature =
+        Signature::now("CNB Bridge", "cnb-bridge@localhost").map_err(|e| e.to_string())?;
+    repo.commit(
+        Some("HEAD"),
+        &signature,
+        &signature,
+        "升级 CNB Bridge 工作空间模板",
+        &tree,
+        &[&head],
+    )
+    .map_err(|error| format!("提交模板升级失败: {error}"))?;
+
+    let mut remote = repo
+        .find_remote("origin")
+        .map_err(|error| format!("读取 Git 远端失败: {error}"))?;
+    let mut push = git2::PushOptions::new();
+    push.remote_callbacks(credentials_callbacks(token));
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    remote
+        .push(&[refspec.as_str()], Some(&mut push))
+        .map_err(|error| format!("推送模板升级到 {branch} 失败: {error}"))
+}
+
 async fn push_template_with_retry(
     api: &CnbApi,
     token: &str,
@@ -403,15 +485,30 @@ async fn confirm_template_branch(
             "推送后未找到分支 {branch}"
         )));
     }
-    if !api
-        .file_exists(token, slug, TEMPLATE_MARKER, branch)
-        .await?
-    {
+    let schema = template_schema(api, token, slug, branch).await?;
+    if schema < TEMPLATE_SCHEMA {
         return Err(RepoProvisionError::Message(format!(
-            "分支 {branch} 已存在，但模板标记尚未可见"
+            "分支 {branch} 的模板版本为 {schema}，尚未升级到 {TEMPLATE_SCHEMA}"
         )));
     }
     Ok(())
+}
+
+async fn template_schema(
+    api: &CnbApi,
+    token: &str,
+    slug: &str,
+    branch: &str,
+) -> Result<u64, RepoProvisionError> {
+    let text = api
+        .file_text(token, slug, TEMPLATE_MARKER, branch)
+        .await?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| RepoProvisionError::Message(format!("模板标记不是有效 JSON: {error}")))?;
+    value
+        .get("schema")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| RepoProvisionError::Message("模板标记缺少 schema".to_string()))
 }
 
 fn write_template(dir: &Path) -> Result<(), String> {
@@ -464,6 +561,17 @@ mod tests {
             path: path.to_string(),
             access_role: "Owner".to_string(),
         }
+    }
+
+    fn marker_body(schema: u64) -> serde_json::Value {
+        use base64::Engine as _;
+
+        let content = format!(r#"{{"product":"cnb-ai-bridge","schema":{schema}}}"#);
+        serde_json::json!({
+            "type": "blob",
+            "encoding": "base64",
+            "content": base64::engine::general_purpose::STANDARD.encode(content)
+        })
     }
 
     #[test]
@@ -559,6 +667,13 @@ mod tests {
         );
         assert_eq!(bridge_branch_candidates(&[master]), vec!["master"]);
         assert!(bridge_branch_candidates(&[]).is_empty());
+    }
+
+    #[test]
+    fn managed_template_uses_cnb_default_idle_recycling() {
+        assert!(!CNB_YML.contains("keepAliveTimeout"));
+        let marker: serde_json::Value = serde_json::from_str(WORKSPACE_MARKER).unwrap();
+        assert_eq!(marker["schema"].as_u64(), Some(TEMPLATE_SCHEMA));
     }
 
     #[test]
@@ -701,9 +816,7 @@ mod tests {
             .and(path(
                 "/xljiulang/cnb-ai-bridge/-/git/contents/.cnb-ai-bridge/workspace.json",
             ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "type": "file"
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(2)))
             .mount(&server)
             .await;
         let api = CnbApi::with_base_url(server.uri());
@@ -816,9 +929,7 @@ mod tests {
             .and(path(
                 "/xljiulang/cnb-ai-bridge/-/git/contents/.cnb-ai-bridge/workspace.json",
             ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "type": "file"
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(2)))
             .mount(&server)
             .await;
         let api = CnbApi::with_base_url(server.uri());
@@ -882,9 +993,7 @@ mod tests {
             .and(path(
                 "/xljiulang/cnb-ai-bridge/-/git/contents/.cnb-ai-bridge/workspace.json",
             ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "type": "file"
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(2)))
             .mount(&server)
             .await;
         let api = CnbApi::with_base_url(server.uri());
@@ -1000,9 +1109,7 @@ mod tests {
             .and(path(
                 "/xljiulang/cnb-ai-bridge/-/git/contents/.cnb-ai-bridge/workspace.json",
             ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "type": "file"
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(2)))
             .mount(&server)
             .await;
         let api = CnbApi::with_base_url(server.uri());
@@ -1095,5 +1202,108 @@ mod tests {
             .unwrap();
 
         assert_eq!(session.sn, "ws-running");
+    }
+
+    #[tokio::test]
+    async fn upgrades_managed_template_and_removes_keepalive_override() {
+        let remote_root = tempfile::tempdir().unwrap();
+        let remote_path = remote_root.path().join("xljiulang/cnb-ai-bridge");
+        std::fs::create_dir_all(remote_path.parent().unwrap()).unwrap();
+        Repository::init_bare(&remote_path).unwrap();
+        let seed_dir = tempfile::tempdir().unwrap();
+        let seed = Repository::init(seed_dir.path()).unwrap();
+        write_template(seed_dir.path()).unwrap();
+        std::fs::write(
+            seed_dir.path().join(TEMPLATE_MARKER),
+            r#"{"product":"cnb-ai-bridge","schema":1}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            seed_dir.path().join(".cnb.yml"),
+            "main:\n  push:\n    - services:\n        - name: vscode\n          options:\n            keepAliveTimeout: 18h\n",
+        )
+        .unwrap();
+        let signature = Signature::now("CNB Bridge", "cnb-bridge@localhost").unwrap();
+        let mut index = seed.index().unwrap();
+        index.add_all(["*"], git2::IndexAddOption::DEFAULT, None).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = seed.find_tree(tree_id).unwrap();
+        seed.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "seed old template",
+            &tree,
+            &[],
+        )
+        .unwrap();
+        seed.remote_anonymous(remote_path.to_str().unwrap())
+            .unwrap()
+            .push(&["HEAD:refs/heads/main"], None)
+            .unwrap();
+        Repository::open_bare(&remote_path)
+            .unwrap()
+            .set_head("refs/heads/main")
+            .unwrap();
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/repos"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "name": "cnb-ai-bridge", "path": "xljiulang/cnb-ai-bridge" }
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user/groups"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "name": "xljiulang", "path": "xljiulang", "access_role": "Owner" }
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/xljiulang/cnb-ai-bridge/-/git/branches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "name": "main" }
+            ])))
+            .mount(&server)
+            .await;
+        let marker_reads = Arc::new(AtomicUsize::new(0));
+        let marker_reads_for_response = Arc::clone(&marker_reads);
+        Mock::given(method("GET"))
+            .and(path(
+                "/xljiulang/cnb-ai-bridge/-/git/contents/.cnb-ai-bridge/workspace.json",
+            ))
+            .respond_with(move |_request: &wiremock::Request| {
+                let schema = if marker_reads_for_response.fetch_add(1, Ordering::SeqCst) < 2 {
+                    1
+                } else {
+                    2
+                };
+                ResponseTemplate::new(200).set_body_json(marker_body(schema))
+            })
+            .mount(&server)
+            .await;
+        let api = CnbApi::with_base_url(server.uri());
+        let provisioner =
+            RepoProvisioner::with_remote_base_url(&api, remote_root.path().to_str().unwrap());
+
+        provisioner
+            .ensure("token", "cnb-ai-bridge", "", true)
+            .await
+            .unwrap();
+
+        let remote = Repository::open_bare(&remote_path).unwrap();
+        let head = remote.head().unwrap().peel_to_commit().unwrap();
+        let tree = head.tree().unwrap();
+        let marker = tree.get_path(Path::new(TEMPLATE_MARKER)).unwrap();
+        let marker_blob = remote.find_blob(marker.id()).unwrap();
+        let marker_text = std::str::from_utf8(marker_blob.content()).unwrap();
+        assert!(marker_text.contains(r#""schema": 2"#));
+        let cnb_yml = tree.get_path(Path::new(".cnb.yml")).unwrap();
+        let cnb_yml_blob = remote.find_blob(cnb_yml.id()).unwrap();
+        let yml_text = std::str::from_utf8(cnb_yml_blob.content()).unwrap();
+        assert!(!yml_text.contains("keepAliveTimeout"));
     }
 }

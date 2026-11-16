@@ -96,6 +96,14 @@ pub struct WorkspaceDetail {
     pub jump_url: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct FileContent {
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    encoding: String,
+}
+
 /// Client for the CNB OpenAPI.
 pub struct CnbApi {
     http: Client,
@@ -179,6 +187,32 @@ impl CnbApi {
             code,
             message,
         })
+    }
+
+    /// Returns UTF-8 text from a repository file.
+    pub async fn file_text(
+        &self,
+        token: &str,
+        slug: &str,
+        file_path: &str,
+        reference: &str,
+    ) -> Result<String, ApiError> {
+        use base64::Engine as _;
+
+        let path = format!("/{slug}/-/git/contents/{file_path}?ref={reference}");
+        let content: FileContent = self
+            .send_json(Method::GET, &path, token, None::<&()>)
+            .await?;
+        if content.encoding != "base64" {
+            return Err(ApiError::InvalidResponse(format!(
+                "文件 {file_path} 未返回 base64 内容"
+            )));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(content.content)
+            .map_err(|error| ApiError::InvalidResponse(format!("文件内容解码失败: {error}")))?;
+        String::from_utf8(bytes)
+            .map_err(|error| ApiError::InvalidResponse(format!("文件内容不是 UTF-8: {error}")))
     }
 
     /// Lists branches in a repository.

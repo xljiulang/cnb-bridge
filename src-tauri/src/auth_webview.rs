@@ -94,9 +94,7 @@ pub fn launch(app: tauri::AppHandle) -> Result<AccountStatus, String> {
                                 logger.log("warn", format!("重命名 CNB Bridge 令牌失败: {error}"));
                             }
                         }
-                        if let Err(error) = bridge.start().await {
-                            logger.log("error", format!("扫码成功后启动桥接失败: {error}"));
-                        }
+                        bridge.account_connected().await;
                     }
                     Err(error) => {
                         account.fail_token_login(error.to_string());

@@ -67,11 +67,6 @@ pub fn initialize(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
         SshKeyStore::default_path(),
         Arc::clone(&logger),
     ));
-    let supervisor = Arc::clone(&bridge);
-    tauri::async_runtime::spawn(async move {
-        supervisor.supervise().await;
-    });
-
     app.manage(DesktopState {
         app: app.handle().clone(),
         account: Arc::clone(&account),
@@ -83,20 +78,26 @@ pub fn initialize(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let handle = app.handle().clone();
+    let gateway_bridge = Arc::clone(&bridge);
+    let gateway_port = settings_store_for_gateway(&handle);
     tauri::async_runtime::spawn(async move {
-        let state = handle.state::<DesktopState>();
-        let account_status = state.account.status();
-        if account_status.state == cnb_bridge::account::AccountState::Connected {
-            if let Err(error) = state.bridge.start().await {
+        if let Err(error) = gateway_bridge.start_gateway(gateway_port).await {
+            if let Some(state) = handle.try_state::<DesktopState>() {
                 state
                     .logger
-                    .log("error", format!("自动启动桥接失败: {error}"));
+                    .log("error", format!("本地网关启动失败: {error}"));
             }
-            let _ = handle.emit("cnb-bridge://snapshot", ());
         }
+        let _ = handle.emit("cnb-bridge://snapshot", ());
     });
 
     Ok(())
+}
+
+fn settings_store_for_gateway(app: &AppHandle) -> u16 {
+    app.try_state::<DesktopState>()
+        .map(|state| state.settings().local_port)
+        .unwrap_or(cnb_bridge::settings::DEFAULT_LOCAL_PORT)
 }
 
 /// Applies the Windows auto-start setting.
@@ -114,7 +115,8 @@ pub fn exit_with_shutdown(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         if let Some(state) = app.try_state::<DesktopState>() {
             let _ =
-                tokio::time::timeout(std::time::Duration::from_secs(6), state.bridge.stop()).await;
+                tokio::time::timeout(std::time::Duration::from_secs(6), state.bridge.shutdown_local())
+                    .await;
         }
         tray::exit_now(&app);
     });
