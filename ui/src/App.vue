@@ -635,7 +635,10 @@ watch(accountState, (state) => {
 
         <div class="connect-stack">
           <div class="connect-card-grid">
-            <article class="card account-card connect-card">
+            <article
+              class="card account-card connect-card"
+              :class="{ 'account-card-signed-out': !connectionDetailsVisible }"
+            >
               <div class="account-head">
                 <div class="account-main">
                   <span class="account-avatar" :class="{ scan: !connectionDetailsVisible }">
@@ -662,7 +665,7 @@ watch(accountState, (state) => {
                 </span>
               </div>
               <p v-if="!connectionDetailsVisible" class="account-intro">
-                扫码完成 CNB 授权后，即可查看模型、本机接入地址并启动桥接。
+                扫码完成 CNB 授权后，即可解锁模型、本机接入地址和桥接配置。
               </p>
               <div
                 v-else
