@@ -920,6 +920,43 @@ small {
   overflow: hidden;
 }
 
+.settings-head {
+  margin-bottom: 14px;
+}
+
+.settings-page .form-section {
+  padding: 14px 18px;
+}
+
+.settings-page .section-head h2 {
+  margin-top: 2px;
+}
+
+.settings-page .settings-section-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.settings-page .settings-section-title > svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.settings-page .form-grid {
+  margin-top: 11px;
+}
+
+.settings-page .narrow-field {
+  margin-top: 11px;
+}
+
+.settings-page .switch-row {
+  margin-top: 11px;
+  padding-top: 0;
+  border-top: 0;
+}
+
 .form-section {
   padding: 21px;
 }

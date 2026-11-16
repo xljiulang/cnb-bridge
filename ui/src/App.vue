@@ -970,8 +970,8 @@ watch(
         </div>
       </section>
 
-      <section v-else-if="tab === 'settings'" class="page">
-        <header class="page-head">
+      <section v-else-if="tab === 'settings'" class="page settings-page">
+        <header class="page-head settings-head">
           <div class="page-title">
             <p class="eyebrow">SETTINGS</p>
             <h1>设置</h1>
@@ -993,9 +993,11 @@ watch(
             <div class="section-head">
               <div>
                 <span class="card-label">仓库</span>
-                <h2>创建位置</h2>
+                <h2 class="settings-section-title">
+                  <FolderGit2 :size="16" aria-hidden="true" />
+                  创建位置
+                </h2>
               </div>
-              <FolderGit2 :size="19" aria-hidden="true" />
             </div>
             <div class="form-grid">
               <label>
@@ -1005,7 +1007,6 @@ watch(
                   :options="namespaceOptions"
                   aria-label="仓库命名空间"
                 />
-                <small>单组织自动选择；多组织请手动指定。</small>
               </label>
               <label>
                 <span>仓库名</span>
@@ -1013,7 +1014,6 @@ watch(
                   v-model="settingsDraft.repoName"
                   spellcheck="false"
                 />
-                <small>默认 cnb-ai-bridge。</small>
               </label>
             </div>
           </section>
@@ -1022,9 +1022,11 @@ watch(
             <div class="section-head">
               <div>
                 <span class="card-label">日志</span>
-                <h2>HTTP 日志</h2>
+                <h2 class="settings-section-title">
+                  <ScrollText :size="16" aria-hidden="true" />
+                  HTTP 日志
+                </h2>
               </div>
-              <ScrollText :size="19" aria-hidden="true" />
             </div>
             <label class="narrow-field">
               <span>记录策略</span>
@@ -1033,7 +1035,6 @@ watch(
                 :options="httpLogOptions"
                 aria-label="HTTP 日志记录策略"
               />
-              <small>仅异常记录失败、截断或中途断开的请求。</small>
             </label>
           </section>
 
@@ -1041,9 +1042,11 @@ watch(
             <div class="section-head">
               <div>
                 <span class="card-label">连接</span>
-                <h2>本机端口</h2>
+                <h2 class="settings-section-title">
+                  <Network :size="16" aria-hidden="true" />
+                  本机端口
+                </h2>
               </div>
-              <Network :size="19" aria-hidden="true" />
             </div>
             <label class="narrow-field">
               <span>监听端口</span>
@@ -1053,7 +1056,6 @@ watch(
                 min="1"
                 max="65535"
               />
-              <small>修改后需等待当前请求结束。</small>
             </label>
           </section>
 
@@ -1061,14 +1063,15 @@ watch(
             <div class="section-head">
               <div>
                 <span class="card-label">桌面</span>
-                <h2>启动行为</h2>
+                <h2 class="settings-section-title">
+                  <Power :size="16" aria-hidden="true" />
+                  启动行为
+                </h2>
               </div>
-              <Power :size="19" aria-hidden="true" />
             </div>
             <label class="switch-row">
               <span>
                 <strong>登录 Windows 时自动启动</strong>
-                <small>启动时自动恢复已登录连接。</small>
               </span>
               <input
                 v-model="settingsDraft.launchAtLogin"
