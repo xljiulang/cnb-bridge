@@ -453,7 +453,7 @@ onBeforeUnmount(() => {
         </header>
 
         <div class="overview-grid">
-          <article class="card endpoint-card" :class="{ live: ready }">
+          <article class="card overview-card endpoint-card" :class="{ live: ready }">
             <div class="card-kicker">
               <span class="icon-tile"><Terminal :size="16" aria-hidden="true" /></span>
               <span>本机 OpenAI 端点</span>
@@ -463,7 +463,6 @@ onBeforeUnmount(() => {
             </div>
             <code class="endpoint-url">{{ baseUrl }}</code>
             <div class="endpoint-meta">
-              <span>127.0.0.1 · loopback only</span>
               <button
                 type="button"
                 class="secondary compact"
@@ -475,19 +474,27 @@ onBeforeUnmount(() => {
             </div>
           </article>
 
-          <article class="card account-card">
-            <div class="account-main">
-              <span class="account-avatar">
-                <CircleUserRound :size="23" aria-hidden="true" />
-              </span>
-              <div>
-                <span class="card-label">CNB 账号</span>
-                <strong>{{ snapshot?.account.username || "尚未绑定" }}</strong>
+          <article class="card overview-card account-card">
+            <div class="account-head">
+              <div class="account-main">
+                <span class="account-avatar">
+                  <CircleUserRound :size="23" aria-hidden="true" />
+                </span>
+                <div>
+                  <span class="card-label">CNB 账号</span>
+                  <strong>{{ snapshot?.account.username || "尚未绑定" }}</strong>
+                </div>
               </div>
+              <span class="pill" :class="accountState">
+                {{
+                  accountState === "connected"
+                    ? "已连接"
+                    : accountState === "signingIn"
+                      ? "等待扫码"
+                      : "未登录"
+                }}
+              </span>
             </div>
-            <span class="pill" :class="accountState">
-              {{ accountState === "connected" ? "已连接" : accountState === "signingIn" ? "等待扫码" : "未登录" }}
-            </span>
             <div class="account-actions">
               <button
                 v-if="accountState !== 'connected'"
@@ -508,7 +515,7 @@ onBeforeUnmount(() => {
               <button
                 v-else
                 type="button"
-                class="secondary"
+                class="danger compact"
                 :disabled="busy"
                 @click="run(logout)"
               >

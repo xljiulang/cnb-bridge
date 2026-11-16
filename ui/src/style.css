@@ -490,10 +490,14 @@ small {
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02);
 }
 
-.endpoint-card {
+.overview-card {
   display: flex;
   min-height: 166px;
   flex-direction: column;
+  gap: 16px;
+}
+
+.endpoint-card {
   justify-content: space-between;
   background:
     radial-gradient(480px 180px at 95% 0, rgba(92, 184, 255, 0.1), transparent 68%),
@@ -533,7 +537,7 @@ small {
 
 .endpoint-url {
   display: block;
-  margin: 17px 0 14px;
+  margin: 0;
   color: #d8ecfb;
   font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
   font-size: clamp(15px, 1.8vw, 19px);
@@ -545,17 +549,13 @@ small {
 .endpoint-meta {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  color: var(--muted);
-  font-size: 10px;
+  justify-content: flex-end;
 }
 
-.account-card {
-  display: grid;
-  min-height: 166px;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-content: space-between;
+.account-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
   gap: 16px;
 }
 
@@ -594,10 +594,11 @@ small {
 
 .account-actions {
   display: flex;
-  grid-column: 1 / -1;
-  align-items: flex-end;
+  align-items: center;
+  justify-content: flex-end;
   flex-wrap: wrap;
   gap: 8px;
+  margin-top: auto;
 }
 
 .pill {
