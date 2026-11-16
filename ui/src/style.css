@@ -535,6 +535,7 @@ small {
 
 .account-card-signed-out .account-actions {
   grid-area: actions;
+  justify-content: flex-start;
   margin: 0;
   padding: 0;
 }
@@ -655,7 +656,7 @@ small {
 .account-actions {
   display: flex;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: flex-end;
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 0;
