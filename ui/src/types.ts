@@ -20,6 +20,7 @@ export interface AccountStatus {
   username?: string | null;
   authMethod?: AuthMethod | null;
   error?: string | null;
+  needsOrganization: boolean;
 }
 
 export interface BridgeSnapshot {

@@ -1,6 +1,6 @@
 # CNB Bridge
 
-CNB Bridge 是一个 Windows 本机 AI 桥接客户端：通过 CNB WebView 扫码绑定，自动创建个人访问令牌并配置 SSH 公钥，在当前用户命名空间下创建/复用 `cnb-ai-bridge` 仓库，启动 CNB 云原生开发工作空间，经纯 Rust `russh` 建立 SSH 本地端口转发，把工作空间内的 OpenAI 兼容 agent 暴露到：
+CNB Bridge 是一个 Windows 本机 AI 桥接客户端：通过 CNB WebView 扫码绑定，自动创建个人访问令牌并配置 SSH 公钥。新账号没有可建仓的 Owner 组织时，客户端会使用账号名自动创建一个根组织；随后在该组织下创建/复用 `cnb-ai-bridge` 仓库，启动 CNB 云原生开发工作空间，经纯 Rust `russh` 建立 SSH 本地端口转发，把工作空间内的 OpenAI 兼容 agent 暴露到：
 
 ```
 http://127.0.0.1:11233/v1
@@ -85,6 +85,11 @@ npm --prefix ui run build
 
 # Rust 核心与 Tauri 壳
 cargo test
+
+# 独立 debug 客户端（内嵌已构建的前端资源，不依赖 Vite）
+cargo build -p cnb-bridge-desktop --features custom-protocol
+
+# release 客户端
 cargo build --release -p cnb-bridge-desktop --features custom-protocol
 
 # 安装包（需要 Inno Setup 6.7.3+）
@@ -110,12 +115,13 @@ $env:PATH = "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\C
 ## 运行流程
 
 1. 首次启动点击“扫码绑定 CNB”，客户端 WebView 打开 `https://cnb.cool/?s_url=%2Fprofile%2Ftoken`。
-2. 微信扫码成功后，客户端自动获取个人命名空间、上传专用 Ed25519 公钥并创建永久 PAT。
-3. PAT 通过 DPAPI 加密保存，扫码会话随后清理，后续启动无需再次扫码。
-4. 客户端启动后只运行本机网关，不会立即启动 CNB 工作空间。
-5. 把任意 OpenAI 兼容客户端的 base URL 指向 `http://127.0.0.1:11233/v1`；首个请求会按需创建或连接工作空间。
-6. 最后一次请求结束 5 分钟后关闭 SSH 隧道，之后由 CNB 默认空闲规则回收工作空间。
-7. 关闭窗口最小化到托盘；托盘“退出客户端”只关闭本地资源，云主机由 CNB 稍后回收。
+2. 微信扫码成功后，客户端上传专用 Ed25519 公钥、创建包含组织管理权限的永久 PAT，并检查 Owner 组织。
+3. 若账号没有 Owner 组织，客户端使用账号名自动创建根组织，无需再手动启动一次请求来触发建仓。
+4. PAT 通过 DPAPI 加密保存，扫码会话随后清理，后续启动无需再次扫码。
+5. 客户端启动后只运行本机网关，不会立即启动 CNB 工作空间。
+6. 把任意 OpenAI 兼容客户端的 base URL 指向 `http://127.0.0.1:11233/v1`；首个请求会按需创建或连接工作空间。
+7. 最后一次请求结束 5 分钟后关闭 SSH 隧道，之后由 CNB 默认空闲规则回收工作空间。
+8. 关闭窗口最小化到托盘；托盘“退出客户端”只关闭本地资源，云主机由 CNB 稍后回收。
 
 ## 配置
 

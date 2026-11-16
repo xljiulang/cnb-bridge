@@ -651,6 +651,10 @@ small {
   line-height: 1.6;
 }
 
+.organization-intro {
+  color: var(--muted-strong);
+}
+
 .account-usage {
   display: flex;
   min-width: 0;

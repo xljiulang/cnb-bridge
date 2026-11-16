@@ -1,6 +1,7 @@
 //! Minimal CNB OpenAPI client used by the bridge lifecycle.
 
-use reqwest::{Client, Method, StatusCode};
+pub use reqwest::StatusCode;
+use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -40,6 +41,14 @@ pub struct Namespace {
     pub path: String,
     #[serde(default)]
     pub access_role: String,
+}
+
+/// Request body for creating a top-level CNB organization.
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateGroupRequest<'a> {
+    pub path: &'a str,
+    pub remark: &'a str,
+    pub description: &'a str,
 }
 
 /// A repository entry returned by `/user/repos`.
@@ -181,6 +190,55 @@ impl CnbApi {
                     && !namespace.path.trim().is_empty()
             })
             .collect())
+    }
+
+    /// Creates a root organization and confirms that the account owns it.
+    ///
+    /// A conflict is treated as success only when the refreshed ownership list
+    /// already contains the requested organization path.
+    pub async fn ensure_organization(
+        &self,
+        token: &str,
+        path: &str,
+        remark: &str,
+        description: &str,
+    ) -> Result<Vec<Namespace>, ApiError> {
+        let body = CreateGroupRequest {
+            path,
+            remark,
+            description,
+        };
+        match self
+            .send_json::<serde_json::Value, _>(Method::POST, "/groups", token, Some(&body))
+            .await
+        {
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error,
+                    ApiError::Remote {
+                        status: StatusCode::CONFLICT,
+                        ..
+                    }
+                ) =>
+            {
+                let namespaces = self.list_owned_namespaces(token).await?;
+                if namespaces.iter().any(|namespace| namespace.path == path) {
+                    return Ok(namespaces);
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        }
+
+        let namespaces = self.list_owned_namespaces(token).await?;
+        if namespaces.iter().any(|namespace| namespace.path == path) {
+            Ok(namespaces)
+        } else {
+            Err(ApiError::InvalidResponse(format!(
+                "组织 {path} 已创建，但当前账号尚未获得 Owner 权限"
+            )))
+        }
     }
 
     /// Returns the current month total AI Credits quota and usage.
@@ -622,5 +680,131 @@ mod tests {
 
         assert_eq!(usage.namespace, "first");
         assert_eq!(usage.credits_used_milli, 0);
+    }
+
+    #[tokio::test]
+    async fn creates_organization_and_confirms_owner_access() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/groups"))
+            .and(header("authorization", "Bearer token"))
+            .and(header("content-type", "application/json"))
+            .and(body_json(serde_json::json!({
+                "path": "cnb.new-user",
+                "remark": "CNB Bridge",
+                "description": "CNB Bridge root organization"
+            })))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user/groups"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "name": "cnb.new-user",
+                    "path": "cnb.new-user",
+                    "access_role": "Owner"
+                }
+            ])))
+            .mount(&server)
+            .await;
+        let api = CnbApi::with_base_url(server.uri());
+
+        let namespaces = api
+            .ensure_organization(
+                "token",
+                "cnb.new-user",
+                "CNB Bridge",
+                "CNB Bridge root organization",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(namespaces[0].path, "cnb.new-user");
+    }
+
+    #[tokio::test]
+    async fn treats_existing_organization_conflict_as_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/groups"))
+            .respond_with(ResponseTemplate::new(409))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user/groups"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "name": "cnb.new-user",
+                    "path": "cnb.new-user",
+                    "access_role": "Owner"
+                }
+            ])))
+            .mount(&server)
+            .await;
+        let api = CnbApi::with_base_url(server.uri());
+
+        let namespaces = api
+            .ensure_organization("token", "cnb.new-user", "", "")
+            .await
+            .unwrap();
+
+        assert_eq!(namespaces.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn preserves_organization_create_forbidden_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/groups"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "errcode": 10,
+                "errmsg": "missing group-manage:rw"
+            })))
+            .mount(&server)
+            .await;
+        let api = CnbApi::with_base_url(server.uri());
+
+        let error = api
+            .ensure_organization("token", "cnb.new-user", "", "")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ApiError::Remote {
+                status: reqwest::StatusCode::FORBIDDEN,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn keeps_conflict_when_existing_group_is_not_owned() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/groups"))
+            .respond_with(ResponseTemplate::new(409))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user/groups"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        let api = CnbApi::with_base_url(server.uri());
+
+        let error = api
+            .ensure_organization("token", "cnb.new-user", "", "")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ApiError::Remote {
+                status: reqwest::StatusCode::CONFLICT,
+                ..
+            }
+        ));
     }
 }

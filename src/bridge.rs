@@ -69,6 +69,7 @@ pub struct Bridge {
     logger: Arc<Logger>,
     runtime: Mutex<Runtime>,
     transition: Mutex<()>,
+    organization_transition: Mutex<()>,
     gateway: Mutex<Option<GatewayHandle>>,
 }
 
@@ -102,6 +103,7 @@ impl Bridge {
             logger,
             runtime: Mutex::new(Runtime::default()),
             transition: Mutex::new(()),
+            organization_transition: Mutex::new(()),
             gateway: Mutex::new(None),
         }
     }
@@ -172,6 +174,16 @@ impl Bridge {
             }
         };
         self.runtime.lock().await.username = Some(user.username.clone());
+        let organization_result = {
+            let _organization_transition = self.organization_transition.lock().await;
+            self.ensure_organization_for(&token, &user.username).await
+        };
+        if let Err(error) = organization_result {
+            self.logger
+                .log("error", format!("CNB 根组织准备失败: {error}"));
+            self.set_error(BridgeState::Failed, error.to_string()).await;
+            return Err(error);
+        }
 
         let public_key = self.keys.ensure().map_err(BridgeError::Other)?;
         self.runtime.lock().await.ssh_public_key = Some(public_key.clone());
@@ -491,6 +503,50 @@ impl Bridge {
         Ok(self.api.list_owned_namespaces(&token).await?)
     }
 
+    /// Ensures the current account owns a root organization.
+    ///
+    /// The account must already be connected. This is a control-plane-only
+    /// operation and never starts a workspace.
+    pub async fn ensure_account_organization(&self) -> Result<(), BridgeError> {
+        let _organization_transition = self.organization_transition.lock().await;
+        let token = self.account.access_token().await?;
+        let user = self.api.current_user(&token).await?;
+        self.ensure_organization_for(&token, &user.username).await
+    }
+
+    async fn ensure_organization_for(
+        &self,
+        token: &str,
+        username: &str,
+    ) -> Result<(), BridgeError> {
+        let namespaces = self.api.list_owned_namespaces(token).await?;
+        if !namespaces.is_empty() {
+            self.account.set_needs_organization(false);
+            return Ok(());
+        }
+        self.account.set_needs_organization(true);
+        let username = username.trim();
+        if username.is_empty() {
+            return Err(BridgeError::Other(
+                "CNB 未返回账号名，无法自动创建根组织".to_string(),
+            ));
+        }
+        self.logger
+            .log("info", format!("开始为 CNB 账号 {username} 自动创建根组织"));
+        self.api
+            .ensure_organization(
+                token,
+                username,
+                "CNB Bridge",
+                "CNB Bridge root organization",
+            )
+            .await?;
+        self.account.set_needs_organization(false);
+        self.logger
+            .log("info", format!("CNB 根组织 {username} 已就绪"));
+        Ok(())
+    }
+
     async fn set_state(&self, state: BridgeState) {
         let mut runtime = self.runtime.lock().await;
         runtime.state = Some(state);
@@ -550,6 +606,8 @@ async fn check_health_once(port: u16) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::account::AccountStore;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn test_bridge(temp: &tempfile::TempDir) -> Bridge {
         let account =
@@ -584,5 +642,67 @@ mod tests {
         bridge.runtime.lock().await.state = Some(BridgeState::Idle);
 
         assert!(!bridge.sleep_tunnel().await);
+    }
+
+    #[tokio::test]
+    async fn automatically_creates_a_missing_owner_organization() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "username": "cnb.new-user" })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user/groups"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/groups"))
+            .and(body_json(serde_json::json!({
+                "path": "cnb.new-user",
+                "remark": "CNB Bridge",
+                "description": "CNB Bridge root organization"
+            })))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user/groups"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "name": "cnb.new-user",
+                    "path": "cnb.new-user",
+                    "access_role": "Owner"
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        let temp = tempfile::tempdir().unwrap();
+        let account =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account.bin")));
+        account
+            .complete_token_login("token", Some("cnb.new-user".to_string()))
+            .unwrap();
+        account.set_needs_organization(true);
+        let mut bridge = Bridge::new(
+            Arc::clone(&account),
+            SettingsStore::new(temp.path().join("settings.json")),
+            SshKeyStore::new(
+                temp.path().join("id_ed25519"),
+                temp.path().join("id_ed25519.pub"),
+            ),
+            Arc::new(Logger::new(32)),
+        );
+        bridge.api = CnbApi::with_base_url(server.uri());
+
+        bridge.ensure_account_organization().await.unwrap();
+
+        assert!(!account.status().needs_organization);
     }
 }

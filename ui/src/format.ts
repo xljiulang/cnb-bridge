@@ -39,8 +39,11 @@ export function isBridgeTransitioning(state: BridgeState): boolean {
   );
 }
 
-export function shouldShowConnectionDetails(state: AccountState): boolean {
-  return state === "connected";
+export function shouldShowConnectionDetails(
+  state: AccountState,
+  needsOrganization = false,
+): boolean {
+  return state === "connected" && !needsOrganization;
 }
 
 export function settingsEqual(draft: Settings, persisted: Settings): boolean {

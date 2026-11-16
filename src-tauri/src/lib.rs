@@ -58,6 +58,7 @@ pub fn run() {
             commands::cancel_login,
             commands::logout,
             commands::start_bridge,
+            commands::create_cnb_namespace,
             commands::stop_bridge,
             commands::list_namespaces,
             commands::get_cnb_usage,

@@ -67,8 +67,9 @@ pub fn launch(app: tauri::AppHandle) -> Result<AccountStatus, String> {
         .await;
         match result {
             Ok(authorized) => {
-                let status =
-                    account.complete_token_login(authorized.pat.token.clone(), authorized.username);
+                let status = account
+                    .complete_token_login(authorized.pat.token.clone(), authorized.username)
+                    .map(|_| account.set_needs_organization(authorized.needs_organization));
                 match status {
                     Ok(_) => {
                         logger.log("info", "CNB personal access token is ready");
@@ -141,7 +142,7 @@ async fn authorize(
     app: tauri::AppHandle,
     cancel: Arc<AtomicBool>,
     bridge: Arc<cnb_bridge::bridge::Bridge>,
-    _logger: Arc<cnb_bridge::logging::Logger>,
+    logger: Arc<cnb_bridge::logging::Logger>,
 ) -> Result<AuthorizationResult, String> {
     let session = wait_for_session(&app, cancel).await?;
     let client = WebAuthClient::new();
@@ -166,18 +167,53 @@ async fn authorize(
         .create_pat(&session, &temporary_description, namespace)
         .await
         .map_err(|error| format!("自动创建访问令牌失败: {error}"))?;
-    let user = CnbApi::new()
+    let api = CnbApi::new();
+    let user = api
         .current_user(&pat.token)
         .await
         .map_err(|error| format!("新访问令牌验证失败: {error}"))?;
+    let owned_namespaces = api
+        .list_owned_namespaces(&pat.token)
+        .await
+        .map_err(|error| format!("检查 CNB Owner 组织失败: {error}"))?;
     let username = (!user.username.is_empty())
         .then_some(user.username)
         .or_else(|| namespaces.first().map(|namespace| namespace.path.clone()))
         .or(Some(pat.git_username.clone()));
+    let mut needs_organization = owned_namespaces.is_empty();
+    if needs_organization {
+        let organization_path = username.as_deref().unwrap_or_default();
+        if organization_path.trim().is_empty() {
+            logger.log("error", "CNB 未返回账号名，无法自动创建根组织");
+        } else {
+            logger.log(
+                "info",
+                format!("开始为 CNB 账号 {organization_path} 自动创建根组织"),
+            );
+            match api
+                .ensure_organization(
+                    &pat.token,
+                    organization_path,
+                    "CNB Bridge",
+                    "CNB Bridge root organization",
+                )
+                .await
+            {
+                Ok(_) => {
+                    needs_organization = false;
+                    logger.log("info", format!("CNB 根组织 {organization_path} 已就绪"));
+                }
+                Err(error) => {
+                    logger.log("error", format!("自动创建 CNB 根组织失败: {error}"));
+                }
+            }
+        }
+    }
     Ok(AuthorizationResult {
         pat,
         username,
         session,
+        needs_organization,
     })
 }
 
@@ -185,6 +221,7 @@ struct AuthorizationResult {
     pat: CreatedPat,
     username: Option<String>,
     session: WebSession,
+    needs_organization: bool,
 }
 
 async fn wait_for_session(

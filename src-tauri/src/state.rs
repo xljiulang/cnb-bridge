@@ -37,6 +37,7 @@ pub struct DesktopState {
     pub models: Vec<ModelSummary>,
     pub login_cancel: Mutex<Option<Arc<AtomicBool>>>,
     pub login_generation: AtomicU64,
+    pub organization_create_lock: tokio::sync::Mutex<()>,
     _lifecycle_mutex: AppLifecycleMutex,
 }
 
@@ -89,10 +90,12 @@ pub fn initialize(
         models,
         login_cancel: Mutex::new(None),
         login_generation: AtomicU64::new(0),
+        organization_create_lock: tokio::sync::Mutex::new(()),
         _lifecycle_mutex: lifecycle_mutex,
     });
 
     let handle = app.handle().clone();
+    ensure_organization_on_startup(Arc::clone(&bridge), handle.clone());
     let gateway_bridge = Arc::clone(&bridge);
     let gateway_port = settings_store_for_gateway(&handle);
     tauri::async_runtime::spawn(async move {
@@ -107,6 +110,25 @@ pub fn initialize(
     });
 
     Ok(())
+}
+
+fn ensure_organization_on_startup(bridge: Arc<Bridge>, app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        if bridge.snapshot().await.account.state != cnb_bridge::account::AccountState::Connected {
+            return;
+        }
+        match bridge.ensure_account_organization().await {
+            Ok(()) => {}
+            Err(error) => {
+                if let Some(state) = app.try_state::<DesktopState>() {
+                    state
+                        .logger
+                        .log("warn", format!("启动时检查 CNB Owner 组织失败: {error}"));
+                }
+            }
+        }
+        let _ = app.emit("cnb-bridge://snapshot", ());
+    });
 }
 
 fn settings_store_for_gateway(app: &AppHandle) -> u16 {

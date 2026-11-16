@@ -22,6 +22,9 @@ export const logout = () => invoke<AccountStatus>("logout");
 
 export const startBridge = () => invoke<AppSnapshot>("start_bridge");
 
+export const createCnbNamespace = () =>
+  invoke<AccountStatus>("create_cnb_namespace");
+
 export const stopBridge = () => invoke<AppSnapshot>("stop_bridge");
 
 export const listNamespaces = () => invoke<Namespace[]>("list_namespaces");

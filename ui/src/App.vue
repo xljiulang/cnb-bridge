@@ -30,6 +30,7 @@ import {
 } from "@lucide/vue";
 import {
   cancelLogin,
+  createCnbNamespace,
   getCnbUsage,
   getLogs,
   getSnapshot,
@@ -89,6 +90,7 @@ const copiedModelId = ref<string | null>(null);
 const usage = ref<CnbUsageSummary | null>(null);
 const usageLoading = ref(false);
 const usageError = ref<string | null>(null);
+const creatingOrganization = ref(false);
 const settingsDraft = reactive<Settings>({
   repoNamespace: "",
   repoName: "cnb-ai-bridge",
@@ -111,15 +113,31 @@ const bridgeTransitioning = computed(() => isBridgeTransitioning(bridgeState.val
 const idle = computed(() => bridgeState.value === "idle");
 const repoCreationNeeded = computed(() => bridgeState.value === "needsRepoCreation");
 const accountState = computed(() => snapshot.value?.account.state ?? "signedOut");
+const accountConnected = computed(() => accountState.value === "connected");
+const organizationRequired = computed(
+  () => accountConnected.value && Boolean(snapshot.value?.account.needsOrganization),
+);
+const organizationReady = computed(
+  () => accountConnected.value && !organizationRequired.value,
+);
 const settingsDirty = computed(() => {
   const persisted = snapshot.value?.settings;
   return persisted ? !settingsEqual(settingsDraft, persisted) : false;
 });
 const connectionDetailsVisible = computed(() =>
-  shouldShowConnectionDetails(accountState.value),
+  shouldShowConnectionDetails(
+    accountState.value,
+    Boolean(snapshot.value?.account.needsOrganization),
+  ),
 );
 const statusLabel = computed(() =>
-  snapshot.value ? bridgeLabel(snapshot.value.bridge.state) : "正在加载",
+  organizationRequired.value
+    ? creatingOrganization.value
+      ? "创建组织中"
+      : "组织未就绪"
+    : snapshot.value
+      ? bridgeLabel(snapshot.value.bridge.state)
+      : "正在加载",
 );
 const baseUrl = computed(
   () =>
@@ -145,6 +163,11 @@ const creditsUsageLabel = computed(() => {
   return usageLoading.value ? "正在获取…" : "-- / --";
 });
 const statusDescription = computed(() => {
+  if (organizationRequired.value) {
+    return creatingOrganization.value
+      ? "正在为当前账号自动创建 CNB 根组织，完成后会解锁桥接配置。"
+      : "CNB 根组织尚未就绪。请重试创建，或退出后重新扫码以更新授权权限。";
+  }
   if (ready.value) return "本机 OpenAI 兼容端点已就绪，可以直接连接你的 AI 客户端。";
   if (repoCreationNeeded.value) {
     return "请先在 CNB 创建私有空仓库，然后返回这里重新检查。";
@@ -241,16 +264,16 @@ async function refresh() {
 }
 
 async function loadUsage() {
-  if (accountState.value !== "connected" || usageLoading.value) return;
+  if (!organizationReady.value || usageLoading.value) return;
   const generation = ++usageGeneration;
   usageLoading.value = true;
   try {
     const next = await getCnbUsage();
-    if (generation !== usageGeneration || accountState.value !== "connected") return;
+    if (generation !== usageGeneration || !organizationReady.value) return;
     usage.value = next;
     usageError.value = null;
   } catch (cause) {
-    if (generation !== usageGeneration || accountState.value !== "connected") return;
+    if (generation !== usageGeneration || !organizationReady.value) return;
     usageError.value = formatError(cause);
   } finally {
     if (generation === usageGeneration) usageLoading.value = false;
@@ -345,8 +368,25 @@ function openAbout() {
 }
 
 function handleVisibilityChange() {
-  if (document.visibilityState === "visible" && accountState.value === "connected") {
+  if (document.visibilityState === "visible" && organizationReady.value) {
     void loadUsage();
+  }
+}
+
+async function createOrganization() {
+  if (!organizationRequired.value || creatingOrganization.value || busy.value) return;
+  creatingOrganization.value = true;
+  busy.value = true;
+  error.value = null;
+  try {
+    await createCnbNamespace();
+    await refresh();
+  } catch (cause) {
+    error.value = formatError(cause);
+    await refresh();
+  } finally {
+    creatingOrganization.value = false;
+    busy.value = false;
   }
 }
 
@@ -448,7 +488,7 @@ async function openAboutResource(url: string) {
 
 onMounted(async () => {
   await refresh();
-  if (accountState.value === "connected") void loadUsage();
+  if (organizationReady.value) void loadUsage();
   await Promise.all([loadLogs(), loadHttpTraces()]);
   timer = window.setInterval(() => {
     void refresh();
@@ -458,7 +498,7 @@ onMounted(async () => {
     }
   }, 1500);
   usageTimer = window.setInterval(() => {
-    if (accountState.value === "connected") void loadUsage();
+    if (organizationReady.value) void loadUsage();
   }, 60_000);
   document.addEventListener("visibilitychange", handleVisibilityChange);
   unlisten = await listen("cnb-bridge://snapshot", () => {
@@ -474,16 +514,27 @@ onBeforeUnmount(() => {
   unlisten?.();
 });
 
-watch(accountState, (state) => {
-  if (state === "connected") {
-    void loadUsage();
-  } else {
+watch(
+  [accountState, organizationRequired],
+  ([state, needsOrganization]) => {
+    if (state === "connected" && !needsOrganization) {
+      void loadUsage();
+      return;
+    }
+    if (state === "connected" && needsOrganization) {
+      usageGeneration += 1;
+      usage.value = null;
+      usageError.value = null;
+      usageLoading.value = false;
+      return;
+    }
     usageGeneration += 1;
     usage.value = null;
     usageError.value = null;
     usageLoading.value = false;
-  }
-});
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -535,10 +586,10 @@ watch(accountState, (state) => {
 
       <div class="sidebar-status" :class="{ live: ready }">
         <span class="status-icon">
-          <ScanQrCode v-if="!connectionDetailsVisible" :size="16" aria-hidden="true" />
+          <ScanQrCode v-if="!accountConnected" :size="16" aria-hidden="true" />
           <Activity v-else-if="ready" :size="16" aria-hidden="true" />
           <LoaderCircle
-            v-else-if="bridgeTransitioning"
+            v-else-if="bridgeTransitioning || creatingOrganization"
             class="spin"
             :size="16"
             aria-hidden="true"
@@ -548,7 +599,7 @@ watch(accountState, (state) => {
         <div class="status-copy">
           <strong>{{ statusLabel }}</strong>
           <small>
-            {{ accountState === "connected" ? snapshot?.account.username || "CNB 已绑定" : "等待扫码" }}
+            {{ accountConnected ? snapshot?.account.username || "CNB 已绑定" : "等待扫码" }}
           </small>
         </div>
         <span class="port-chip">{{ snapshot?.settings.localPort ?? 11233 }}</span>
@@ -588,16 +639,21 @@ watch(accountState, (state) => {
             <p class="eyebrow">CNB BRIDGE</p>
             <div class="title-row">
               <h1>连接</h1>
-              <span class="status-pill" :class="{ live: ready, busy: bridgeTransitioning }">
+              <span
+                class="status-pill"
+                :class="{ live: ready, busy: bridgeTransitioning || creatingOrganization }"
+              >
                 <span />
                 {{
-                  ready
-                    ? "在线"
-                    : idle
-                      ? "待命"
-                      : bridgeTransitioning
-                        ? "处理中"
-                        : "待连接"
+                  organizationRequired
+                    ? "准备组织"
+                    : ready
+                      ? "在线"
+                      : idle
+                        ? "待命"
+                        : bridgeTransitioning
+                          ? "处理中"
+                          : "待连接"
                 }}
               </span>
             </div>
@@ -641,9 +697,9 @@ watch(accountState, (state) => {
             >
               <div class="account-head">
                 <div class="account-main">
-                  <span class="account-avatar" :class="{ scan: !connectionDetailsVisible }">
+                  <span class="account-avatar" :class="{ scan: !accountConnected }">
                     <CircleUserRound
-                      v-if="connectionDetailsVisible"
+                      v-if="accountConnected"
                       :size="23"
                       aria-hidden="true"
                     />
@@ -656,19 +712,34 @@ watch(accountState, (state) => {
                 </div>
                 <span class="pill" :class="accountState">
                   {{
-                    accountState === "connected"
-                      ? "已连接"
+                    accountConnected
+                      ? organizationRequired
+                        ? creatingOrganization
+                          ? "创建组织中"
+                          : "组织未就绪"
+                        : "已连接"
                       : accountState === "signingIn"
                         ? "等待扫码"
                         : "未登录"
                   }}
                 </span>
               </div>
-              <p v-if="!connectionDetailsVisible" class="account-intro">
+              <p v-if="!accountConnected" class="account-intro">
                 扫码完成 CNB 授权后，即可解锁模型、本机接入地址和桥接配置。
               </p>
+              <p
+                v-else-if="organizationRequired"
+                class="account-intro organization-intro"
+                aria-live="polite"
+              >
+                {{
+                  creatingOrganization
+                    ? `正在为账号 ${snapshot?.account.username || ""} 自动创建 CNB 根组织…`
+                    : "CNB 根组织尚未就绪。系统会自动使用当前账号名创建组织。"
+                }}
+              </p>
               <div
-                v-else
+                v-else-if="organizationReady"
                 class="account-usage"
                 :class="{ unavailable: !usage || usageError }"
                 :title="usageError ?? undefined"
@@ -678,22 +749,48 @@ watch(accountState, (state) => {
                 <strong>{{ creditsUsageLabel }}</strong>
               </div>
               <div class="account-actions">
+                <template v-if="!accountConnected">
+                  <button
+                    type="button"
+                    class="primary"
+                    :disabled="busy || accountState === 'signingIn'"
+                    @click="login"
+                  >
+                    <ScanQrCode
+                      :class="{ 'scan-waiting': accountState === 'signingIn' }"
+                      :size="17"
+                      aria-hidden="true"
+                    />
+                    {{ accountState === "signingIn" ? "等待扫码" : "扫码绑定 CNB" }}
+                  </button>
+                  <button
+                    v-if="accountState === 'signingIn'"
+                    type="button"
+                    class="ghost"
+                    :disabled="busy"
+                    @click="run(cancelLogin)"
+                  >
+                    取消扫码
+                  </button>
+                </template>
                 <button
-                  v-if="!connectionDetailsVisible"
+                  v-if="organizationRequired"
                   type="button"
                   class="primary"
-                  :disabled="busy || accountState === 'signingIn'"
-                  @click="login"
+                  :disabled="busy"
+                  @click="createOrganization"
                 >
-                  <ScanQrCode
-                    :class="{ 'scan-waiting': accountState === 'signingIn' }"
-                    :size="17"
+                  <LoaderCircle
+                    v-if="creatingOrganization"
+                    class="spin"
+                    :size="16"
                     aria-hidden="true"
                   />
-                  {{ accountState === "signingIn" ? "等待扫码" : "扫码绑定 CNB" }}
+                  <RefreshCw v-else :size="16" aria-hidden="true" />
+                  {{ creatingOrganization ? "正在创建…" : "重试创建组织" }}
                 </button>
                 <button
-                  v-else
+                  v-if="accountConnected"
                   type="button"
                   class="danger compact"
                   :disabled="busy"
@@ -701,15 +798,6 @@ watch(accountState, (state) => {
                 >
                   <LogOut :size="15" aria-hidden="true" />
                   退出登录
-                </button>
-                <button
-                  v-if="accountState === 'signingIn'"
-                  type="button"
-                  class="ghost"
-                  :disabled="busy"
-                  @click="run(cancelLogin)"
-                >
-                  取消扫码
                 </button>
               </div>
             </article>

@@ -33,6 +33,8 @@ pub struct AccountStatus {
     pub username: Option<String>,
     pub auth_method: Option<AuthMethod>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub needs_organization: bool,
 }
 
 /// Account lifecycle state.
@@ -53,6 +55,7 @@ impl AccountStatus {
             username: None,
             auth_method: None,
             error: None,
+            needs_organization: false,
         }
     }
 
@@ -63,6 +66,7 @@ impl AccountStatus {
             username: None,
             auth_method: None,
             error: None,
+            needs_organization: false,
         }
     }
 
@@ -73,7 +77,13 @@ impl AccountStatus {
             username: credentials.username.clone(),
             auth_method: Some(credentials.auth_method),
             error: None,
+            needs_organization: false,
         }
+    }
+
+    /// Updates whether a connected account still needs a root organization.
+    pub fn set_needs_organization(&mut self, needs_organization: bool) {
+        self.needs_organization = needs_organization;
     }
 }
 
@@ -195,6 +205,15 @@ impl AccountManager {
             .clone()
     }
 
+    /// Updates the organization readiness flag for the current connected account.
+    pub fn set_needs_organization(&self, needs_organization: bool) -> AccountStatus {
+        let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        if status.state == AccountState::Connected {
+            status.needs_organization = needs_organization;
+        }
+        status.clone()
+    }
+
     /// Marks WebView authorization as in progress.
     pub fn begin_token_login(&self) {
         *self.status.lock().unwrap_or_else(|e| e.into_inner()) = AccountStatus::signing_in();
@@ -303,5 +322,27 @@ mod tests {
 
         assert_eq!(store.load().unwrap(), None);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn organization_requirement_is_preserved_only_for_connected_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager =
+            AccountManager::with_store(AccountStore::new(dir.path().join("account-auth.bin")));
+        manager.begin_token_login();
+
+        let status = manager.set_needs_organization(true);
+        assert!(!status.needs_organization);
+
+        let status = manager
+            .complete_token_login("personal-access-token", Some("new-user".to_string()))
+            .unwrap();
+        assert!(!status.needs_organization);
+
+        let status = manager.set_needs_organization(true);
+        assert!(status.needs_organization);
+
+        let status = manager.set_needs_organization(false);
+        assert!(!status.needs_organization);
     }
 }

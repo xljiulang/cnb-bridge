@@ -1,5 +1,6 @@
 use cnb_bridge::account::AccountStatus;
 use cnb_bridge::api::{ApiError, CnbApi, CnbUsageSummary, Namespace};
+use cnb_bridge::bridge::BridgeError;
 use cnb_bridge::http_trace::{HttpTraceStore, HttpTraceSummary};
 use cnb_bridge::logging::LogEntry;
 use cnb_bridge::settings::Settings;
@@ -97,6 +98,24 @@ pub async fn start_bridge(state: State<'_, DesktopState>) -> Result<AppSnapshot,
 }
 
 #[tauri::command]
+pub async fn create_cnb_namespace(
+    state: State<'_, DesktopState>,
+) -> Result<AccountStatus, CommandError> {
+    let _create_guard = state.organization_create_lock.lock().await;
+    let current = state.account.status();
+    if !current.needs_organization {
+        return Ok(current);
+    }
+    match state.bridge.ensure_account_organization().await {
+        Ok(_) => {
+            state.bridge.account_connected().await;
+            Ok(state.account.status())
+        }
+        Err(error) => Err(map_organization_create_error(error)),
+    }
+}
+
+#[tauri::command]
 pub async fn stop_bridge(state: State<'_, DesktopState>) -> Result<AppSnapshot, CommandError> {
     let _ = state.bridge.stop().await;
     state.snapshot().await
@@ -141,6 +160,42 @@ fn map_usage_error(error: ApiError) -> CommandError {
             CommandError::new("usage_forbidden", "当前 CNB 账号无权读取组织用量")
         }
         _ => CommandError::new("usage_load_failed", format!("读取 CNB 用量失败: {error}")),
+    }
+}
+
+fn map_organization_create_error(error: BridgeError) -> CommandError {
+    let (api_error, fallback) = match &error {
+        BridgeError::Api(error) => (Some(error), error.to_string()),
+        BridgeError::Account(error) => {
+            return CommandError::new(
+                "namespace_permission_denied",
+                format!("创建组织前请先登录 CNB: {error}"),
+            )
+        }
+        _ => (None, error.to_string()),
+    };
+    let status = api_error.and_then(|error| match error {
+        ApiError::Remote { status, .. } => Some(status.as_u16()),
+        _ => None,
+    });
+    match (status, api_error) {
+        (Some(401 | 403), _) => CommandError::new(
+            "namespace_permission_denied",
+            "当前 CNB 授权无权创建组织，请退出后重新扫码以获取组织管理权限",
+        ),
+        (Some(409), _) => CommandError::new(
+            "namespace_not_created",
+            "组织已存在，但当前账号尚未获得 Owner 权限",
+        ),
+        (_, Some(ApiError::InvalidResponse(message)))
+            if message.contains("尚未获得 Owner 权限") =>
+        {
+            CommandError::new("namespace_not_created", message.clone())
+        }
+        _ => CommandError::new(
+            "namespace_create_failed",
+            format!("创建 CNB 组织失败: {fallback}"),
+        ),
     }
 }
 
@@ -197,7 +252,9 @@ pub fn open_http_trace(id: String) -> Result<(), CommandError> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_allowed_external_url;
+    use super::{is_allowed_external_url, map_organization_create_error};
+    use cnb_bridge::api::{ApiError, StatusCode};
+    use cnb_bridge::bridge::BridgeError;
 
     #[test]
     fn allows_any_well_formed_http_or_https_url() {
@@ -219,5 +276,28 @@ mod tests {
         ));
         assert!(!is_allowed_external_url("data:text/plain,hello"));
         assert!(!is_allowed_external_url("https://"));
+    }
+
+    #[test]
+    fn maps_organization_permission_failures_to_relogin_guidance() {
+        let error = map_organization_create_error(BridgeError::Api(ApiError::Remote {
+            status: StatusCode::FORBIDDEN,
+            code: Some(10),
+            message: "missing group-manage:rw".to_string(),
+        }));
+
+        assert_eq!(error.code, "namespace_permission_denied");
+        assert!(error.message.contains("重新扫码"));
+    }
+
+    #[test]
+    fn maps_unconfirmed_conflicts_to_namespace_not_created() {
+        let error = map_organization_create_error(BridgeError::Api(ApiError::Remote {
+            status: StatusCode::CONFLICT,
+            code: None,
+            message: "already exists".to_string(),
+        }));
+
+        assert_eq!(error.code, "namespace_not_created");
     }
 }

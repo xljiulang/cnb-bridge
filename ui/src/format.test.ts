@@ -55,7 +55,8 @@ describe("format helpers", () => {
   });
 
   it("only unlocks connection details for a connected CNB account", () => {
-    expect(shouldShowConnectionDetails("connected")).toBe(true);
+    expect(shouldShowConnectionDetails("connected", false)).toBe(true);
+    expect(shouldShowConnectionDetails("connected", true)).toBe(false);
     expect(shouldShowConnectionDetails("signedOut")).toBe(false);
     expect(shouldShowConnectionDetails("signingIn")).toBe(false);
     expect(shouldShowConnectionDetails("failed")).toBe(false);

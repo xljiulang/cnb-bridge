@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 /// Minimal scopes required by the bridge runtime.
-pub const AUTH_SCOPES: &str = "account-profile:r,account-engage:rw,group-resource:rw,repo-code:rw,repo-basic-info:r,repo-cnb-trigger:rw,repo-cnb-detail:rw";
+pub const AUTH_SCOPES: &str = "account-profile:r,account-engage:rw,group-manage:rw,group-resource:rw,repo-code:rw,repo-basic-info:r,repo-cnb-trigger:rw,repo-cnb-detail:rw";
 
 /// Cookies and CSRF token extracted from the authenticated CNB WebView.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -585,5 +585,8 @@ mod tests {
         assert!(AUTH_SCOPES
             .split(',')
             .any(|scope| scope == "account-engage:rw"));
+        assert!(AUTH_SCOPES
+            .split(',')
+            .any(|scope| scope == "group-manage:rw"));
     }
 }
