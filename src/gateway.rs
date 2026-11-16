@@ -3,6 +3,7 @@
 use crate::bridge::Bridge;
 use crate::http_trace::{HttpTraceSession, HttpTraceStore};
 use crate::logging::Logger;
+use crate::model_catalog;
 use crate::prompt_gate::{apply_headers, detect_gate_block, normalize_chat, GateReport};
 use crate::responses::{chat_to_responses, responses_to_chat, ResponsesStream, ToolShape};
 use axum::body::{to_bytes, Body, Bytes};
@@ -21,7 +22,6 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-const MODELS_RESOURCE: &str = include_str!("../resources/models.json");
 const REQUEST_ID_HEADER: &str = "x-request-id";
 const BODY_LIMIT: usize = 64 * 1024 * 1024;
 const OPTIONAL_CHAT_FIELDS: [(&str, &[&str]); 6] = [
@@ -176,7 +176,7 @@ impl GatewayHandle {
         let state = GatewayState {
             bridge: Arc::clone(&bridge),
             activity: Arc::clone(&activity),
-            models: load_models()?,
+            models: model_catalog::catalog()?,
             activation_timeout: config.activation_timeout,
             client: reqwest::Client::builder()
                 .no_proxy()
@@ -1297,23 +1297,6 @@ async fn handle_method_not_allowed() -> Response<Body> {
     )
 }
 
-fn load_models() -> Result<Value, String> {
-    let value: Value = serde_json::from_str(MODELS_RESOURCE)
-        .map_err(|error| format!("解析内置模型目录失败: {error}"))?;
-    let models = value
-        .get("models")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "内置模型目录缺少 models 数组".to_string())?;
-    if models.is_empty()
-        || models
-            .iter()
-            .any(|model| model.get("id").and_then(Value::as_str).is_none())
-    {
-        return Err("内置模型目录包含无效模型".to_string());
-    }
-    Ok(value)
-}
-
 #[derive(Debug, Serialize)]
 struct ErrorEnvelope {
     error: ErrorDetail,
@@ -1510,9 +1493,8 @@ mod tests {
         assert_eq!(list.status(), reqwest::StatusCode::OK);
         let payload: serde_json::Value = list.json().await.unwrap();
         assert_eq!(payload["object"], "list");
-        assert_eq!(payload["data"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["data"].as_array().unwrap().len(), 1);
         assert_eq!(payload["data"][0]["id"], "deepseek-v4.1-flash");
-        assert_eq!(payload["data"][1]["id"], "deepseek-flash");
         for model in payload["data"].as_array().unwrap() {
             assert_eq!(model["context_window"], 1_048_576);
             assert_eq!(model["max_context_window"], 1_048_576);
@@ -1539,11 +1521,7 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(deepseek_flash.status(), reqwest::StatusCode::OK);
-        assert_eq!(
-            deepseek_flash.json::<serde_json::Value>().await.unwrap()["id"],
-            "deepseek-flash"
-        );
+        assert_eq!(deepseek_flash.status(), reqwest::StatusCode::NOT_FOUND);
         let missing = client
             .get(format!("{base}/models/other"))
             .send()

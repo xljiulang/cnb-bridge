@@ -3,6 +3,7 @@ use crate::tray;
 use cnb_bridge::account::{AccountManager, AccountStatus};
 use cnb_bridge::bridge::{Bridge, BridgeSnapshot};
 use cnb_bridge::logging::Logger;
+use cnb_bridge::model_catalog::{self, ModelSummary};
 use cnb_bridge::paths;
 use cnb_bridge::settings::{Settings, SettingsStore};
 use cnb_bridge::ssh_key::SshKeyStore;
@@ -22,6 +23,7 @@ pub struct AppSnapshot {
     pub version: String,
     pub logs_path: String,
     pub http_logs_path: String,
+    pub models: Vec<ModelSummary>,
 }
 
 /// Shared desktop state.
@@ -31,6 +33,7 @@ pub struct DesktopState {
     pub bridge: Arc<Bridge>,
     pub settings_store: SettingsStore,
     pub logger: Arc<Logger>,
+    pub models: Vec<ModelSummary>,
     pub login_cancel: Mutex<Option<Arc<AtomicBool>>>,
     pub login_generation: AtomicU64,
 }
@@ -51,6 +54,7 @@ impl DesktopState {
             version: env!("CARGO_PKG_VERSION").to_string(),
             logs_path: paths::logs_dir().display().to_string(),
             http_logs_path: paths::logs_dir().join("http-trace").display().to_string(),
+            models: self.models.clone(),
         })
     }
 }
@@ -63,6 +67,7 @@ pub fn initialize(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
 
     let logger = Arc::new(Logger::with_file(200, paths::logs_dir()));
     let account = AccountManager::new();
+    let models = model_catalog::summaries().map_err(std::io::Error::other)?;
     let settings_store = SettingsStore::new(paths::settings_path());
     let bridge = Arc::new(Bridge::new(
         Arc::clone(&account),
@@ -76,6 +81,7 @@ pub fn initialize(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
         bridge: Arc::clone(&bridge),
         settings_store,
         logger,
+        models,
         login_cancel: Mutex::new(None),
         login_generation: AtomicU64::new(0),
     });

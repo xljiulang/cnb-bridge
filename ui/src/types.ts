@@ -48,6 +48,17 @@ export interface Namespace {
   path: string;
 }
 
+export interface ModelSummary {
+  id: string;
+  displayName: string;
+  description?: string | null;
+  contextWindow: number;
+  inputModalities: string[];
+  supportsTools: boolean;
+  supportsStreaming: boolean;
+  supportsReasoningSummaries: boolean;
+}
+
 export interface AppSnapshot {
   account: AccountStatus;
   bridge: BridgeSnapshot;
@@ -55,6 +66,7 @@ export interface AppSnapshot {
   version: string;
   logsPath: string;
   httpLogsPath: string;
+  models: ModelSummary[];
 }
 
 export interface LogEntry {

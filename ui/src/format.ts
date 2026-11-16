@@ -1,4 +1,4 @@
-import type { AppSnapshot, BridgeState, CommandError } from "./types";
+import type { AccountState, AppSnapshot, BridgeState, CommandError } from "./types";
 
 const BRIDGE_LABELS: Record<BridgeState, string> = {
   signedOut: "未登录",
@@ -31,6 +31,30 @@ export function isBridgeTransitioning(state: BridgeState): boolean {
     state === "connecting" ||
     state === "stopping"
   );
+}
+
+export function shouldShowConnectionDetails(state: AccountState): boolean {
+  return state === "connected";
+}
+
+export function formatContextWindow(tokens: number): string {
+  if (tokens >= 1024 * 1024 && tokens % (1024 * 1024) === 0) {
+    return `${tokens / (1024 * 1024)}M 上下文`;
+  }
+  if (tokens >= 1024 && tokens % 1024 === 0) {
+    return `${tokens / 1024}K 上下文`;
+  }
+  return `${tokens} 上下文`;
+}
+
+export function formatInputModalities(modalities: string[]): string {
+  const labels: Record<string, string> = {
+    text: "文本",
+    image: "图像",
+    audio: "音频",
+    video: "视频",
+  };
+  return modalities.map((modality) => labels[modality] ?? modality).join(" / ");
 }
 
 export function validatePort(value: number): string | null {

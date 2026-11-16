@@ -12,6 +12,7 @@ pub mod dpapi;
 pub mod gateway;
 pub mod http_trace;
 pub mod logging;
+pub mod model_catalog;
 pub mod paths;
 pub mod prompt_gate;
 pub mod responses;
@@ -23,4 +24,5 @@ pub mod workspace;
 
 pub use account::{AccountManager, AccountStatus, AuthMethod, Credentials};
 pub use bridge::{Bridge, BridgeSnapshot, BridgeState};
+pub use model_catalog::ModelSummary;
 pub use settings::{Settings, SettingsStore};

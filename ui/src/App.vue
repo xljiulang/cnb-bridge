@@ -9,21 +9,22 @@ import {
   ChevronRight,
   CircleUserRound,
   Copy,
+  Cpu,
   ExternalLink,
   FolderGit2,
   FolderOpen,
   Info,
+  KeyRound,
   LoaderCircle,
   LogOut,
   Network,
   Power,
   RefreshCw,
+  ScanQrCode,
   ScrollText,
   Server,
   Settings as SettingsIcon,
-  ShieldCheck,
   Square,
-  Terminal,
   X,
 } from "@lucide/vue";
 import {
@@ -45,13 +46,17 @@ import appIcon from "./assets/cnb-favicon.svg";
 import {
   bridgeLabel,
   formatError,
+  formatContextWindow,
+  formatInputModalities,
   isBridgeTransitioning,
+  shouldShowConnectionDetails,
   validatePort,
 } from "./format";
 import type {
   AppSnapshot,
   HttpTraceSummary,
   LogEntry,
+  ModelSummary,
   Namespace,
   Settings,
 } from "./types";
@@ -76,6 +81,7 @@ const namespaces = ref<Namespace[]>([]);
 const logFilter = ref("all");
 const logMode = ref<"runtime" | "http">("runtime");
 const settingsDirty = ref(false);
+const copiedModelId = ref<string | null>(null);
 const settingsDraft = reactive<Settings>({
   repoNamespace: "",
   repoName: "cnb-ai-bridge",
@@ -84,6 +90,8 @@ const settingsDraft = reactive<Settings>({
   launchAtLogin: false,
 });
 let timer: number | undefined;
+let noticeTimer: number | undefined;
+let modelCopyTimer: number | undefined;
 let unlisten: UnlistenFn | undefined;
 
 const ready = computed(() => snapshot.value?.bridge.state === "ready");
@@ -92,6 +100,9 @@ const bridgeTransitioning = computed(() => isBridgeTransitioning(bridgeState.val
 const idle = computed(() => bridgeState.value === "idle");
 const repoCreationNeeded = computed(() => bridgeState.value === "needsRepoCreation");
 const accountState = computed(() => snapshot.value?.account.state ?? "signedOut");
+const connectionDetailsVisible = computed(() =>
+  shouldShowConnectionDetails(accountState.value),
+);
 const statusLabel = computed(() =>
   snapshot.value ? bridgeLabel(snapshot.value.bridge.state) : "正在加载",
 );
@@ -213,10 +224,10 @@ async function run(action: () => Promise<unknown>, message?: string) {
   if (busy.value) return;
   busy.value = true;
   error.value = null;
-  notice.value = null;
+  clearTransientFeedback();
   try {
     await action();
-    if (message) notice.value = message;
+    if (message) showNotice(message);
     await refresh();
   } catch (cause) {
     error.value = formatError(cause);
@@ -235,10 +246,57 @@ async function login() {
 async function copyText(value: string, message: string) {
   try {
     await navigator.clipboard.writeText(value);
-    notice.value = message;
+    showNotice(message);
   } catch (cause) {
     error.value = formatError(cause);
   }
+}
+
+async function copyModelId(model: ModelSummary) {
+  try {
+    await navigator.clipboard.writeText(model.id);
+    clearNotice();
+    copiedModelId.value = model.id;
+    if (modelCopyTimer) window.clearTimeout(modelCopyTimer);
+    modelCopyTimer = window.setTimeout(() => {
+      copiedModelId.value = null;
+      modelCopyTimer = undefined;
+    }, 2500);
+  } catch (cause) {
+    error.value = formatError(cause);
+  }
+}
+
+function showNotice(message: string) {
+  clearNotice();
+  notice.value = message;
+  noticeTimer = window.setTimeout(() => {
+    notice.value = null;
+    noticeTimer = undefined;
+  }, 2500);
+}
+
+function clearNotice() {
+  if (noticeTimer) window.clearTimeout(noticeTimer);
+  noticeTimer = undefined;
+  notice.value = null;
+}
+
+function clearTransientFeedback() {
+  clearNotice();
+  if (modelCopyTimer) window.clearTimeout(modelCopyTimer);
+  modelCopyTimer = undefined;
+  copiedModelId.value = null;
+}
+
+function openConnect() {
+  clearTransientFeedback();
+  tab.value = "connect";
+}
+
+function openAbout() {
+  clearTransientFeedback();
+  tab.value = "about";
 }
 
 async function loadNamespaces() {
@@ -255,11 +313,13 @@ async function loadNamespaces() {
 }
 
 async function openSettings() {
+  clearTransientFeedback();
   tab.value = "settings";
   await loadNamespaces();
 }
 
 async function openLogs() {
+  clearTransientFeedback();
   tab.value = "logs";
   await Promise.all([loadLogs(), loadHttpTraces()]);
 }
@@ -269,7 +329,7 @@ async function openRepoCreation() {
   if (!url) return;
   try {
     await openExternal(url);
-    notice.value = "创建私有空仓库后返回这里，点击“重新检查仓库”。";
+    showNotice("创建私有空仓库后返回这里，点击“重新检查仓库”。");
   } catch (cause) {
     error.value = formatError(cause);
   }
@@ -337,6 +397,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (timer) window.clearInterval(timer);
+  clearTransientFeedback();
   unlisten?.();
 });
 </script>
@@ -356,7 +417,7 @@ onBeforeUnmount(() => {
         <button
           type="button"
           :class="{ active: tab === 'connect' }"
-          @click="tab = 'connect'"
+          @click="openConnect"
         >
           <Cable :size="17" aria-hidden="true" />
           <span>连接</span>
@@ -381,7 +442,7 @@ onBeforeUnmount(() => {
         <button
           type="button"
           :class="{ active: tab === 'about' }"
-          @click="tab = 'about'"
+          @click="openAbout"
         >
           <Info :size="17" aria-hidden="true" />
           <span>关于</span>
@@ -390,7 +451,8 @@ onBeforeUnmount(() => {
 
       <div class="sidebar-status" :class="{ live: ready }">
         <span class="status-icon">
-          <Activity v-if="ready" :size="16" aria-hidden="true" />
+          <ScanQrCode v-if="!connectionDetailsVisible" :size="16" aria-hidden="true" />
+          <Activity v-else-if="ready" :size="16" aria-hidden="true" />
           <LoaderCircle
             v-else-if="bridgeTransitioning"
             class="spin"
@@ -431,7 +493,7 @@ onBeforeUnmount(() => {
       <div v-if="notice" class="banner notice" role="status">
         <CheckCircle2 :size="18" aria-hidden="true" />
         <span>{{ notice }}</span>
-        <button type="button" class="icon-button" aria-label="关闭提示" @click="notice = null">
+        <button type="button" class="icon-button" aria-label="关闭提示" @click="clearNotice">
           <X :size="16" aria-hidden="true" />
         </button>
       </div>
@@ -457,7 +519,7 @@ onBeforeUnmount(() => {
             </div>
             <p class="muted">{{ statusDescription }}</p>
           </div>
-          <div class="head-actions">
+          <div v-if="connectionDetailsVisible" class="head-actions">
             <button
               v-if="!ready"
               type="button"
@@ -487,132 +549,227 @@ onBeforeUnmount(() => {
           </div>
         </header>
 
-        <div class="overview-grid">
-          <article class="card overview-card endpoint-card" :class="{ live: ready }">
-            <div class="card-kicker">
-              <span class="icon-tile"><Terminal :size="16" aria-hidden="true" /></span>
-              <span>本机 OpenAI 端点</span>
-              <span class="endpoint-state">
-                {{ ready ? "监听中" : idle ? "按需启动" : "未连接" }}
+        <div class="connect-stack">
+          <div class="connect-card-grid">
+            <article class="card account-card connect-card">
+              <div class="account-head">
+                <div class="account-main">
+                  <span class="account-avatar" :class="{ scan: !connectionDetailsVisible }">
+                    <CircleUserRound
+                      v-if="connectionDetailsVisible"
+                      :size="23"
+                      aria-hidden="true"
+                    />
+                    <ScanQrCode v-else :size="24" aria-hidden="true" />
+                  </span>
+                  <div>
+                    <span class="card-label">CNB 账号</span>
+                    <strong>{{ snapshot?.account.username || "尚未绑定" }}</strong>
+                  </div>
+                </div>
+                <span class="pill" :class="accountState">
+                  {{
+                    accountState === "connected"
+                      ? "已连接"
+                      : accountState === "signingIn"
+                        ? "等待扫码"
+                        : "未登录"
+                  }}
+                </span>
+              </div>
+              <p v-if="!connectionDetailsVisible" class="account-intro">
+                扫码完成 CNB 授权后，即可查看模型、本机接入地址并启动桥接。
+              </p>
+              <div class="account-actions">
+                <button
+                  v-if="!connectionDetailsVisible"
+                  type="button"
+                  class="primary"
+                  :disabled="busy || accountState === 'signingIn'"
+                  @click="login"
+                >
+                  <ScanQrCode
+                    :class="{ 'scan-waiting': accountState === 'signingIn' }"
+                    :size="17"
+                    aria-hidden="true"
+                  />
+                  {{ accountState === "signingIn" ? "等待扫码" : "扫码绑定 CNB" }}
+                </button>
+                <button
+                  v-else
+                  type="button"
+                  class="danger compact"
+                  :disabled="busy"
+                  @click="run(logout)"
+                >
+                  <LogOut :size="15" aria-hidden="true" />
+                  退出登录
+                </button>
+                <button
+                  v-if="accountState === 'signingIn'"
+                  type="button"
+                  class="ghost"
+                  :disabled="busy"
+                  @click="run(cancelLogin)"
+                >
+                  取消扫码
+                </button>
+              </div>
+            </article>
+
+            <template v-if="connectionDetailsVisible">
+              <article class="card model-card connect-card">
+                <div class="section-head">
+                  <div>
+                    <span class="card-label">模型目录</span>
+                    <h2>可用于 Chat 与 Responses</h2>
+                  </div>
+                  <div class="section-icon">
+                    <Cpu :size="19" aria-hidden="true" />
+                    <span>{{ snapshot?.models.length ?? 0 }} 个模型</span>
+                  </div>
+                </div>
+                <div class="model-list">
+                  <section
+                    v-for="model in snapshot?.models ?? []"
+                    :key="model.id"
+                    class="model-item"
+                  >
+                    <div class="model-item-head">
+                      <div class="model-title">
+                        <div class="model-name-row">
+                          <code>{{ model.id }}</code>
+                          <span class="model-available">可用</span>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        class="secondary compact model-copy"
+                        :aria-label="
+                          copiedModelId === model.id
+                            ? `${model.id} 已复制`
+                            : `复制模型 ID ${model.id}`
+                        "
+                        @click="copyModelId(model)"
+                      >
+                        <CheckCircle2
+                          v-if="copiedModelId === model.id"
+                          :size="15"
+                          aria-hidden="true"
+                        />
+                        <Copy v-else :size="15" aria-hidden="true" />
+                        {{ copiedModelId === model.id ? "已复制" : "复制 ID" }}
+                      </button>
+                    </div>
+                    <div class="model-capabilities" aria-label="模型能力">
+                      <span v-if="model.contextWindow">
+                        {{ formatContextWindow(model.contextWindow) }}
+                      </span>
+                      <span v-if="model.inputModalities.length">
+                        {{ formatInputModalities(model.inputModalities) }}
+                      </span>
+                      <span v-if="model.supportsTools">工具调用</span>
+                      <span v-if="model.supportsStreaming">流式输出</span>
+                    </div>
+                  </section>
+                </div>
+              </article>
+
+              <article class="card connect-card endpoint-card" :class="{ live: ready }">
+                <div class="section-head">
+                  <div>
+                    <span class="card-label">接入端点</span>
+                    <h2>本机 OpenAI 兼容地址</h2>
+                  </div>
+                  <span class="endpoint-state">
+                    {{ ready ? "监听中" : idle ? "按需启动" : "未连接" }}
+                  </span>
+                </div>
+                <code class="endpoint-url">{{ baseUrl }}</code>
+                <div class="endpoint-meta">
+                  <button
+                    type="button"
+                    class="secondary compact"
+                    @click="copyText(baseUrl, 'Base URL 已复制')"
+                  >
+                    <Copy :size="15" aria-hidden="true" />
+                    复制地址
+                  </button>
+                </div>
+              </article>
+
+              <article class="card connect-card api-key-card">
+                <div class="section-head">
+                  <div>
+                    <span class="card-label">客户端鉴权</span>
+                    <h2>API Key 可任意填写</h2>
+                  </div>
+                  <span class="icon-tile">
+                    <KeyRound :size="17" aria-hidden="true" />
+                  </span>
+                </div>
+                <p>
+                  网关不校验客户端 API Key，可填写 <code>local</code>、任意占位值或留空。
+                  真正的 CNB 鉴权来自已登录账号。
+                </p>
+                <div class="api-key-example">
+                  <span>示例</span>
+                  <code>local</code>
+                </div>
+              </article>
+            </template>
+          </div>
+
+          <article v-if="connectionDetailsVisible" class="card pipeline-card">
+            <div class="section-head">
+              <div>
+                <span class="card-label">启动链路</span>
+                <h2>自动连接状态</h2>
+              </div>
+              <span class="muted small">
+                端口 {{ snapshot?.settings.localPort ?? 11233 }}
               </span>
             </div>
-            <code class="endpoint-url">{{ baseUrl }}</code>
-            <div class="endpoint-meta">
-              <button
-                type="button"
-                class="secondary compact"
-                @click="copyText(baseUrl, 'Base URL 已复制')"
+            <div class="pipeline">
+              <div
+                v-for="(step, index) in pipelineSteps"
+                :key="step.label"
+                class="step"
+                :class="step.tone"
               >
-                <Copy :size="15" aria-hidden="true" />
-                复制地址
-              </button>
-            </div>
-          </article>
-
-          <article class="card overview-card account-card">
-            <div class="account-head">
-              <div class="account-main">
-                <span class="account-avatar">
-                  <CircleUserRound :size="23" aria-hidden="true" />
+                <span class="step-icon">
+                  <CheckCircle2
+                    v-if="step.tone === 'done'"
+                    :size="16"
+                    aria-hidden="true"
+                  />
+                  <LoaderCircle
+                    v-else-if="step.tone === 'current' && bridgeTransitioning"
+                    class="spin"
+                    :size="16"
+                    aria-hidden="true"
+                  />
+                  <AlertTriangle
+                    v-else-if="step.tone === 'error'"
+                    :size="16"
+                    aria-hidden="true"
+                  />
+                  <span v-else>{{ index + 1 }}</span>
                 </span>
                 <div>
-                  <span class="card-label">CNB 账号</span>
-                  <strong>{{ snapshot?.account.username || "尚未绑定" }}</strong>
+                  <strong>{{ step.label }}</strong>
+                  <small>{{ step.detail }}</small>
                 </div>
-              </div>
-              <span class="pill" :class="accountState">
-                {{
-                  accountState === "connected"
-                    ? "已连接"
-                    : accountState === "signingIn"
-                      ? "等待扫码"
-                      : "未登录"
-                }}
-              </span>
-            </div>
-            <div class="account-actions">
-              <button
-                v-if="accountState !== 'connected'"
-                type="button"
-                class="primary"
-                :disabled="busy || accountState === 'signingIn'"
-                @click="login"
-              >
-                <LoaderCircle
-                  v-if="accountState === 'signingIn'"
-                  class="spin"
-                  :size="16"
+                <ChevronRight
+                  v-if="index < pipelineSteps.length - 1"
+                  class="step-arrow"
+                  :size="15"
                   aria-hidden="true"
                 />
-                <ShieldCheck v-else :size="16" aria-hidden="true" />
-                {{ accountState === "signingIn" ? "等待扫码" : "扫码绑定 CNB" }}
-              </button>
-              <button
-                v-else
-                type="button"
-                class="danger compact"
-                :disabled="busy"
-                @click="run(logout)"
-              >
-                <LogOut :size="15" aria-hidden="true" />
-                退出登录
-              </button>
-              <button
-                v-if="accountState === 'signingIn'"
-                type="button"
-                class="ghost"
-                :disabled="busy"
-                @click="run(cancelLogin)"
-              >
-                取消扫码
-              </button>
+              </div>
             </div>
           </article>
         </div>
-
-        <article class="card pipeline-card">
-          <div class="section-head">
-            <div>
-              <span class="card-label">启动链路</span>
-              <h2>自动连接状态</h2>
-            </div>
-            <span class="muted small">端口 {{ snapshot?.settings.localPort ?? 11233 }}</span>
-          </div>
-          <div class="pipeline">
-            <div
-              v-for="(step, index) in pipelineSteps"
-              :key="step.label"
-              class="step"
-              :class="step.tone"
-            >
-              <span class="step-icon">
-                <CheckCircle2 v-if="step.tone === 'done'" :size="16" aria-hidden="true" />
-                <LoaderCircle
-                  v-else-if="step.tone === 'current' && bridgeTransitioning"
-                  class="spin"
-                  :size="16"
-                  aria-hidden="true"
-                />
-                <AlertTriangle
-                  v-else-if="step.tone === 'error'"
-                  :size="16"
-                  aria-hidden="true"
-                />
-                <span v-else>{{ index + 1 }}</span>
-              </span>
-              <div>
-                <strong>{{ step.label }}</strong>
-                <small>{{ step.detail }}</small>
-              </div>
-              <ChevronRight
-                v-if="index < pipelineSteps.length - 1"
-                class="step-arrow"
-                :size="15"
-                aria-hidden="true"
-              />
-            </div>
-          </div>
-        </article>
       </section>
 
       <section v-else-if="tab === 'settings'" class="page">
@@ -761,8 +918,7 @@ onBeforeUnmount(() => {
               </button>
             </div>
             <label v-if="logMode === 'runtime'" class="filter-control">
-              <span>级别</span>
-              <select v-model="logFilter">
+              <select v-model="logFilter" aria-label="日志级别">
                 <option value="all">全部</option>
                 <option value="info">Info</option>
                 <option value="warn">Warn</option>

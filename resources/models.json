@@ -6,39 +6,7 @@
       "created": 0,
       "owned_by": "cnb",
       "display_name": "DeepSeek-V4.1-Flash",
-      "description": "Latest frontier agentic coding model with text and image input.",
-      "context_window": 1048576,
-      "max_context_window": 1048576,
-      "input_modalities": [
-        "text",
-        "image"
-      ],
-      "output_modalities": [
-        "text"
-      ],
-      "default_reasoning_level": "high",
-      "supports_images": true,
-      "supports_tools": true,
-      "supports_streaming": true,
-      "supports_parallel_tool_calls": true,
-      "supports_reasoning_summaries": true,
-      "visibility": "list",
-      "supported_in_api": true,
-      "capabilities": {
-        "text": true,
-        "image_input": true,
-        "streaming": true,
-        "tools": true,
-        "reasoning": true
-      }
-    },
-    {
-      "id": "deepseek-flash",
-      "object": "model",
-      "created": 0,
-      "owned_by": "cnb",
-      "display_name": "DeepSeek-Flash",
-      "description": "Latest frontier agentic coding model with text and image input.",
+      "description": "面向编程与复杂代理任务，支持文本和图像输入。",
       "context_window": 1048576,
       "max_context_window": 1048576,
       "input_modalities": [

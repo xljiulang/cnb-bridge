@@ -35,12 +35,12 @@ agent 从云会话继承 `CNB_TOKEN`，只监听 loopback。客户端侧传入�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/healthz` | 本机健康检查，不启动工作空间 |
-| GET | `/models`、`/models/{id}` | 客户端内置模型目录，包含 `deepseek-v4.1-flash` 和 `deepseek-flash` |
+| GET | `/models`、`/models/{id}` | 客户端内置模型目录，包含 `deepseek-v4.1-flash` |
 | POST | `/chat/completions` | PromptGate 兼容处理后转发 Chat Completions |
 | POST | `/responses` | Responses 入、Chat 出并回译 |
 | OPTIONS | 已知公开路径 | CORS 预检 |
 
-模型目录通过编译内置的 `resources/models.json` 提供。两个模型都声明文本/图像输入、流式输出、工具调用、reasoning summary 和 1,048,576 token 上下文；推理请求仍允许显式传入其它模型 ID。
+模型目录通过编译内置的 `resources/models.json` 提供。`deepseek-v4.1-flash` 声明文本/图像输入、流式输出、工具调用、reasoning summary 和 1,048,576 token 上下文；推理请求仍允许显式传入其它模型 ID。
 
 ## PromptGate 兼容层
 
