@@ -1,13 +1,40 @@
-//! Persistent loopback gateway that activates CNB only when needed.
+//! Persistent loopback HTTP gateway that activates CNB only when needed.
 
 use crate::bridge::Bridge;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::http_trace::{HttpTraceSession, HttpTraceStore};
+use crate::responses::{
+    chat_to_responses, responses_to_chat, rewrite_system_prompt_brands, ResponsesStream, ToolShape,
+};
+use axum::body::{to_bytes, Body, Bytes};
+use axum::extract::{Path, State};
+use axum::http::{header, HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Json};
+use axum::routing::{get, post};
+use axum::Router;
+use futures_util::StreamExt;
+use serde::Serialize;
+use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use std::time::{Duration, Instant};
+use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tokio::time::{timeout, Duration};
+
+const MODELS_RESOURCE: &str = include_str!("../resources/models.json");
+const REQUEST_ID_HEADER: &str = "x-request-id";
+const BODY_LIMIT: usize = 64 * 1024 * 1024;
+const OPTIONAL_CHAT_FIELDS: [(&str, &[&str]); 6] = [
+    ("stream_options", &["stream_options", "include_usage"]),
+    (
+        "reasoning_effort",
+        &["reasoning_effort", "reasoning effort"],
+    ),
+    ("parallel_tool_calls", &["parallel_tool_calls"]),
+    ("prompt_cache_key", &["prompt_cache_key"]),
+    ("service_tier", &["service_tier"]),
+    ("tool_choice", &["tool_choice"]),
+];
 
 /// Gateway timing parameters.
 #[derive(Debug, Clone)]
@@ -49,14 +76,12 @@ impl GatewayActivity {
         }
     }
 
-    fn enter(&self) {
+    fn enter(self: &Arc<Self>) -> ActivityGuard {
         self.active_connections.fetch_add(1, Ordering::SeqCst);
         self.touch();
-    }
-
-    fn leave(&self) {
-        self.active_connections.fetch_sub(1, Ordering::SeqCst);
-        self.touch();
+        ActivityGuard {
+            activity: Arc::clone(self),
+        }
     }
 
     fn touch(&self) {
@@ -78,17 +103,66 @@ impl GatewayActivity {
     }
 }
 
+struct ActivityGuard {
+    activity: Arc<GatewayActivity>,
+}
+
+impl Drop for ActivityGuard {
+    fn drop(&mut self) {
+        self.activity
+            .active_connections
+            .fetch_sub(1, Ordering::SeqCst);
+        self.activity.touch();
+    }
+}
+
+#[derive(Clone)]
+struct GatewayState {
+    bridge: Arc<Bridge>,
+    activity: Arc<GatewayActivity>,
+    models: Value,
+    activation_timeout: Duration,
+    client: reqwest::Client,
+    upstream_override: Option<u16>,
+    trace_store: HttpTraceStore,
+}
+
 /// Handle owning one gateway listener and its monitoring task.
 pub struct GatewayHandle {
     port: u16,
     shutdown: watch::Sender<bool>,
-    tasks: Vec<tokio::task::JoinHandle<()>>,
+    task: tokio::task::JoinHandle<()>,
     activity: Arc<GatewayActivity>,
 }
 
 impl GatewayHandle {
     /// Binds the configured loopback port and starts serving requests.
     pub async fn start(bridge: Arc<Bridge>, config: GatewayConfig) -> Result<Self, String> {
+        Self::start_with_upstream_internal(
+            bridge,
+            config,
+            None,
+            crate::paths::logs_dir().join("http-trace"),
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    async fn start_with_upstream(
+        bridge: Arc<Bridge>,
+        config: GatewayConfig,
+        upstream_port: u16,
+        trace_root: std::path::PathBuf,
+    ) -> Result<Self, String> {
+        Self::start_with_upstream_internal(bridge, config, Some(upstream_port), trace_root).await
+    }
+
+    async fn start_with_upstream_internal(
+        bridge: Arc<Bridge>,
+        config: GatewayConfig,
+        upstream_override: Option<u16>,
+        trace_root: std::path::PathBuf,
+    ) -> Result<Self, String> {
         let listener = TcpListener::bind(("127.0.0.1", config.port))
             .await
             .map_err(|error| format!("绑定本地网关端口 {} 失败: {error}", config.port))?;
@@ -96,51 +170,44 @@ impl GatewayHandle {
             .local_addr()
             .map_err(|error| format!("读取本地网关端口失败: {error}"))?
             .port();
-        let (shutdown, _shutdown_rx) = watch::channel(false);
+        let (shutdown, _) = watch::channel(false);
         let activity = Arc::new(GatewayActivity::new());
-
-        let accept_activity = Arc::clone(&activity);
-        let accept_shutdown = shutdown.subscribe();
-        let weak_bridge = Arc::downgrade(&bridge);
-        let activation_timeout = config.activation_timeout;
-        let accept_task = tokio::spawn(async move {
-            let mut shutdown_rx = accept_shutdown;
-            loop {
-                tokio::select! {
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
+        let state = GatewayState {
+            bridge: Arc::clone(&bridge),
+            activity: Arc::clone(&activity),
+            models: load_models()?,
+            activation_timeout: config.activation_timeout,
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .map_err(|error| format!("创建本地 HTTP 客户端失败: {error}"))?,
+            upstream_override,
+            trace_store: HttpTraceStore::new(trace_root),
+        };
+        let app = router(state);
+        let mut shutdown_rx = shutdown.subscribe();
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    while !*shutdown_rx.borrow() {
+                        if shutdown_rx.changed().await.is_err() {
                             break;
                         }
                     }
-                    accepted = listener.accept() => {
-                        let Ok((stream, _peer)) = accepted else {
-                            break;
-                        };
-                        let Some(bridge) = weak_bridge.upgrade() else {
-                            break;
-                        };
-                        let activity = Arc::clone(&accept_activity);
-                        tokio::spawn(async move {
-                            activity.enter();
-                            handle_connection(bridge, stream, activation_timeout).await;
-                            activity.leave();
-                        });
-                    }
-                }
-            }
+                })
+                .await;
         });
 
         let idle_bridge = Arc::downgrade(&bridge);
         let idle_activity = Arc::clone(&activity);
         let idle_timeout = config.idle_timeout;
-        let idle_shutdown = shutdown.subscribe();
-        let idle_task = tokio::spawn(async move {
-            let mut shutdown_rx = idle_shutdown;
+        let mut idle_shutdown = shutdown.subscribe();
+        tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
                 tokio::select! {
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
+                    changed = idle_shutdown.changed() => {
+                        if changed.is_err() || *idle_shutdown.borrow() {
                             break;
                         }
                     }
@@ -166,7 +233,7 @@ impl GatewayHandle {
         Ok(Self {
             port,
             shutdown,
-            tasks: vec![accept_task, idle_task],
+            task,
             activity,
         })
     }
@@ -176,7 +243,7 @@ impl GatewayHandle {
         self.port
     }
 
-    /// Number of TCP requests currently being served.
+    /// Number of HTTP requests currently being served.
     pub fn active_connections(&self) -> usize {
         self.activity.active_connections()
     }
@@ -184,76 +251,1097 @@ impl GatewayHandle {
     /// Stops accepting new requests and ends the idle monitor.
     pub async fn stop(self) {
         let _ = self.shutdown.send(true);
-        for task in self.tasks {
+        let mut task = self.task;
+        if tokio::time::timeout(Duration::from_secs(5), &mut task)
+            .await
+            .is_err()
+        {
             task.abort();
             let _ = task.await;
         }
     }
 }
 
-async fn handle_connection(bridge: Arc<Bridge>, mut stream: TcpStream, activation_timeout: Duration) {
-    if is_health_request(&mut stream).await {
-        let mut request = [0_u8; 1024];
-        let _ = timeout(Duration::from_millis(100), stream.read(&mut request)).await;
-        let body = br#"{"status":"ok","bridge":"local-gateway"}"#;
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
-        let _ = stream.write_all(response.as_bytes()).await;
-        let _ = stream.write_all(body).await;
-        return;
-    }
-
-    let mut upstream = None;
-    for _ in 0..2 {
-        let activation_bridge = Arc::clone(&bridge);
-        let activation =
-            tokio::spawn(async move { activation_bridge.ensure_active().await });
-        let port = match timeout(activation_timeout, activation).await {
-            Ok(Ok(Ok(port))) => port,
-            Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => return,
-        };
-        match TcpStream::connect(("127.0.0.1", port)).await {
-            Ok(stream) => {
-                upstream = Some(stream);
-                break;
-            }
-            Err(error) => {
-                bridge
-                    .invalidate_tunnel(port, format!("连接动态隧道端口 {port} 失败: {error}"))
-                    .await;
-            }
-        }
-    }
-    let Some(mut upstream) = upstream else {
-        return;
-    };
-    let _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
+fn router(state: GatewayState) -> Router {
+    Router::new()
+        .route("/healthz", get(handle_health))
+        .route("/v1/healthz", get(handle_health))
+        .route("/models", get(handle_models))
+        .route("/v1/models", get(handle_models))
+        .route("/models/{id}", get(handle_model))
+        .route("/v1/models/{id}", get(handle_model))
+        .route("/chat/completions", post(handle_chat))
+        .route("/v1/chat/completions", post(handle_chat))
+        .route("/responses", post(handle_responses))
+        .route("/v1/responses", post(handle_responses))
+        .fallback(handle_not_found)
+        .method_not_allowed_fallback(handle_method_not_allowed)
+        .layer(middleware::from_fn(cors_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            activity_middleware,
+        ))
+        .with_state(state)
 }
 
-async fn is_health_request(stream: &mut TcpStream) -> bool {
-    let mut buffer = [0_u8; 512];
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return false;
-        }
-        let Ok(read) = timeout(remaining, stream.peek(&mut buffer)).await else {
-            return false;
-        };
-        let Ok(read) = read else {
-            return false;
-        };
-        if read == 0 {
-            return false;
-        }
-        let request = String::from_utf8_lossy(&buffer[..read]);
-        if request.contains("\r\n") || read == buffer.len() {
-            return request.starts_with("GET /healthz ");
+async fn cors_middleware(request: Request<Body>, next: Next) -> Response<Body> {
+    if request.method() == Method::OPTIONS && is_known_path(request.uri().path()) {
+        return with_cors(StatusCode::NO_CONTENT.into_response());
+    }
+    with_cors(next.run(request).await)
+}
+
+async fn activity_middleware(
+    State(state): State<GatewayState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    activity_response(next.run(request).await, state.activity.enter())
+}
+
+fn begin_upstream_trace(
+    state: &GatewayState,
+    protocol: &str,
+    exchange: &UpstreamExchange,
+) -> Option<HttpTraceSession> {
+    let parts = UpstreamTraceParts {
+        protocol,
+        request_headers: &exchange.request_headers,
+        request_body: &exchange.request_body,
+        request_target: &exchange.request_target,
+        started: exchange.started,
+        started_at: exchange.started_at,
+        response_headers: exchange.response.headers(),
+        response_status: exchange.response.status(),
+    };
+    begin_upstream_trace_parts(state, &parts)
+}
+
+struct UpstreamTraceParts<'a> {
+    protocol: &'a str,
+    request_headers: &'a HeaderMap,
+    request_body: &'a [u8],
+    request_target: &'a str,
+    started: Instant,
+    started_at: std::time::SystemTime,
+    response_headers: &'a HeaderMap,
+    response_status: reqwest::StatusCode,
+}
+
+fn begin_upstream_trace_parts(
+    state: &GatewayState,
+    parts: &UpstreamTraceParts<'_>,
+) -> Option<HttpTraceSession> {
+    let mut trace = state
+        .trace_store
+        .start_at(parts.protocol, parts.started, parts.started_at)
+        .ok()?;
+    trace
+        .write_request_http(
+            "POST",
+            parts.request_target,
+            parts.request_headers,
+            parts.request_body,
+        )
+        .ok();
+    trace
+        .write_response_http(
+            status_from_reqwest(parts.response_status),
+            parts.response_headers,
+        )
+        .ok();
+    Some(trace)
+}
+
+fn response_request_id(trace: &Option<HttpTraceSession>) -> String {
+    trace
+        .as_ref()
+        .map_or_else(new_request_id, |trace| trace.id().to_string())
+}
+
+struct TracedUpstreamState {
+    source: futures_util::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
+    trace: Option<HttpTraceSession>,
+    status: StatusCode,
+}
+
+impl Drop for TracedUpstreamState {
+    fn drop(&mut self) {
+        if let Some(mut trace) = self.trace.take() {
+            let elapsed = trace.elapsed();
+            let _ = trace.finish(self.status.as_u16(), "client_disconnected", elapsed);
         }
     }
+}
+
+fn traced_upstream_response(
+    response: reqwest::Response,
+    trace: Option<HttpTraceSession>,
+    request_id: &str,
+) -> Response<Body> {
+    let status = status_from_reqwest(response.status());
+    let mut headers = HeaderMap::new();
+    copy_response_headers(response.headers(), &mut headers);
+    if !headers.contains_key(REQUEST_ID_HEADER) {
+        if let Ok(value) = HeaderValue::from_str(request_id) {
+            headers.insert(REQUEST_ID_HEADER, value);
+        }
+    }
+    let state = TracedUpstreamState {
+        source: response.bytes_stream().boxed(),
+        trace,
+        status,
+    };
+    let stream = futures_util::stream::unfold(state, |mut state| async move {
+        match state.source.next().await {
+            Some(Ok(bytes)) => {
+                if let Some(trace) = state.trace.as_mut() {
+                    trace.write_response_chunk(&bytes).ok();
+                }
+                Some((Ok::<Bytes, std::io::Error>(bytes), state))
+            }
+            Some(Err(error)) => {
+                if let Some(mut trace) = state.trace.take() {
+                    let elapsed = trace.elapsed();
+                    let _ = trace.finish(state.status.as_u16(), "stream_error", elapsed);
+                }
+                Some((Err(std::io::Error::other(error)), state))
+            }
+            None => {
+                if let Some(mut trace) = state.trace.take() {
+                    let result = if state.status.is_success() {
+                        "completed"
+                    } else {
+                        "failed"
+                    };
+                    let elapsed = trace.elapsed();
+                    let _ = trace.finish(state.status.as_u16(), result, elapsed);
+                }
+                None
+            }
+        }
+    });
+    let mut response = Response::new(Body::from_stream(stream));
+    *response.status_mut() = status;
+    *response.headers_mut() = headers;
+    response
+}
+
+struct ActivityResponseState {
+    source: futures_util::stream::BoxStream<'static, Result<Bytes, axum::Error>>,
+    guard: Option<ActivityGuard>,
+}
+
+impl Drop for ActivityResponseState {
+    fn drop(&mut self) {
+        self.guard.take();
+    }
+}
+
+fn activity_response(response: Response<Body>, guard: ActivityGuard) -> Response<Body> {
+    let response = with_request_id(response, &new_request_id());
+    let (parts, body) = response.into_parts();
+    let state = ActivityResponseState {
+        source: body.into_data_stream().boxed(),
+        guard: Some(guard),
+    };
+    let stream = futures_util::stream::unfold(state, |mut state| async move {
+        match state.source.next().await {
+            Some(Ok(bytes)) => Some((Ok::<Bytes, std::io::Error>(bytes), state)),
+            Some(Err(error)) => {
+                state.guard.take();
+                Some((Err(std::io::Error::other(error)), state))
+            }
+            None => {
+                state.guard.take();
+                None
+            }
+        }
+    });
+    Response::from_parts(parts, Body::from_stream(stream))
+}
+
+fn with_cors(mut response: Response<Body>) -> Response<Body> {
+    let headers = response.headers_mut();
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET,POST,OPTIONS"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_MAX_AGE,
+        HeaderValue::from_static("86400"),
+    );
+    response
+}
+
+fn is_known_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/healthz"
+            | "/v1/healthz"
+            | "/models"
+            | "/v1/models"
+            | "/chat/completions"
+            | "/v1/chat/completions"
+            | "/responses"
+            | "/v1/responses"
+    ) || path
+        .strip_prefix("/models/")
+        .or_else(|| path.strip_prefix("/v1/models/"))
+        .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+}
+
+async fn handle_health(State(_state): State<GatewayState>) -> Response<Body> {
+    Json(json!({
+        "status": "ok",
+        "bridge": "local-gateway"
+    }))
+    .into_response()
+}
+
+async fn handle_models(State(state): State<GatewayState>) -> Response<Body> {
+    Json(json!({
+        "object": "list",
+        "data": state.models["models"].clone()
+    }))
+    .into_response()
+}
+
+async fn handle_model(State(state): State<GatewayState>, Path(id): Path<String>) -> Response<Body> {
+    let model = state.models["models"]
+        .as_array()
+        .and_then(|models| {
+            models
+                .iter()
+                .find(|model| model.get("id").and_then(Value::as_str) == Some(id.as_str()))
+        })
+        .cloned();
+    match model {
+        Some(model) => Json(model).into_response(),
+        None => error_response(
+            StatusCode::NOT_FOUND,
+            "model_not_found",
+            format!("The model '{id}' does not exist"),
+        ),
+    }
+}
+
+async fn handle_chat(
+    State(state): State<GatewayState>,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Body,
+) -> Response<Body> {
+    let bytes = match to_bytes(body, BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                "request body is too large",
+            )
+        }
+    };
+    let bytes = rewrite_chat_request_body(bytes);
+    let exchange = match send_chat_request(&state, &headers, &uri, bytes).await {
+        Ok(exchange) => exchange,
+        Err(response) => return response,
+    };
+    let trace = begin_upstream_trace(&state, "chat", &exchange);
+    let request_id = response_request_id(&trace);
+    if !exchange.response.status().is_success() {
+        return upstream_error_response(exchange, trace, &request_id).await;
+    }
+    traced_upstream_response(exchange.response, trace, &request_id)
+}
+
+fn rewrite_chat_request_body(bytes: Bytes) -> Bytes {
+    let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) else {
+        return bytes;
+    };
+    if !rewrite_system_prompt_brands(&mut value) {
+        return bytes;
+    }
+    serde_json::to_vec(&value).map(Bytes::from).unwrap_or(bytes)
+}
+
+async fn handle_responses(
+    State(state): State<GatewayState>,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Body,
+) -> Response<Body> {
+    let bytes = match to_bytes(body, BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                "request body is too large",
+            )
+        }
+    };
+    let request: Value = match serde_json::from_slice(&bytes) {
+        Ok(request @ Value::Object(_)) => request,
+        _ => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_json",
+                "request body is not a valid JSON object",
+            )
+        }
+    };
+    let stream = request
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let model = request
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let shape = ToolShape::from_request(&request);
+    let mut chat = match responses_to_chat(&request, true) {
+        Ok(chat) => chat,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, "invalid_json", message),
+    };
+    if chat.get("stream_options").is_none() {
+        chat["stream_options"] = json!({ "include_usage": true });
+    }
+    let exchange = loop {
+        let encoded = match serde_json::to_vec(&chat) {
+            Ok(encoded) => Bytes::from(encoded),
+            Err(_) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "failed to encode translated request",
+                )
+            }
+        };
+        let exchange = match send_chat_request(&state, &headers, &uri, encoded).await {
+            Ok(exchange) => exchange,
+            Err(response) => return response,
+        };
+        if exchange.response.status().is_success() {
+            break exchange;
+        }
+        let response_status = exchange.response.status();
+        let status = status_from_reqwest(response_status);
+        let retry_after = exchange
+            .response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .cloned();
+        let response_headers = exchange.response.headers().clone();
+        let body = exchange.response.bytes().await.unwrap_or_default();
+        let text = String::from_utf8_lossy(&body).into_owned();
+        let lower = text.to_ascii_lowercase();
+        let removable = if status == StatusCode::BAD_REQUEST {
+            OPTIONAL_CHAT_FIELDS.iter().find_map(|(field, needles)| {
+                chat.get(*field).is_some().then_some(()).filter(|_| {
+                    needles
+                        .iter()
+                        .any(|needle| lower.contains(&needle.to_ascii_lowercase()))
+                })?;
+                Some(*field)
+            })
+        } else {
+            None
+        };
+        if let Some(field) = removable {
+            if let Some(object) = chat.as_object_mut() {
+                object.remove(field);
+            }
+            continue;
+        }
+        let trace = begin_upstream_trace_parts(
+            &state,
+            &UpstreamTraceParts {
+                protocol: "responses",
+                request_headers: &exchange.request_headers,
+                request_body: &exchange.request_body,
+                request_target: &exchange.request_target,
+                started: exchange.started,
+                started_at: exchange.started_at,
+                response_headers: &response_headers,
+                response_status,
+            },
+        );
+        let request_id = response_request_id(&trace);
+        if let Some(mut trace) = trace {
+            trace.write_response_chunk(&body).ok();
+            let elapsed = trace.elapsed();
+            trace.finish(status.as_u16(), "failed", elapsed).ok();
+        }
+        return upstream_error_from_text(status, retry_after, text, &request_id);
+    };
+    let mut trace = begin_upstream_trace(&state, "responses", &exchange);
+    let request_id = response_request_id(&trace);
+    let status = status_from_reqwest(exchange.response.status());
+    let content_type = exchange
+        .response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if stream && content_type.starts_with("text/event-stream") {
+        return responses_stream_response(exchange.response, model, shape, trace, &request_id);
+    }
+    let chat = if content_type.starts_with("text/event-stream") {
+        match aggregate_chat_stream(exchange.response, trace, status).await {
+            Ok(chat) => chat,
+            Err((status, code, message)) => {
+                return error_response_with_id(status, code, message, request_id)
+            }
+        }
+    } else {
+        let body = match exchange.response.bytes().await {
+            Ok(body) => body,
+            Err(error) => {
+                if let Some(mut trace) = trace.take() {
+                    let elapsed = trace.elapsed();
+                    trace.finish(status.as_u16(), "stream_error", elapsed).ok();
+                }
+                return error_response_with_id(
+                    StatusCode::BAD_GATEWAY,
+                    "upstream_network_error",
+                    format!("failed to read upstream response: {error}"),
+                    request_id,
+                );
+            }
+        };
+        if let Some(mut trace) = trace {
+            trace.write_response_chunk(&body).ok();
+            let elapsed = trace.elapsed();
+            trace.finish(status.as_u16(), "completed", elapsed).ok();
+        }
+        match serde_json::from_slice(&body) {
+            Ok(chat) => chat,
+            Err(error) => {
+                return error_response_with_id(
+                    StatusCode::BAD_GATEWAY,
+                    "upstream_server_error",
+                    format!("upstream response is not valid JSON: {error}"),
+                    request_id,
+                )
+            }
+        }
+    };
+    match chat_to_responses(&chat, &model, &shape) {
+        Ok(response) => with_request_id(Json(response).into_response(), &request_id),
+        Err(message) => error_response_with_id(
+            StatusCode::BAD_GATEWAY,
+            "malformed_tool_call_arguments",
+            message,
+            request_id,
+        ),
+    }
+}
+
+async fn ensure_upstream_port(state: &GatewayState) -> Result<u16, Response<Body>> {
+    if let Some(port) = state.upstream_override {
+        return Ok(port);
+    }
+    let bridge = Arc::clone(&state.bridge);
+    let activation = tokio::spawn(async move { bridge.ensure_active().await });
+    match tokio::time::timeout(state.activation_timeout, activation).await {
+        Ok(Ok(Ok(port))) => Ok(port),
+        Ok(Ok(Err(error))) => Err(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "workspace_unavailable",
+            error.to_string(),
+        )),
+        Ok(Err(error)) => Err(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "workspace_unavailable",
+            format!("workspace activation task failed: {error}"),
+        )),
+        Err(_) => Err(error_response(
+            StatusCode::GATEWAY_TIMEOUT,
+            "workspace_activation_timeout",
+            "workspace activation timed out",
+        )),
+    }
+}
+
+struct UpstreamExchange {
+    response: reqwest::Response,
+    request_headers: HeaderMap,
+    request_body: Bytes,
+    request_target: String,
+    started: Instant,
+    started_at: std::time::SystemTime,
+}
+
+async fn send_chat_request(
+    state: &GatewayState,
+    headers: &HeaderMap,
+    uri: &Uri,
+    body: Bytes,
+) -> Result<UpstreamExchange, Response<Body>> {
+    let mut last_error = None;
+    for attempt in 0..2 {
+        let port = ensure_upstream_port(state).await?;
+        let mut request_target = "/chat/completions".to_string();
+        if let Some(query) = uri.query() {
+            request_target.push('?');
+            request_target.push_str(query);
+        }
+        let url = format!("http://127.0.0.1:{port}{request_target}");
+        let request_headers = forwarded_request_headers(headers, port, body.len());
+        let started = Instant::now();
+        let started_at = std::time::SystemTime::now();
+        let request = state
+            .client
+            .post(url)
+            .headers(request_headers.clone())
+            .body(body.clone());
+        match request.send().await {
+            Ok(response) => {
+                return Ok(UpstreamExchange {
+                    response,
+                    request_headers,
+                    request_body: body,
+                    request_target,
+                    started,
+                    started_at,
+                })
+            }
+            Err(error) => {
+                last_error = Some(error.to_string());
+                if attempt == 0 && state.upstream_override.is_none() {
+                    state
+                        .bridge
+                        .invalidate_tunnel(port, format!("本地 HTTP 网关连接 agent 失败: {error}"))
+                        .await;
+                }
+            }
+        }
+    }
+    Err(error_response(
+        StatusCode::BAD_GATEWAY,
+        "upstream_network_error",
+        last_error.unwrap_or_else(|| "could not reach upstream".to_string()),
+    ))
+}
+
+fn forwarded_request_headers(headers: &HeaderMap, port: u16, content_length: usize) -> HeaderMap {
+    let mut forwarded = HeaderMap::new();
+    for (name, value) in headers.iter() {
+        if !is_request_hop_header(name.as_str()) {
+            forwarded.append(name, value.clone());
+        }
+    }
+    if let Ok(value) = HeaderValue::from_str(&content_length.to_string()) {
+        forwarded.insert(header::CONTENT_LENGTH, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&format!("127.0.0.1:{port}")) {
+        forwarded.insert(header::HOST, value);
+    }
+    forwarded
+}
+
+async fn upstream_error_response(
+    exchange: UpstreamExchange,
+    mut trace: Option<HttpTraceSession>,
+    request_id: &str,
+) -> Response<Body> {
+    let status = status_from_reqwest(exchange.response.status());
+    let retry_after = exchange
+        .response
+        .headers()
+        .get(header::RETRY_AFTER)
+        .cloned();
+    let body = exchange.response.bytes().await.unwrap_or_default();
+    if let Some(trace) = trace.as_mut() {
+        trace.write_response_chunk(&body).ok();
+        let elapsed = trace.elapsed();
+        trace.finish(status.as_u16(), "failed", elapsed).ok();
+    }
+    upstream_error_from_text(
+        status,
+        retry_after,
+        String::from_utf8_lossy(&body).into_owned(),
+        request_id,
+    )
+}
+
+fn upstream_error_from_text(
+    status: StatusCode,
+    retry_after: Option<HeaderValue>,
+    text: String,
+    request_id: &str,
+) -> Response<Body> {
+    let message = serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| {
+            if text.is_empty() {
+                format!("upstream returned HTTP {}", status.as_u16())
+            } else {
+                text
+            }
+        });
+    let code = match status.as_u16() {
+        400 => "upstream_invalid_request",
+        401 => "upstream_unauthorized",
+        403 => "upstream_forbidden",
+        408 => "upstream_timeout",
+        429 => "upstream_rate_limited",
+        500..=599 => "upstream_server_error",
+        _ => "upstream_invalid_request",
+    };
+    let mut response = error_response_with_id(status, code, message, request_id.to_string());
+    if let Some(retry_after) = retry_after {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, retry_after);
+    }
+    response
+}
+
+fn status_from_reqwest(status: reqwest::StatusCode) -> StatusCode {
+    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY)
+}
+
+fn is_request_hop_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "host"
+            | "content-length"
+            | "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
+}
+
+fn copy_response_headers(source: &reqwest::header::HeaderMap, destination: &mut HeaderMap) {
+    for (name, value) in source.iter() {
+        if matches!(
+            name.as_str().to_ascii_lowercase().as_str(),
+            "connection"
+                | "keep-alive"
+                | "proxy-authenticate"
+                | "proxy-authorization"
+                | "te"
+                | "trailer"
+                | "transfer-encoding"
+                | "upgrade"
+        ) {
+            continue;
+        }
+        if let Ok(value) = HeaderValue::from_bytes(value.as_bytes()) {
+            destination.append(name, value);
+        }
+    }
+}
+
+async fn aggregate_chat_stream(
+    response: reqwest::Response,
+    mut trace: Option<HttpTraceSession>,
+    status: StatusCode,
+) -> Result<Value, (StatusCode, &'static str, String)> {
+    let mut chunks = response.bytes_stream();
+    let mut buffer = Vec::new();
+    let mut chat = json!({ "choices": [{ "message": { "role": "assistant", "content": "" } }] });
+    let mut tools = std::collections::BTreeMap::<usize, Value>::new();
+    while let Some(chunk) = chunks.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                if let Some(mut trace) = trace.take() {
+                    let elapsed = trace.elapsed();
+                    trace.finish(status.as_u16(), "stream_error", elapsed).ok();
+                }
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    "upstream_network_error",
+                    format!("failed to read upstream stream: {error}"),
+                ));
+            }
+        };
+        if let Some(trace) = trace.as_mut() {
+            trace.write_response_chunk(&chunk).ok();
+        }
+        buffer.extend_from_slice(&chunk);
+        let mut consumed = 0;
+        while let Some(relative) = buffer[consumed..].iter().position(|byte| *byte == b'\n') {
+            let position = consumed + relative;
+            if let Err(error) =
+                process_aggregate_line(&buffer[consumed..=position], &mut chat, &mut tools)
+            {
+                if let Some(mut trace) = trace.take() {
+                    let elapsed = trace.elapsed();
+                    trace.finish(status.as_u16(), "failed", elapsed).ok();
+                }
+                return Err(error);
+            }
+            consumed = position + 1;
+        }
+        if consumed > 0 {
+            buffer.drain(..consumed);
+        }
+    }
+    if !buffer.is_empty() {
+        if let Err(error) = process_aggregate_line(&buffer, &mut chat, &mut tools) {
+            if let Some(mut trace) = trace.take() {
+                let elapsed = trace.elapsed();
+                trace.finish(status.as_u16(), "failed", elapsed).ok();
+            }
+            return Err(error);
+        }
+    }
+    if !tools.is_empty() {
+        chat["choices"][0]["message"]["tool_calls"] = Value::Array(tools.into_values().collect());
+    }
+    if let Some(mut trace) = trace.take() {
+        let elapsed = trace.elapsed();
+        trace.finish(status.as_u16(), "completed", elapsed).ok();
+    }
+    Ok(chat)
+}
+
+fn process_aggregate_line(
+    line: &[u8],
+    chat: &mut Value,
+    tools: &mut std::collections::BTreeMap<usize, Value>,
+) -> Result<(), (StatusCode, &'static str, String)> {
+    let line = String::from_utf8_lossy(line);
+    let Some(payload) = line.trim().strip_prefix("data:") else {
+        return Ok(());
+    };
+    if payload.trim() == "[DONE]" {
+        return Ok(());
+    }
+    let chunk: Value = serde_json::from_str(payload.trim()).map_err(|error| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "upstream_server_error",
+            format!("invalid upstream SSE JSON: {error}"),
+        )
+    })?;
+    for field in ["id", "created", "model"] {
+        if let Some(value) = chunk.get(field) {
+            chat[field] = value.clone();
+        }
+    }
+    if let Some(usage) = chunk.get("usage").filter(|value| !value.is_null()) {
+        chat["usage"] = usage.clone();
+    }
+    if let Some(choice) = chunk
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+    {
+        let delta = choice.get("delta").unwrap_or(&Value::Null);
+        if let Some(content) = delta.get("content").and_then(Value::as_str) {
+            let existing = chat["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            chat["choices"][0]["message"]["content"] = json!(format!("{existing}{content}"));
+        }
+        if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
+            for call in calls {
+                let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let entry = tools.entry(index).or_insert_with(|| {
+                    json!({
+                        "id": "",
+                        "type": "function",
+                        "function": { "name": "", "arguments": "" }
+                    })
+                });
+                if let Some(id) = call.get("id").and_then(Value::as_str) {
+                    entry["id"] = json!(id);
+                }
+                if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
+                    entry["function"]["name"] = json!(format!(
+                        "{}{}",
+                        entry["function"]["name"].as_str().unwrap_or(""),
+                        name
+                    ));
+                }
+                if let Some(arguments) = call.pointer("/function/arguments").and_then(Value::as_str)
+                {
+                    entry["function"]["arguments"] = json!(format!(
+                        "{}{}",
+                        entry["function"]["arguments"].as_str().unwrap_or(""),
+                        arguments
+                    ));
+                }
+            }
+        }
+        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            chat["choices"][0]["finish_reason"] = json!(reason);
+        }
+    }
+    Ok(())
+}
+
+struct ResponsesStreamState {
+    source: futures_util::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
+    translator: ResponsesStream,
+    buffer: Vec<u8>,
+    pending: std::collections::VecDeque<Result<Bytes, std::io::Error>>,
+    done: bool,
+    trace: Option<HttpTraceSession>,
+    status: StatusCode,
+}
+
+impl Drop for ResponsesStreamState {
+    fn drop(&mut self) {
+        if let Some(mut trace) = self.trace.take() {
+            let elapsed = trace.elapsed();
+            trace
+                .finish(self.status.as_u16(), "client_disconnected", elapsed)
+                .ok();
+        }
+    }
+}
+
+fn responses_stream_response(
+    response: reqwest::Response,
+    model: String,
+    shape: ToolShape,
+    trace: Option<HttpTraceSession>,
+    request_id: &str,
+) -> Response<Body> {
+    let status = status_from_reqwest(response.status());
+    let response_id = format!(
+        "resp_{}_{}",
+        chrono::Utc::now().timestamp_millis(),
+        next_request_sequence()
+    );
+    let state = ResponsesStreamState {
+        source: response.bytes_stream().boxed(),
+        translator: ResponsesStream::with_shape(response_id, model, shape),
+        buffer: Vec::new(),
+        pending: std::collections::VecDeque::new(),
+        done: false,
+        trace,
+        status,
+    };
+    let stream = futures_util::stream::unfold(state, |mut state| async move {
+        loop {
+            if let Some(item) = state.pending.pop_front() {
+                return Some((item, state));
+            }
+            if state.done {
+                return None;
+            }
+            match state.source.next().await {
+                Some(Ok(chunk)) => {
+                    if let Some(trace) = state.trace.as_mut() {
+                        trace.write_response_chunk(&chunk).ok();
+                    }
+                    state.buffer.extend_from_slice(&chunk);
+                    let mut consumed = 0;
+                    while let Some(relative) = state.buffer[consumed..]
+                        .iter()
+                        .position(|byte| *byte == b'\n')
+                    {
+                        let position = consumed + relative;
+                        let line = String::from_utf8_lossy(&state.buffer[consumed..=position]);
+                        consumed = position + 1;
+                        let Some(payload) = line.trim().strip_prefix("data:") else {
+                            continue;
+                        };
+                        if payload.trim() == "[DONE]" {
+                            let terminal = state.translator.finish().concat();
+                            if !terminal.is_empty() {
+                                state.pending.push_back(Ok(Bytes::from(terminal)));
+                            }
+                            if let Some(mut trace) = state.trace.take() {
+                                let elapsed = trace.elapsed();
+                                trace
+                                    .finish(state.status.as_u16(), "completed", elapsed)
+                                    .ok();
+                            }
+                            state.done = true;
+                            break;
+                        }
+                        if let Ok(chunk) = serde_json::from_str::<Value>(payload.trim()) {
+                            let events = state.translator.push(&chunk).concat();
+                            if !events.is_empty() {
+                                state.pending.push_back(Ok(Bytes::from(events)));
+                            }
+                        }
+                    }
+                    if consumed > 0 {
+                        state.buffer.drain(..consumed);
+                    }
+                }
+                Some(Err(error)) => {
+                    if let Some(mut trace) = state.trace.take() {
+                        let elapsed = trace.elapsed();
+                        trace
+                            .finish(state.status.as_u16(), "stream_error", elapsed)
+                            .ok();
+                    }
+                    state
+                        .pending
+                        .push_back(Err(std::io::Error::other(error.to_string())));
+                    state.done = true;
+                }
+                None => {
+                    let terminal = state.translator.finish().concat();
+                    if !terminal.is_empty() {
+                        state.pending.push_back(Ok(Bytes::from(terminal)));
+                    }
+                    if let Some(mut trace) = state.trace.take() {
+                        let elapsed = trace.elapsed();
+                        trace
+                            .finish(state.status.as_u16(), "completed", elapsed)
+                            .ok();
+                    }
+                    state.done = true;
+                }
+            }
+        }
+    });
+    let mut response = Response::new(Body::from_stream(stream));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    with_request_id(response, request_id)
+}
+
+async fn handle_not_found() -> Response<Body> {
+    error_response(StatusCode::NOT_FOUND, "not_found", "endpoint not found")
+}
+
+async fn handle_method_not_allowed() -> Response<Body> {
+    error_response(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method_not_allowed",
+        "HTTP method not allowed",
+    )
+}
+
+fn load_models() -> Result<Value, String> {
+    let value: Value = serde_json::from_str(MODELS_RESOURCE)
+        .map_err(|error| format!("解析内置模型目录失败: {error}"))?;
+    let models = value
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "内置模型目录缺少 models 数组".to_string())?;
+    if models.is_empty()
+        || models
+            .iter()
+            .any(|model| model.get("id").and_then(Value::as_str).is_none())
+    {
+        return Err("内置模型目录包含无效模型".to_string());
+    }
+    Ok(value)
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorEnvelope {
+    error: ErrorDetail,
+    request_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorDetail {
+    message: String,
+    #[serde(rename = "type")]
+    error_type: &'static str,
+    code: String,
+    param: Option<String>,
+    retryable: bool,
+}
+
+fn error_response(
+    status: StatusCode,
+    code: impl Into<String>,
+    message: impl Into<String>,
+) -> Response<Body> {
+    error_response_with_id(status, code, message, new_request_id())
+}
+
+fn error_response_with_id(
+    status: StatusCode,
+    code: impl Into<String>,
+    message: impl Into<String>,
+    request_id: String,
+) -> Response<Body> {
+    let code = code.into();
+    let (error_type, retryable) = error_contract(&code, status);
+    let payload = ErrorEnvelope {
+        error: ErrorDetail {
+            message: message.into(),
+            error_type,
+            code,
+            param: None,
+            retryable,
+        },
+        request_id: request_id.clone(),
+    };
+    let mut response = (status, Json(payload)).into_response();
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert(REQUEST_ID_HEADER, value);
+    }
+    response
+}
+
+fn new_request_id() -> String {
+    format!(
+        "req_{:x}_{:x}",
+        chrono::Utc::now().timestamp_millis(),
+        next_request_sequence()
+    )
+}
+
+fn next_request_sequence() -> u64 {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    SEQUENCE.fetch_add(1, Ordering::Relaxed)
+}
+
+fn error_contract(code: &str, status: StatusCode) -> (&'static str, bool) {
+    match code {
+        "upstream_unauthorized" => ("authentication_error", false),
+        "upstream_forbidden" => ("permission_error", false),
+        "upstream_rate_limited" => ("rate_limit_error", true),
+        "upstream_timeout"
+        | "upstream_network_error"
+        | "upstream_server_error"
+        | "internal_error" => ("server_error", true),
+        _ if status.is_server_error() => ("server_error", true),
+        _ => ("invalid_request_error", false),
+    }
+}
+
+fn with_request_id(mut response: Response<Body>, request_id: &str) -> Response<Body> {
+    if !response.headers().contains_key(REQUEST_ID_HEADER) {
+        if let Ok(value) = HeaderValue::from_str(request_id) {
+            response.headers_mut().insert(REQUEST_ID_HEADER, value);
+        }
+    }
+    response
 }
 
 #[cfg(test)]
@@ -263,7 +1351,9 @@ mod tests {
     use crate::logging::Logger;
     use crate::settings::SettingsStore;
     use crate::ssh_key::SshKeyStore;
-    use tokio::io::AsyncReadExt;
+    use axum::routing::post;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
 
     #[test]
     fn gateway_config_uses_request_driven_defaults() {
@@ -289,20 +1379,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn activity_tracks_connections_and_last_use() {
-        let activity = GatewayActivity::new();
-        activity.enter();
-        activity.enter();
+    async fn activity_tracks_requests_and_last_use() {
+        let activity = Arc::new(GatewayActivity::new());
+        let first = activity.enter();
+        let second = activity.enter();
         assert_eq!(activity.active_connections(), 2);
-        activity.leave();
+        drop(first);
         assert_eq!(activity.active_connections(), 1);
-        activity.leave();
+        drop(second);
         assert_eq!(activity.active_connections(), 0);
         assert!(activity.idle_for() < Duration::from_secs(1));
     }
 
-    #[tokio::test]
-    async fn health_request_is_answered_locally_without_activation() {
+    async fn test_gateway() -> (tempfile::TempDir, Arc<Bridge>, GatewayHandle) {
         let temp = tempfile::tempdir().unwrap();
         let account = crate::account::AccountManager::with_store(AccountStore::new(
             temp.path().join("account.bin"),
@@ -316,16 +1405,24 @@ mod tests {
             ),
             Arc::new(Logger::new(32)),
         ));
-        let gateway = GatewayHandle::start(
+        let gateway = GatewayHandle::start_with_upstream_internal(
             Arc::clone(&bridge),
             GatewayConfig {
                 port: 0,
                 activation_timeout: Duration::from_secs(1),
                 idle_timeout: Duration::from_secs(60),
             },
+            None,
+            temp.path().join("http-trace"),
         )
         .await
         .unwrap();
+        (temp, bridge, gateway)
+    }
+
+    #[tokio::test]
+    async fn health_request_is_answered_locally_without_activation() {
+        let (_temp, bridge, gateway) = test_gateway().await;
         let mut stream = TcpStream::connect(("127.0.0.1", gateway.port()))
             .await
             .unwrap();
@@ -338,7 +1435,508 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("local-gateway"));
-        assert_eq!(bridge.snapshot().await.state, crate::bridge::BridgeState::SignedOut);
+        assert_eq!(
+            bridge.snapshot().await.state,
+            crate::bridge::BridgeState::SignedOut
+        );
         gateway.stop().await;
+    }
+
+    #[tokio::test]
+    async fn models_are_served_locally_from_the_embedded_catalog() {
+        let (_temp, bridge, gateway) = test_gateway().await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{}", gateway.port());
+        let list = client
+            .get(format!("{base}/v1/models"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(list.status(), reqwest::StatusCode::OK);
+        let payload: serde_json::Value = list.json().await.unwrap();
+        assert_eq!(payload["object"], "list");
+        assert_eq!(payload["data"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["data"][0]["id"], "deepseek-v4-flash");
+
+        let detail = client
+            .get(format!("{base}/models/deepseek-v4-flash"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(detail.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            detail.json::<serde_json::Value>().await.unwrap()["id"],
+            "deepseek-v4-flash"
+        );
+        let missing = client
+            .get(format!("{base}/models/other"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+        assert_eq!(
+            bridge.snapshot().await.state,
+            crate::bridge::BridgeState::SignedOut
+        );
+        gateway.stop().await;
+    }
+
+    #[tokio::test]
+    async fn chat_and_responses_are_routed_through_the_local_http_proxy() {
+        let captured = Arc::new(Mutex::new(None::<(String, Value)>));
+        let captured_for_upstream = Arc::clone(&captured);
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(move |uri: axum::http::Uri, body: Bytes| {
+                let captured = Arc::clone(&captured_for_upstream);
+                async move {
+                    let value: Value = serde_json::from_slice(&body).unwrap();
+                    *captured.lock().unwrap() =
+                        Some((uri.query().unwrap_or_default().to_string(), value.clone()));
+                    if value["messages"][0]["content"] == "hello" {
+                        (
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\ndata: [DONE]\n\n",
+                        )
+                            .into_response()
+                    } else {
+                        (
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            "data: {\"choices\":[{\"delta\":{\"content\":\"chat-ok\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n",
+                        )
+                            .into_response()
+                    }
+                }
+            }),
+        );
+        let upstream_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_port = upstream_listener.local_addr().unwrap().port();
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(upstream_listener, upstream).await.unwrap();
+        });
+
+        let (temp, _bridge, gateway) = test_gateway_with_upstream(upstream_port).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{}", gateway.port());
+
+        let chat = client
+            .post(format!("{base}/v1/chat/completions?trace=1"))
+            .header(header::AUTHORIZATION, "Bearer client")
+            .json(&json!({
+                "model": "another-model",
+                "messages": [{ "role": "user", "content": "chat" }],
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(chat.status(), reqwest::StatusCode::OK);
+        assert!(chat.text().await.unwrap().contains("chat-ok"));
+        let (query, body) = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(query, "trace=1");
+        assert_eq!(body["model"], "another-model");
+
+        let response = client
+            .post(format!("{base}/responses"))
+            .json(&json!({
+                "model": "deepseek-v4-flash",
+                "input": "hello",
+                "stream": false
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let payload: Value = response.json().await.unwrap();
+        assert_eq!(payload["object"], "response");
+        assert_eq!(payload["output"][0]["content"][0]["text"], "hello");
+        assert_eq!(payload["usage"]["input_tokens"], 3);
+        let (_, translated) = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(translated["stream"], true);
+        assert_eq!(translated["messages"][0]["content"], "hello");
+
+        gateway.stop().await;
+        let store = HttpTraceStore::new(temp.path().join("http-trace"));
+        let summaries = store.list(10).unwrap();
+        assert_eq!(summaries.len(), 2);
+        let chat_record = summaries
+            .iter()
+            .find(|summary| summary.id.ends_with("_chat"))
+            .unwrap();
+        assert_eq!(chat_record.protocol, "chat");
+        let (chat_request, chat_response) = store.record_paths(&chat_record.id).unwrap();
+        assert!(std::fs::read_to_string(&chat_request)
+            .unwrap()
+            .starts_with("POST /chat/completions?trace=1 HTTP/1.1"));
+        assert!(std::fs::read_to_string(&chat_request)
+            .unwrap()
+            .contains("authorization: Bearer client"));
+        assert!(std::fs::read_to_string(&chat_request)
+            .unwrap()
+            .contains("another-model"));
+        let chat_http = std::fs::read_to_string(chat_response).unwrap();
+        assert!(chat_http.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(chat_http.contains("content-type: text/event-stream"));
+        assert!(chat_http.contains("chat-ok"));
+
+        let responses_record = summaries
+            .iter()
+            .find(|summary| summary.id.ends_with("_responses"))
+            .unwrap();
+        assert_eq!(responses_record.protocol, "responses->chat");
+        let (responses_request, responses_response) =
+            store.record_paths(&responses_record.id).unwrap();
+        assert!(std::fs::read_to_string(&responses_request)
+            .unwrap()
+            .starts_with("POST /chat/completions HTTP/1.1"));
+        assert!(std::fs::read_to_string(&responses_request)
+            .unwrap()
+            .contains("\"stream\":true"));
+        let responses_http = std::fs::read_to_string(responses_response).unwrap();
+        assert!(responses_http.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(responses_http.contains("content-type: text/event-stream"));
+        assert!(responses_http.contains("hello"));
+        assert!(!responses_http.contains("\"object\":\"response\""));
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn responses_stream_is_translated_and_logged_without_buffering() {
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"a\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"b\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n\ndata: [DONE]\n\n",
+                )
+                    .into_response()
+            }),
+        );
+        let upstream_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_port = upstream_listener.local_addr().unwrap().port();
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(upstream_listener, upstream).await.unwrap();
+        });
+        let (temp, _bridge, gateway) = test_gateway_with_upstream(upstream_port).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{}", gateway.port());
+        let response = client
+            .post(format!("{base}/v1/responses"))
+            .json(&json!({
+                "model": "deepseek-v4-flash",
+                "input": "stream please",
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert!(response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("text/event-stream"));
+        let text = response.text().await.unwrap();
+        assert!(text.contains("event: response.output_text.delta"));
+        assert!(text.contains("\"delta\":\"a\""));
+        assert!(text.contains("\"delta\":\"b\""));
+        assert!(text.contains("event: response.completed"));
+        assert!(text.contains("\"input_tokens\":1"));
+        gateway.stop().await;
+
+        let store = HttpTraceStore::new(temp.path().join("http-trace"));
+        let summary = store.list(1).unwrap().remove(0);
+        assert!(summary.stream);
+        assert_eq!(summary.protocol, "responses->chat");
+        let (_, response_path) = store.record_paths(&summary.id).unwrap();
+        let logged = std::fs::read_to_string(response_path).unwrap();
+        assert!(logged.contains("data: {\"choices\""));
+        assert!(logged.contains("\"delta\":{\"content\":\"a\"}"));
+        assert!(!logged.contains("event: response.completed"));
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn routes_expose_cors_method_errors_and_not_found_contract() {
+        let (temp, _bridge, gateway) = test_gateway().await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{}", gateway.port());
+
+        let options = client
+            .request(reqwest::Method::OPTIONS, format!("{base}/v1/responses"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(options.status(), reqwest::StatusCode::NO_CONTENT);
+        assert_eq!(
+            options
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "*"
+        );
+
+        let wrong_method = client.post(format!("{base}/models")).send().await.unwrap();
+        assert_eq!(
+            wrong_method.status(),
+            reqwest::StatusCode::METHOD_NOT_ALLOWED
+        );
+        let missing = client.get(format!("{base}/missing")).send().await.unwrap();
+        assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+        assert!(missing.headers().contains_key(REQUEST_ID_HEADER));
+        gateway.stop().await;
+        assert!(HttpTraceStore::new(temp.path().join("http-trace"))
+            .list(10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn translated_requests_drop_explicitly_rejected_optional_fields() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_upstream = Arc::clone(&calls);
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(move |body: Bytes| {
+                let calls = Arc::clone(&calls_for_upstream);
+                async move {
+                    let value: Value = serde_json::from_slice(&body).unwrap();
+                    let attempt = calls.fetch_add(1, Ordering::SeqCst);
+                    if attempt == 0 {
+                        assert!(value.get("stream_options").is_some());
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            [(header::CONTENT_TYPE, "application/json")],
+                            r#"{"error":{"message":"unsupported stream_options"}}"#,
+                        )
+                            .into_response();
+                    }
+                    assert!(value.get("stream_options").is_none());
+                    (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                    )
+                        .into_response()
+                }
+            }),
+        );
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_port = listener.local_addr().unwrap().port();
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+        let (temp, _bridge, gateway) = test_gateway_with_upstream(upstream_port).await;
+        let response = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/responses", gateway.port()))
+            .json(&json!({
+                "model": "deepseek-v4-flash",
+                "input": "hello",
+                "stream": false
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        gateway.stop().await;
+        let store = HttpTraceStore::new(temp.path().join("http-trace"));
+        let summary = store.list(1).unwrap().remove(0);
+        let (request_path, response_path) = store.record_paths(&summary.id).unwrap();
+        let request = std::fs::read_to_string(request_path).unwrap();
+        assert!(!request.contains("stream_options"));
+        let response = std::fs::read_to_string(response_path).unwrap();
+        assert!(response.contains("\"content\":\"ok\""));
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn chat_trace_records_rewritten_upstream_request_and_response() {
+        let captured = Arc::new(Mutex::new(None::<Value>));
+        let captured_for_upstream = Arc::clone(&captured);
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(move |body: Bytes| {
+                let captured = Arc::clone(&captured_for_upstream);
+                async move {
+                    *captured.lock().unwrap() = Some(serde_json::from_slice(&body).unwrap());
+                    Json(json!({ "choices": [] })).into_response()
+                }
+            }),
+        );
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_port = listener.local_addr().unwrap().port();
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+        let (temp, _bridge, gateway) = test_gateway_with_upstream(upstream_port).await;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{}/chat/completions",
+                gateway.port()
+            ))
+            .json(&json!({
+                "model": "deepseek-v4-flash",
+                "messages": [{
+                    "role": "system",
+                    "content": "Codex via DeepSeek Harness"
+                }, {
+                    "role": "developer",
+                    "content": [{ "type": "text", "text": "CODEX" }]
+                }, {
+                    "role": "user",
+                    "content": "Codex stays"
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let forwarded = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            forwarded["messages"][0]["content"],
+            "WorkBuddy via WorkBuddy"
+        );
+        assert_eq!(forwarded["messages"][1]["content"][0]["text"], "WorkBuddy");
+        assert_eq!(forwarded["messages"][2]["content"], "Codex stays");
+        gateway.stop().await;
+
+        let store = HttpTraceStore::new(temp.path().join("http-trace"));
+        let summary = store.list(1).unwrap().remove(0);
+        let (request_path, response_path) = store.record_paths(&summary.id).unwrap();
+        let request = std::fs::read_to_string(request_path).unwrap();
+        assert!(request.contains("WorkBuddy via WorkBuddy"));
+        assert!(!request.contains("Codex via DeepSeek Harness"));
+        let response = std::fs::read_to_string(response_path).unwrap();
+        assert!(response.contains("\"choices\":[]"));
+        upstream_task.abort();
+    }
+
+    #[test]
+    fn non_json_chat_bodies_are_not_reencoded() {
+        let body = Bytes::from_static(b"Codex is not JSON");
+        assert_eq!(rewrite_chat_request_body(body.clone()), body);
+    }
+
+    #[tokio::test]
+    async fn upstream_errors_are_recorded_as_raw_http_messages() {
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [
+                        (header::CONTENT_TYPE, "application/json"),
+                        (header::RETRY_AFTER, "17"),
+                    ],
+                    r#"{"error":{"message":"busy"}}"#,
+                )
+                    .into_response()
+            }),
+        );
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+        let (temp, _bridge, gateway) = test_gateway_with_upstream(port).await;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{}/chat/completions",
+                gateway.port()
+            ))
+            .json(&json!({
+                "model": "deepseek-v4-flash",
+                "messages": []
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        gateway.stop().await;
+        let store = HttpTraceStore::new(temp.path().join("http-trace"));
+        let summary = store.list(1).unwrap().remove(0);
+        assert_eq!(summary.status, 429);
+        let (_, response_path) = store.record_paths(&summary.id).unwrap();
+        let response_http = std::fs::read_to_string(response_path).unwrap();
+        assert!(response_http.contains("retry-after: 17"));
+        assert!(response_http.contains(r#"{"error":{"message":"busy"}}"#));
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn pre_upstream_failures_do_not_create_traces() {
+        let (activation_temp, _bridge, activation_gateway) = test_gateway().await;
+        let activation_response = reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{}/chat/completions",
+                activation_gateway.port()
+            ))
+            .json(&json!({ "messages": [] }))
+            .send()
+            .await
+            .unwrap();
+        assert!(activation_response.status().is_server_error());
+        activation_gateway.stop().await;
+        assert!(
+            HttpTraceStore::new(activation_temp.path().join("http-trace"))
+                .list(10)
+                .unwrap()
+                .is_empty()
+        );
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let unused_port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let (network_temp, _bridge, network_gateway) =
+            test_gateway_with_upstream(unused_port).await;
+        let network_response = reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{}/chat/completions",
+                network_gateway.port()
+            ))
+            .json(&json!({ "messages": [] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(network_response.status(), reqwest::StatusCode::BAD_GATEWAY);
+        network_gateway.stop().await;
+        assert!(HttpTraceStore::new(network_temp.path().join("http-trace"))
+            .list(10)
+            .unwrap()
+            .is_empty());
+    }
+
+    async fn test_gateway_with_upstream(
+        upstream_port: u16,
+    ) -> (tempfile::TempDir, Arc<Bridge>, GatewayHandle) {
+        let temp = tempfile::tempdir().unwrap();
+        let account = crate::account::AccountManager::with_store(AccountStore::new(
+            temp.path().join("account.bin"),
+        ));
+        let bridge = Arc::new(Bridge::new(
+            account,
+            SettingsStore::new(temp.path().join("settings.json")),
+            SshKeyStore::new(
+                temp.path().join("id_ed25519"),
+                temp.path().join("id_ed25519.pub"),
+            ),
+            Arc::new(Logger::new(32)),
+        ));
+        let gateway = GatewayHandle::start_with_upstream(
+            Arc::clone(&bridge),
+            GatewayConfig {
+                port: 0,
+                activation_timeout: Duration::from_secs(1),
+                idle_timeout: Duration::from_secs(60),
+            },
+            upstream_port,
+            temp.path().join("http-trace"),
+        )
+        .await
+        .unwrap();
+        (temp, bridge, gateway)
     }
 }

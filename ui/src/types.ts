@@ -54,12 +54,29 @@ export interface AppSnapshot {
   settings: Settings;
   version: string;
   logsPath: string;
+  httpLogsPath: string;
 }
 
 export interface LogEntry {
   time: string;
   level: string;
   message: string;
+}
+
+export interface HttpTraceSummary {
+  id: string;
+  startedAt: string;
+  method: string;
+  path: string;
+  status: number;
+  elapsedMs: number;
+  protocol: string;
+  stream: boolean;
+  requestBytes: number;
+  responseBytes: number;
+  requestTruncated: boolean;
+  responseTruncated: boolean;
+  result: string;
 }
 
 export interface CommandError {

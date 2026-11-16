@@ -875,6 +875,30 @@ select:focus {
   align-items: flex-end;
 }
 
+.mode-switch {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(9, 13, 18, 0.72);
+}
+
+.mode-switch button {
+  min-height: 30px;
+  padding: 5px 9px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.mode-switch button.active {
+  background: var(--panel-raised);
+  color: var(--text);
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.22);
+}
+
 .filter-control {
   display: flex;
   flex-direction: column;
@@ -948,6 +972,107 @@ select:focus {
   min-width: 0;
   color: #c0ccd7;
   overflow-wrap: anywhere;
+}
+
+.trace-warning {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 9px 12px;
+  border: 1px solid rgba(244, 184, 96, 0.25);
+  border-radius: 10px;
+  background: var(--warning-soft);
+  color: #f4c982;
+  font-size: 11px;
+}
+
+.http-log-list {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(9, 13, 18, 0.76);
+}
+
+.http-log-row {
+  display: grid;
+  width: 100%;
+  min-height: 54px;
+  grid-template-columns: minmax(220px, 1.6fr) 112px 54px 160px 76px auto 18px;
+  align-items: center;
+  justify-items: start;
+  gap: 10px;
+  padding: 9px 13px;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.http-log-row:last-child {
+  border-bottom: 0;
+}
+
+.http-log-row:hover:not(:disabled) {
+  border-color: var(--line-soft);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.http-log-main {
+  min-width: 0;
+}
+
+.http-log-main strong,
+.http-log-main small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.http-log-main strong {
+  color: #d2dde7;
+  font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-size: 11px;
+}
+
+.http-log-main small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.http-log-protocol,
+.http-log-size,
+.http-log-duration {
+  color: var(--muted);
+  font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-size: 10px;
+}
+
+.http-log-status {
+  min-width: 36px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: var(--success-soft);
+  color: #8de1c5;
+  font-family: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-size: 10px;
+  text-align: center;
+}
+
+.http-log-status.failed {
+  background: var(--danger-soft);
+  color: #ffb7bd;
+}
+
+.http-log-truncated {
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: 9px;
 }
 
 .empty-state {
@@ -1088,6 +1213,15 @@ code {
 
   .pipeline {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .http-log-row {
+    grid-template-columns: minmax(180px, 1fr) 100px 48px 130px 18px;
+  }
+
+  .http-log-duration,
+  .http-log-truncated {
+    display: none;
   }
 
   .step-arrow {

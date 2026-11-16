@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 pub const REPO_DESCRIPTION: &str = "CNB Bridge workspace agent";
 
 const TEMPLATE_MARKER: &str = ".cnb-ai-bridge/workspace.json";
-const TEMPLATE_SCHEMA: u64 = 2;
+const TEMPLATE_SCHEMA: u64 = 3;
 const DEFAULT_BRANCH: &str = "main";
 const LEGACY_BRANCH: &str = "master";
 
@@ -17,7 +17,6 @@ const CNB_YML: &str = include_str!("../templates/cnb-ai-bridge/.cnb.yml");
 const WORKSPACE_MARKER: &str =
     include_str!("../templates/cnb-ai-bridge/.cnb-ai-bridge/workspace.json");
 const AGENT_MJS: &str = include_str!("../templates/cnb-ai-bridge/agent/agent.mjs");
-const MODELS_JSON: &str = include_str!("../templates/cnb-ai-bridge/agent/models.json");
 const SUPERVISOR_SH: &str = include_str!("../templates/cnb-ai-bridge/agent/supervisor.sh");
 const TEMPLATE_README: &str = include_str!("../templates/cnb-ai-bridge/README.md");
 
@@ -199,17 +198,16 @@ impl<'a> RepoProvisioner<'a> {
                     });
                 }
                 for branch in bridge_branch_candidates(&branches) {
-                    if self.api.file_exists(token, &slug, TEMPLATE_MARKER, branch).await? {
+                    if self
+                        .api
+                        .file_exists(token, &slug, TEMPLATE_MARKER, branch)
+                        .await?
+                    {
                         let schema = template_schema(self.api, token, &slug, branch).await?;
                         if schema < TEMPLATE_SCHEMA {
                             let remote_url = format!("{}/{slug}", self.remote_base_url);
-                            sync_template_to_existing(
-                                token,
-                                &remote_url,
-                                &slug,
-                                branch,
-                            )
-                            .map_err(RepoProvisionError::Message)?;
+                            sync_template_to_existing(token, &remote_url, &slug, branch)
+                                .map_err(RepoProvisionError::Message)?;
                             confirm_template_branch(self.api, token, &slug, branch).await?;
                         }
                         return Ok(RepoInfo {
@@ -401,6 +399,15 @@ fn sync_template_to_existing(
     repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
         .map_err(|error| format!("检出现有仓库分支 {branch} 失败: {error}"))?;
     write_template(dir.path())?;
+    let obsolete_models = dir.path().join("agent/models.json");
+    if obsolete_models.is_file() {
+        std::fs::remove_file(&obsolete_models).map_err(|error| {
+            format!(
+                "删除废弃模型目录 {} 失败: {error}",
+                obsolete_models.display()
+            )
+        })?;
+    }
 
     let mut index = repo.index().map_err(|error| error.to_string())?;
     index
@@ -500,9 +507,7 @@ async fn template_schema(
     slug: &str,
     branch: &str,
 ) -> Result<u64, RepoProvisionError> {
-    let text = api
-        .file_text(token, slug, TEMPLATE_MARKER, branch)
-        .await?;
+    let text = api.file_text(token, slug, TEMPLATE_MARKER, branch).await?;
     let value: serde_json::Value = serde_json::from_str(&text)
         .map_err(|error| RepoProvisionError::Message(format!("模板标记不是有效 JSON: {error}")))?;
     value
@@ -516,7 +521,6 @@ fn write_template(dir: &Path) -> Result<(), String> {
         (".cnb.yml", CNB_YML),
         (TEMPLATE_MARKER, WORKSPACE_MARKER),
         ("agent/agent.mjs", AGENT_MJS),
-        ("agent/models.json", MODELS_JSON),
         ("agent/supervisor.sh", SUPERVISOR_SH),
         ("README.md", TEMPLATE_README),
     ];
@@ -816,7 +820,7 @@ mod tests {
             .and(path(
                 "/xljiulang/cnb-ai-bridge/-/git/contents/.cnb-ai-bridge/workspace.json",
             ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(2)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(3)))
             .mount(&server)
             .await;
         let api = CnbApi::with_base_url(server.uri());
@@ -929,7 +933,7 @@ mod tests {
             .and(path(
                 "/xljiulang/cnb-ai-bridge/-/git/contents/.cnb-ai-bridge/workspace.json",
             ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(2)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(3)))
             .mount(&server)
             .await;
         let api = CnbApi::with_base_url(server.uri());
@@ -993,7 +997,7 @@ mod tests {
             .and(path(
                 "/xljiulang/cnb-ai-bridge/-/git/contents/.cnb-ai-bridge/workspace.json",
             ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(2)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(3)))
             .mount(&server)
             .await;
         let api = CnbApi::with_base_url(server.uri());
@@ -1109,7 +1113,7 @@ mod tests {
             .and(path(
                 "/xljiulang/cnb-ai-bridge/-/git/contents/.cnb-ai-bridge/workspace.json",
             ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(2)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(3)))
             .mount(&server)
             .await;
         let api = CnbApi::with_base_url(server.uri());
@@ -1155,9 +1159,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path(
-                "/xljiulang/cnb-ai-bridge/-/workspace/detail/ws-new",
-            ))
+            .and(path("/xljiulang/cnb-ai-bridge/-/workspace/detail/ws-new"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "remoteSsh": "cnb@example.test"
             })))
@@ -1171,7 +1173,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(session.sn, "ws-new");
-        assert_eq!(session.detail.remote_ssh.as_deref(), Some("cnb@example.test"));
+        assert_eq!(
+            session.detail.remote_ssh.as_deref(),
+            Some("cnb@example.test")
+        );
         assert_eq!(start_calls.load(Ordering::SeqCst), 1);
     }
 
@@ -1213,6 +1218,12 @@ mod tests {
         let seed_dir = tempfile::tempdir().unwrap();
         let seed = Repository::init(seed_dir.path()).unwrap();
         write_template(seed_dir.path()).unwrap();
+        std::fs::create_dir_all(seed_dir.path().join("agent")).unwrap();
+        std::fs::write(
+            seed_dir.path().join("agent/models.json"),
+            r#"{"models":[{"id":"glm-5.3-flash"}]}"#,
+        )
+        .unwrap();
         std::fs::write(
             seed_dir.path().join(TEMPLATE_MARKER),
             r#"{"product":"cnb-ai-bridge","schema":1}"#,
@@ -1225,7 +1236,9 @@ mod tests {
         .unwrap();
         let signature = Signature::now("CNB Bridge", "cnb-bridge@localhost").unwrap();
         let mut index = seed.index().unwrap();
-        index.add_all(["*"], git2::IndexAddOption::DEFAULT, None).unwrap();
+        index
+            .add_all(["*"], git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
         index.write().unwrap();
         let tree_id = index.write_tree().unwrap();
         let tree = seed.find_tree(tree_id).unwrap();
@@ -1279,7 +1292,7 @@ mod tests {
                 let schema = if marker_reads_for_response.fetch_add(1, Ordering::SeqCst) < 2 {
                     1
                 } else {
-                    2
+                    3
                 };
                 ResponseTemplate::new(200).set_body_json(marker_body(schema))
             })
@@ -1300,7 +1313,8 @@ mod tests {
         let marker = tree.get_path(Path::new(TEMPLATE_MARKER)).unwrap();
         let marker_blob = remote.find_blob(marker.id()).unwrap();
         let marker_text = std::str::from_utf8(marker_blob.content()).unwrap();
-        assert!(marker_text.contains(r#""schema": 2"#));
+        assert!(marker_text.contains(r#""schema": 3"#));
+        assert!(tree.get_path(Path::new("agent/models.json")).is_err());
         let cnb_yml = tree.get_path(Path::new(".cnb.yml")).unwrap();
         let cnb_yml_blob = remote.find_blob(cnb_yml.id()).unwrap();
         let yml_text = std::str::from_utf8(cnb_yml_blob.content()).unwrap();

@@ -16,8 +16,10 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1.0"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+futures-util = "0.3"
 git2 = { version = "0.21", features = ["https"] }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }

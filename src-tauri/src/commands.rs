@@ -1,5 +1,6 @@
 use cnb_bridge::account::AccountStatus;
 use cnb_bridge::api::Namespace;
+use cnb_bridge::http_trace::{HttpTraceStore, HttpTraceSummary};
 use cnb_bridge::logging::LogEntry;
 use cnb_bridge::settings::Settings;
 use serde::Serialize;
@@ -136,4 +137,24 @@ pub fn open_logs_folder() -> Result<(), CommandError> {
 #[tauri::command]
 pub fn get_logs(state: State<'_, DesktopState>, limit: Option<usize>) -> Vec<LogEntry> {
     state.logger.recent(limit.unwrap_or(200))
+}
+
+#[tauri::command]
+pub fn list_http_traces(limit: Option<usize>) -> Result<Vec<HttpTraceSummary>, CommandError> {
+    let store = HttpTraceStore::new(cnb_bridge::paths::logs_dir().join("http-trace"));
+    store
+        .list(limit.unwrap_or(100))
+        .map_err(|error| CommandError::new("http_traces_load_failed", error))
+}
+
+#[tauri::command]
+pub fn open_http_trace(id: String) -> Result<(), CommandError> {
+    let store = HttpTraceStore::new(cnb_bridge::paths::logs_dir().join("http-trace"));
+    store
+        .record_paths(&id)
+        .map_err(|error| CommandError::new("invalid_http_trace", error))?;
+    std::fs::create_dir_all(store.root())
+        .map_err(|error| CommandError::new("http_trace_dir_failed", error.to_string()))?;
+    tauri_plugin_opener::open_path(store.root(), None::<&str>)
+        .map_err(|error| CommandError::new("open_http_trace_failed", error.to_string()))
 }

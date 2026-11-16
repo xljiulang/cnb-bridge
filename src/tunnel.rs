@@ -228,7 +228,9 @@ mod tests {
             failure: failure_rx,
         };
 
-        failure_tx.send(Some("SSH channel closed".to_string())).unwrap();
+        failure_tx
+            .send(Some("SSH channel closed".to_string()))
+            .unwrap();
         let reason = handle.failure_reason();
         let task = handle.task;
         tokio::time::timeout(Duration::from_secs(1), task)

@@ -21,6 +21,7 @@ pub struct AppSnapshot {
     pub settings: Settings,
     pub version: String,
     pub logs_path: String,
+    pub http_logs_path: String,
 }
 
 /// Shared desktop state.
@@ -49,6 +50,7 @@ impl DesktopState {
             settings,
             version: env!("CARGO_PKG_VERSION").to_string(),
             logs_path: paths::logs_dir().display().to_string(),
+            http_logs_path: paths::logs_dir().join("http-trace").display().to_string(),
         })
     }
 }
@@ -57,6 +59,7 @@ impl DesktopState {
 pub fn initialize(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = paths::ensure_data_dir()?;
     std::fs::create_dir_all(data_dir.join("logs"))?;
+    std::fs::create_dir_all(paths::logs_dir().join("http-trace"))?;
 
     let logger = Arc::new(Logger::with_file(200, paths::logs_dir()));
     let account = AccountManager::new();
@@ -114,9 +117,11 @@ pub fn apply_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
 pub fn exit_with_shutdown(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         if let Some(state) = app.try_state::<DesktopState>() {
-            let _ =
-                tokio::time::timeout(std::time::Duration::from_secs(6), state.bridge.shutdown_local())
-                    .await;
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(6),
+                state.bridge.shutdown_local(),
+            )
+            .await;
         }
         tray::exit_now(&app);
     });

@@ -21,17 +21,39 @@ http://127.0.0.1:11233/v1
 
 ## 工作空间 Agent
 
-agent 是零 npm 依赖的 Node 单文件，由 CNB 云原生开发会话启动并常驻，监听 `127.0.0.1:11233`：
+agent 是零 npm 依赖的 Node 单文件，由 CNB 云原生开发会话启动并常驻，监听 `127.0.0.1:11233`。远端 agent 只保留两个内部接口：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/healthz` | 健康检查 |
-| GET | `/models`、`/v1/models` | 本地模型列表 |
-| GET | `/models/{id}`、`/v1/models/{id}` | 模型详情 |
-| POST | `/chat/completions`、`/v1/chat/completions` | 任意凭据/请求体透传到 CNB AI |
-| OPTIONS | 上述路径 | CORS 预检 |
+| POST | `/chat/completions` | 任意凭据/请求体透传到 CNB AI |
 
 agent 从云会话继承 `CNB_TOKEN`，只监听 loopback。客户端侧传入的 API key 可以是任意值或留空；agent 会覆盖为工作空间 token。
+
+桌面客户端提供完整公开接口，根路径和 `/v1` 前缀等价：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/healthz` | 本机健康检查，不启动工作空间 |
+| GET | `/models`、`/models/{id}` | 客户端内置模型目录，仅包含 `deepseek-v4-flash` |
+| POST | `/chat/completions` | Chat Completions 透传 |
+| POST | `/responses` | Responses 入、Chat 出并回译 |
+| OPTIONS | 已知公开路径 | CORS 预检 |
+
+模型目录通过编译内置的 `resources/models.json` 提供；推理请求仍允许显式传入其它模型 ID。
+
+## HTTP 日志
+
+客户端只为实际获得上游 HTTP 响应的 Chat/Responses 请求写入 `%AppData%\cnb-bridge\logs\http-trace`：
+
+- 每个请求生成一对同前缀的 `*.request.http` 和 `*.response.http` 文件，不创建请求目录或 `meta.json`。
+- 请求文件以 `POST /chat/completions... HTTP/1.1` 开始，记录实际发往上游 agent 的请求头与正文。
+- 响应文件以 `HTTP/1.1 <status> <reason>` 开始，记录上游 agent 返回的响应头与正文。
+- 头字段每行一个 `header-name: header-value`，空行后是原始正文。
+
+本地健康检查、模型、CORS、错误路由及尚未发往上游的失败不会生成 HTTP trace。日志包含 Authorization、Cookie、API Key 和用户正文，不会在桌面页面加载全文，请勿直接分享。
+
+单次请求上限为 64 MiB，单个请求/响应日志最多保留前 64 MiB；日志目录保留 7 天、总量上限 1 GiB。
 
 ## 构建
 

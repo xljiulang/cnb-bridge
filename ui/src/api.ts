@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AccountStatus,
   AppSnapshot,
+  HttpTraceSummary,
   LogEntry,
   Namespace,
   Settings,
@@ -31,3 +32,9 @@ export const openLogsFolder = () => invoke<void>("open_logs_folder");
 
 export const getLogs = (limit = 200) =>
   invoke<LogEntry[]>("get_logs", { limit });
+
+export const listHttpTraces = (limit = 100) =>
+  invoke<HttpTraceSummary[]>("list_http_traces", { limit });
+
+export const openHttpTrace = (id: string) =>
+  invoke<void>("open_http_trace", { id });

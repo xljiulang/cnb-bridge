@@ -323,12 +323,7 @@ impl Bridge {
 
     /// Starts the persistent local gateway.
     pub async fn start_gateway(self: &Arc<Self>, port: u16) -> Result<(), BridgeError> {
-        let gateway = match GatewayHandle::start(
-            Arc::clone(self),
-            GatewayConfig::new(port),
-        )
-        .await
-        {
+        let gateway = match GatewayHandle::start(Arc::clone(self), GatewayConfig::new(port)).await {
             Ok(gateway) => gateway,
             Err(error) => {
                 self.set_error(BridgeState::Failed, error.clone()).await;
@@ -423,8 +418,10 @@ impl Bridge {
             runtime.state = Some(BridgeState::Idle);
             runtime.error = Some(reason.clone());
         }
-        self.logger
-            .log("warn", format!("CNB 隧道已失效，下一次请求将重新连接: {reason}"));
+        self.logger.log(
+            "warn",
+            format!("CNB 隧道已失效，下一次请求将重新连接: {reason}"),
+        );
     }
 
     /// Refreshes the UI state after account binding completes.
@@ -541,10 +538,7 @@ async fn check_health_once(port: u16) -> Result<(), String> {
     if response.status().is_success() {
         Ok(())
     } else {
-        Err(format!(
-            "本机端点健康检查返回 HTTP {}",
-            response.status()
-        ))
+        Err(format!("本机端点健康检查返回 HTTP {}", response.status()))
     }
 }
 
@@ -554,9 +548,8 @@ mod tests {
     use crate::account::AccountStore;
 
     fn test_bridge(temp: &tempfile::TempDir) -> Bridge {
-        let account = AccountManager::with_store(AccountStore::new(
-            temp.path().join("account.bin"),
-        ));
+        let account =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account.bin")));
         Bridge::new(
             account,
             SettingsStore::new(temp.path().join("settings.json")),

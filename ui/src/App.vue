@@ -30,9 +30,11 @@ import {
   cancelLogin,
   getLogs,
   getSnapshot,
+  listHttpTraces,
   listNamespaces,
   logout,
   openExternal,
+  openHttpTrace,
   openLogsFolder,
   saveSettings,
   startBridge,
@@ -46,7 +48,13 @@ import {
   isBridgeTransitioning,
   validatePort,
 } from "./format";
-import type { AppSnapshot, LogEntry, Namespace, Settings } from "./types";
+import type {
+  AppSnapshot,
+  HttpTraceSummary,
+  LogEntry,
+  Namespace,
+  Settings,
+} from "./types";
 
 type Tab = "connect" | "settings" | "logs" | "about";
 type StepTone = "done" | "current" | "pending" | "error";
@@ -63,8 +71,10 @@ const busy = ref(false);
 const error = ref<string | null>(null);
 const notice = ref<string | null>(null);
 const logs = ref<LogEntry[]>([]);
+const httpTraces = ref<HttpTraceSummary[]>([]);
 const namespaces = ref<Namespace[]>([]);
 const logFilter = ref("all");
+const logMode = ref<"runtime" | "http">("runtime");
 const settingsDirty = ref(false);
 const settingsDraft = reactive<Settings>({
   repoNamespace: "",
@@ -251,7 +261,7 @@ async function openSettings() {
 
 async function openLogs() {
   tab.value = "logs";
-  await loadLogs();
+  await Promise.all([loadLogs(), loadHttpTraces()]);
 }
 
 async function openRepoCreation() {
@@ -288,12 +298,37 @@ async function loadLogs() {
   }
 }
 
+async function loadHttpTraces() {
+  try {
+    httpTraces.value = await listHttpTraces(100);
+  } catch (cause) {
+    error.value = formatError(cause);
+  }
+}
+
+async function openTrace(id: string) {
+  try {
+    await openHttpTrace(id);
+  } catch (cause) {
+    error.value = formatError(cause);
+  }
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MiB`;
+}
+
 onMounted(async () => {
   await refresh();
-  await loadLogs();
+  await Promise.all([loadLogs(), loadHttpTraces()]);
   timer = window.setInterval(() => {
     void refresh();
-    if (tab.value === "logs") void loadLogs();
+    if (tab.value === "logs") {
+      if (logMode.value === "runtime") void loadLogs();
+      else void loadHttpTraces();
+    }
   }, 1500);
   unlisten = await listen("cnb-bridge://snapshot", () => {
     void refresh();
@@ -698,12 +733,34 @@ onBeforeUnmount(() => {
       <section v-else-if="tab === 'logs'" class="page">
         <header class="page-head">
           <div class="page-title">
-            <p class="eyebrow">RUNTIME LOGS</p>
-            <h1>运行日志</h1>
-            <p class="muted code-path">{{ snapshot?.logsPath }}</p>
+            <p class="eyebrow">LOGS</p>
+            <h1>日志</h1>
+            <p class="muted code-path">
+              {{
+                logMode === "runtime"
+                  ? snapshot?.logsPath
+                  : snapshot?.httpLogsPath
+              }}
+            </p>
           </div>
           <div class="head-actions log-actions">
-            <label class="filter-control">
+            <div class="mode-switch" aria-label="日志类型">
+              <button
+                type="button"
+                :class="{ active: logMode === 'runtime' }"
+                @click="logMode = 'runtime'; loadLogs()"
+              >
+                运行日志
+              </button>
+              <button
+                type="button"
+                :class="{ active: logMode === 'http' }"
+                @click="logMode = 'http'; loadHttpTraces()"
+              >
+                HTTP 记录
+              </button>
+            </div>
+            <label v-if="logMode === 'runtime'" class="filter-control">
               <span>级别</span>
               <select v-model="logFilter">
                 <option value="all">全部</option>
@@ -712,7 +769,11 @@ onBeforeUnmount(() => {
                 <option value="error">Error</option>
               </select>
             </label>
-            <button type="button" class="secondary" @click="loadLogs">
+            <button
+              type="button"
+              class="secondary"
+              @click="logMode === 'runtime' ? loadLogs() : loadHttpTraces()"
+            >
               <RefreshCw :size="15" aria-hidden="true" />
               刷新
             </button>
@@ -723,22 +784,66 @@ onBeforeUnmount(() => {
           </div>
         </header>
 
-        <div class="log-list">
-          <div v-if="filteredLogs.length === 0" class="empty-state">
-            <ScrollText :size="28" aria-hidden="true" />
-            <strong>暂无日志</strong>
-            <span>启动桥接后，运行信息会显示在这里。</span>
+        <template v-if="logMode === 'runtime'">
+          <div class="log-list">
+            <div v-if="filteredLogs.length === 0" class="empty-state">
+              <ScrollText :size="28" aria-hidden="true" />
+              <strong>暂无日志</strong>
+              <span>启动桥接后，运行信息会显示在这里。</span>
+            </div>
+            <div
+              v-for="entry in filteredLogs"
+              :key="`${entry.time}-${entry.message}`"
+              class="log-row"
+            >
+              <span class="log-time">{{ entry.time }}</span>
+              <span class="log-level" :class="entry.level">{{ entry.level }}</span>
+              <span class="log-message">{{ entry.message }}</span>
+            </div>
           </div>
-          <div
-            v-for="entry in filteredLogs"
-            :key="`${entry.time}-${entry.message}`"
-            class="log-row"
-          >
-            <span class="log-time">{{ entry.time }}</span>
-            <span class="log-level" :class="entry.level">{{ entry.level }}</span>
-            <span class="log-message">{{ entry.message }}</span>
+        </template>
+
+        <template v-else>
+          <div class="trace-warning">
+            <AlertTriangle :size="16" aria-hidden="true" />
+            上游报文包含认证头、Cookie、API Key 和完整对话正文，请勿直接分享。
           </div>
-        </div>
+          <div class="http-log-list">
+            <div v-if="httpTraces.length === 0" class="empty-state">
+              <ScrollText :size="28" aria-hidden="true" />
+              <strong>暂无 HTTP 记录</strong>
+              <span>请求发往上游并收到响应后，会写入一对平铺报文文件。</span>
+            </div>
+            <button
+              v-for="trace in httpTraces"
+              :key="trace.id"
+              type="button"
+              class="http-log-row"
+              @click="openTrace(trace.id)"
+            >
+              <span class="http-log-main">
+                <strong>{{ trace.method }} {{ trace.path }}</strong>
+                <small>{{ trace.startedAt }}</small>
+              </span>
+              <span class="http-log-protocol">{{ trace.protocol }}</span>
+              <span class="http-log-status" :class="{ failed: trace.status >= 400 }">
+                {{ trace.status }}
+              </span>
+              <span class="http-log-size">
+                {{ formatBytes(trace.requestBytes) }} /
+                {{ formatBytes(trace.responseBytes) }}
+              </span>
+              <span class="http-log-duration">{{ trace.elapsedMs }} ms</span>
+              <span
+                v-if="trace.requestTruncated || trace.responseTruncated"
+                class="http-log-truncated"
+              >
+                已截断
+              </span>
+              <FolderOpen :size="15" aria-hidden="true" />
+            </button>
+          </div>
+        </template>
       </section>
 
       <section v-else class="page">

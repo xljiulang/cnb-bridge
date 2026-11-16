@@ -53,6 +53,8 @@ pub fn run() {
             commands::open_external,
             commands::open_logs_folder,
             commands::get_logs,
+            commands::list_http_traces,
+            commands::open_http_trace,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run CNB Bridge");
