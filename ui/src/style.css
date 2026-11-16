@@ -184,7 +184,8 @@ button:disabled {
   height: 38px;
   flex: 0 0 38px;
   border-radius: 11px;
-  box-shadow: 0 8px 24px rgba(32, 129, 216, 0.2);
+  object-fit: contain;
+  box-shadow: 0 8px 24px rgba(255, 98, 0, 0.2);
 }
 
 .brand-copy {
@@ -475,7 +476,7 @@ small {
 
 .overview-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.42fr) minmax(300px, 0.88fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
   margin-bottom: 14px;
 }
@@ -1081,7 +1082,7 @@ code {
   }
 
   .overview-grid {
-    grid-template-columns: minmax(0, 1.2fr) minmax(270px, 0.8fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .pipeline {

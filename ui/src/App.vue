@@ -39,7 +39,7 @@ import {
   startLogin,
   stopBridge,
 } from "./api";
-import appIcon from "./assets/cnb-bridge-icon.png";
+import appIcon from "./assets/cnb-favicon.svg";
 import {
   bridgeLabel,
   formatError,
