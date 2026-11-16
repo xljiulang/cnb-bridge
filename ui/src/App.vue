@@ -187,28 +187,6 @@ const creditsUsageLabel = computed(() => {
   if (usageError.value) return "用量暂不可用";
   return usageLoading.value ? "正在获取…" : "-- / --";
 });
-const statusDescription = computed(() => {
-  if (organizationRequired.value) {
-    return creatingOrganization.value
-      ? "正在为当前账号自动创建 CNB 根组织，完成后会解锁桥接配置。"
-      : "CNB 根组织尚未就绪。请重试创建，或退出后重新扫码以更新授权权限。";
-  }
-  if (ready.value) return "本机 OpenAI 兼容端点已就绪，可以直接连接你的 AI 客户端。";
-  if (repoCreationNeeded.value) {
-    return "请先在 CNB 创建私有空仓库，然后返回这里重新检查。";
-  }
-  if (idle.value) {
-    return "本地端点已就绪。收到请求后会按需启动 CNB 云主机。";
-  }
-  if (bridgeTransitioning.value) return "正在准备仓库、云主机与本机通道，请稍候。";
-  if (bridgeState.value === "failed" || bridgeState.value === "needsSshKey") {
-    return "启动未完成。下方错误信息会说明需要处理的问题。";
-  }
-  if (accountState.value !== "connected") {
-    return "先完成一次扫码绑定，之后启动过程会自动完成建仓和连接。";
-  }
-  return "账号已绑定。启动后会自动准备仓库、云主机和本机通道。";
-});
 const mainActionLabel = computed(() => {
   if (bridgeTransitioning.value) return "正在启动…";
   if (repoCreationNeeded.value) return "重新检查仓库";
@@ -674,7 +652,6 @@ watch(
                 }}
               </span>
             </div>
-            <p class="muted">{{ statusDescription }}</p>
           </div>
           <div v-if="connectionDetailsVisible" class="head-actions">
             <button

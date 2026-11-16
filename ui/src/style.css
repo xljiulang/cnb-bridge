@@ -355,15 +355,11 @@ button:disabled {
 
 .hero-head {
   align-items: center;
-  margin-bottom: 24px;
+  margin-bottom: 18px;
 }
 
 .page-title {
   min-width: 0;
-}
-
-.page-title > .muted {
-  max-width: 660px;
 }
 
 .eyebrow,
