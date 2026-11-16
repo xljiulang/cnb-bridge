@@ -4,16 +4,13 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   Activity,
   AlertTriangle,
-  BookOpen,
   Cable,
   CheckCircle2,
   ChevronRight,
   CircleUserRound,
   Copy,
   Cpu,
-  Database,
   ExternalLink,
-  FileText,
   FolderGit2,
   FolderOpen,
   Info,
@@ -28,7 +25,6 @@ import {
   ScrollText,
   Server,
   Settings as SettingsIcon,
-  ShieldCheck,
   Square,
   X,
 } from "@lucide/vue";
@@ -108,8 +104,6 @@ let usageGeneration = 0;
 let unlisten: UnlistenFn | undefined;
 
 const GITHUB_PROJECT_URL = "https://github.com/xljiulang/cyarp-cnb";
-const GITHUB_README_URL = `${GITHUB_PROJECT_URL}#readme`;
-const GITHUB_LICENSE_URL = `${GITHUB_PROJECT_URL}/blob/main/LICENSE`;
 
 const ready = computed(() => snapshot.value?.bridge.state === "ready");
 const bridgeState = computed(() => snapshot.value?.bridge.state ?? "signedOut");
@@ -1120,113 +1114,36 @@ watch(accountState, (state) => {
           </div>
         </header>
 
-        <div class="about-grid">
-          <article class="card details-card about-card">
-            <div class="section-head">
-              <div>
-                <span class="card-label">应用</span>
-                <h2>应用信息</h2>
-              </div>
-              <Info :size="19" aria-hidden="true" />
+        <article class="card details-card">
+          <div class="section-head">
+            <div>
+              <span class="card-label">应用</span>
+              <h2>应用信息</h2>
             </div>
-            <dl>
-              <div>
-                <dt>版本</dt>
-                <dd><code>{{ snapshot?.version || "0.1.0" }}</code></dd>
-              </div>
-              <div><dt>运行方式</dt><dd>Tauri 桌面客户端</dd></div>
-              <div><dt>本机端点</dt><dd><code>{{ baseUrl }}</code></dd></div>
-            </dl>
-          </article>
-
-          <article class="card about-card">
-            <div class="section-head">
-              <div>
-                <span class="card-label">安全</span>
-                <h2>本机安全边界</h2>
-              </div>
-              <ShieldCheck :size="19" aria-hidden="true" />
+            <Info :size="19" aria-hidden="true" />
+          </div>
+          <dl>
+            <div>
+              <dt>版本</dt>
+              <dd><code>{{ snapshot?.version || "0.1.0" }}</code></dd>
             </div>
-            <ul class="about-list">
-              <li>
-                <strong>仅监听 loopback</strong>
-                <span>公开网关只接受来自 127.0.0.1 的本机连接。</span>
-              </li>
-              <li>
-                <strong>CNB 鉴权由账号登录提供</strong>
-                <span>桌面客户端使用已绑定账号完成工作空间与 Agent 鉴权。</span>
-              </li>
-              <li>
-                <strong>客户端 API Key 不校验</strong>
-                <span>可填写 local、任意占位值或留空。</span>
-              </li>
-            </ul>
-          </article>
-
-          <article class="card about-card data-card">
-            <div class="section-head">
-              <div>
-                <span class="card-label">数据</span>
-                <h2>本地日志</h2>
-              </div>
-              <Database :size="19" aria-hidden="true" />
+            <div><dt>运行方式</dt><dd>Tauri 桌面客户端</dd></div>
+            <div><dt>本机端点</dt><dd><code>{{ baseUrl }}</code></dd></div>
+            <div>
+              <dt>项目主页</dt>
+              <dd>
+                <button
+                  type="button"
+                  class="secondary compact project-link"
+                  @click="openAboutResource(GITHUB_PROJECT_URL)"
+                >
+                  <ExternalLink :size="15" aria-hidden="true" />
+                  打开项目主页
+                </button>
+              </dd>
             </div>
-            <p class="about-copy">
-              HTTP 记录会保存实际发往上游的认证头、Cookie、API Key 和对话正文，请勿直接分享。
-            </p>
-            <div class="about-path">
-              <span>日志目录</span>
-              <code>{{ snapshot?.httpLogsPath }}</code>
-            </div>
-            <div class="about-meta">
-              <span>保留 7 天</span>
-              <span>总量上限 1 GiB</span>
-            </div>
-            <button type="button" class="secondary compact" @click="run(openLogsFolder)">
-              <FolderOpen :size="15" aria-hidden="true" />
-              打开日志目录
-            </button>
-          </article>
-
-          <article class="card about-card">
-            <div class="section-head">
-              <div>
-                <span class="card-label">资源</span>
-                <h2>项目与许可</h2>
-              </div>
-              <BookOpen :size="19" aria-hidden="true" />
-            </div>
-            <p class="about-copy">
-              CNB Bridge 使用 MIT License。项目说明、接口文档和构建方式可在仓库中查看。
-            </p>
-            <div class="about-actions">
-              <button
-                type="button"
-                class="secondary compact"
-                @click="openAboutResource(GITHUB_PROJECT_URL)"
-              >
-                <ExternalLink :size="15" aria-hidden="true" />
-                项目主页
-              </button>
-              <button
-                type="button"
-                class="ghost compact"
-                @click="openAboutResource(GITHUB_README_URL)"
-              >
-                <BookOpen :size="15" aria-hidden="true" />
-                README
-              </button>
-              <button
-                type="button"
-                class="ghost compact"
-                @click="openAboutResource(GITHUB_LICENSE_URL)"
-              >
-                <FileText :size="15" aria-hidden="true" />
-                MIT License
-              </button>
-            </div>
-          </article>
-        </div>
+          </dl>
+        </article>
       </section>
     </main>
   </div>

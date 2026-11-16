@@ -1305,109 +1305,8 @@ select:focus {
   overflow-wrap: anywhere;
 }
 
-.about-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: stretch;
-  gap: 14px;
-}
-
-.about-card {
-  display: flex;
-  min-height: 238px;
-  flex-direction: column;
-}
-
-.about-card .section-head {
-  align-items: center;
-}
-
-.about-copy {
-  margin: 16px 0 0;
-  color: var(--muted-strong);
-  font-size: 13px;
-  line-height: 1.65;
-}
-
-.about-list {
-  display: grid;
-  gap: 0;
-  margin: 10px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.about-list li {
-  display: grid;
-  gap: 3px;
-  padding: 10px 0;
-  border-top: 1px solid var(--line-soft);
-}
-
-.about-list li:first-child {
-  border-top: 0;
-}
-
-.about-list strong {
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.about-list span {
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.55;
-}
-
-.about-path {
-  display: grid;
-  gap: 5px;
-  margin-top: 14px;
-  padding: 10px 11px;
-  border: 1px solid var(--line-soft);
-  border-radius: 9px;
-  background: rgba(9, 13, 18, 0.42);
-}
-
-.about-path span {
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.about-path code {
-  color: #c6e4f8;
-  font-size: 11px;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-}
-
-.about-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 10px;
-}
-
-.about-meta span {
-  padding: 4px 8px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  color: var(--muted-strong);
-  font-size: 11px;
-}
-
-.data-card > button {
-  align-self: flex-start;
-  margin-top: auto;
-}
-
-.about-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: auto;
-  padding-top: 18px;
+.project-link {
+  justify-self: start;
 }
 
 code {
@@ -1513,7 +1412,6 @@ code {
 
 @media (max-width: 1020px) {
   .connect-card-grid,
-  .about-grid,
   .form-grid {
     grid-template-columns: 1fr;
   }
@@ -1525,10 +1423,6 @@ code {
   .connect-card {
     min-height: 0;
     height: auto;
-  }
-
-  .about-card {
-    min-height: 0;
   }
 
   .account-intro,

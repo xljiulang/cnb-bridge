@@ -146,14 +146,19 @@ fn map_usage_error(error: ApiError) -> CommandError {
 
 #[tauri::command]
 pub fn open_external(url: String) -> Result<(), CommandError> {
-    if !url.starts_with("https://cnb.cool/") {
+    if !is_allowed_external_url(&url) {
         return Err(CommandError::new(
             "invalid_external_url",
-            "只允许打开 cnb.cool 的安全链接",
+            "只允许打开 HTTP/HTTPS 链接",
         ));
     }
     tauri_plugin_opener::open_url(&url, None::<&str>)
         .map_err(|error| CommandError::new("open_external_failed", error.to_string()))
+}
+
+fn is_allowed_external_url(raw: &str) -> bool {
+    url::Url::parse(raw)
+        .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
 }
 
 #[tauri::command]
@@ -188,4 +193,31 @@ pub fn open_http_trace(id: String) -> Result<(), CommandError> {
         .map_err(|error| CommandError::new("http_trace_dir_failed", error.to_string()))?;
     tauri_plugin_opener::open_path(store.root(), None::<&str>)
         .map_err(|error| CommandError::new("open_http_trace_failed", error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_allowed_external_url;
+
+    #[test]
+    fn allows_any_well_formed_http_or_https_url() {
+        assert!(is_allowed_external_url(
+            "https://github.com/xljiulang/cyarp-cnb"
+        ));
+        assert!(is_allowed_external_url(
+            "https://example.com/arbitrary/path?query=1#fragment"
+        ));
+        assert!(is_allowed_external_url("http://example.com/"));
+    }
+
+    #[test]
+    fn rejects_non_http_external_urls() {
+        assert!(!is_allowed_external_url(""));
+        assert!(!is_allowed_external_url("file:///C:/Windows/win.ini"));
+        assert!(!is_allowed_external_url(
+            "javascript:alert(document.domain)"
+        ));
+        assert!(!is_allowed_external_url("data:text/plain,hello"));
+        assert!(!is_allowed_external_url("https://"));
+    }
 }
