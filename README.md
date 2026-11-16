@@ -91,6 +91,14 @@ cargo build --release -p cnb-bridge-desktop --features custom-protocol
 iscc installer\cnb-bridge.iss
 ```
 
+仓库内固定包含安装包所需的 `installer\runtime\vcruntime140.dll`、`installer\languages\ChineseSimplified.isl` 和 `installer\assets\cnb-bridge.ico`。本地与 CI 打包都不依赖系统 Inno Setup 语言目录，安装器、快捷方式和卸载信息统一使用项目图标。
+
+## GitHub Actions 手动打包
+
+在 GitHub Actions 中打开 `Package Windows Installer` 工作流并点击 `Run workflow`。工作流会执行前端与 Rust 测试、构建 release 客户端、编译 Inno Setup 安装包，并验证安装目录同时包含 `cnb-bridge.exe` 和 `vcruntime140.dll`。
+
+成功后可下载名为 `cnb-bridge-windows-x64-<run_number>` 的 Artifact，其中只包含 `cnb-bridge-<version>-windows-x64-setup.exe`。
+
 如果 CMake 只随 Visual Studio 安装，构建前把它加入 PATH：
 
 ```powershell

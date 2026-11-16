@@ -1,0 +1,166 @@
+name: Package Windows Installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  package:
+    name: Build Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify bundled installer resources
+        shell: pwsh
+        run: |
+          $resources = @(
+            @{
+              Path = "installer/runtime/vcruntime140.dll"
+              Length = 178616
+              Sha256 = "D1F4225DF2CD877DBF130D5668A021DCE3F94118455FF5EC952061C30AFC9CE7"
+            },
+            @{
+              Path = "installer/languages/ChineseSimplified.isl"
+              Length = 20305
+              Sha256 = "4040443DC615C140791951106404BD4ECBBF362DB675658212D913EBE101F1F2"
+            },
+            @{
+              Path = "installer/assets/cnb-bridge.ico"
+              Length = 34494
+              Sha256 = "9B6C388B912BE73F0FC94F799B5233EBACA9CACE880767554DAEF00BE098A6B0"
+            }
+          )
+
+          foreach ($resource in $resources) {
+            if (-not (Test-Path -LiteralPath $resource.Path -PathType Leaf)) {
+              throw "Missing installer resource: $($resource.Path)"
+            }
+
+            $item = Get-Item -LiteralPath $resource.Path
+            if ($item.Length -ne $resource.Length) {
+              throw "Unexpected size for $($resource.Path): $($item.Length), expected $($resource.Length)"
+            }
+
+            $actualHash = (Get-FileHash -LiteralPath $resource.Path -Algorithm SHA256).Hash
+            if ($actualHash -ne $resource.Sha256) {
+              throw "Unexpected SHA256 for $($resource.Path): $actualHash"
+            }
+          }
+
+      - name: Install frontend dependencies
+        working-directory: ui
+        run: npm ci
+
+      - name: Test frontend
+        run: npm --prefix ui test
+
+      - name: Test Rust workspace
+        run: cargo test --workspace
+
+      - name: Build frontend
+        run: npm --prefix ui run build
+
+      - name: Build release desktop client
+        run: cargo build --release -p cnb-bridge-desktop --features custom-protocol
+
+      - name: Verify release executable
+        shell: pwsh
+        run: |
+          $executable = "target/release/cnb-bridge.exe"
+          if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+            throw "Missing release executable: $executable"
+          }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
+          if ($null -eq $iscc) {
+            $fallback = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+            if (-not (Test-Path -LiteralPath $fallback -PathType Leaf)) {
+              throw "Inno Setup compiler was not found"
+            }
+            $compiler = $fallback
+          } else {
+            $compiler = $iscc.Source
+          }
+
+          & $compiler "installer\cnb-bridge.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup compilation failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Verify installer contents
+        shell: pwsh
+        run: |
+          $setups = @(
+            Get-ChildItem -LiteralPath "installer/output" -Filter "*-windows-x64-setup.exe" -File
+          )
+          if ($setups.Count -ne 1) {
+            throw "Expected exactly one installer, found $($setups.Count)"
+          }
+
+          Add-Type -AssemblyName System.Drawing
+          $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($setups[0].FullName)
+          if ($null -eq $icon) {
+            throw "Installer executable has no associated icon"
+          }
+          $icon.Dispose()
+
+          $installDir = Join-Path $env:RUNNER_TEMP "cnb-bridge-install-${{ github.run_id }}"
+          $arguments = @(
+            "/VERYSILENT"
+            "/SUPPRESSMSGBOXES"
+            "/NORESTART"
+            "/NOICONS"
+            "/LANG=chinesesimp"
+            "/DIR=$installDir"
+          )
+          $process = Start-Process -FilePath $setups[0].FullName -ArgumentList $arguments -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Installer exited with code $($process.ExitCode)"
+          }
+
+          foreach ($file in @("cnb-bridge.exe", "vcruntime140.dll")) {
+            $installedFile = Join-Path $installDir $file
+            if (-not (Test-Path -LiteralPath $installedFile -PathType Leaf)) {
+              throw "Installer did not install $file"
+            }
+          }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: cnb-bridge-windows-x64-${{ github.run_number }}
+          path: installer/output/*-windows-x64-setup.exe
+          if-no-files-found: error

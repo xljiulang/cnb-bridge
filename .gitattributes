@@ -13,3 +13,5 @@
 *.iss   text
 *.png   binary
 *.ico   binary
+*.dll   binary
+*.isl   binary
