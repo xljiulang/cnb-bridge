@@ -119,20 +119,13 @@ defineProps<{ app: DesktopApp }>();
               </div>
             </div>
             <span
-              v-if="app.accountConnected"
-              class="badge"
-              :class="
-                app.organizationRequired
-                  ? 'busy'
-                  : 'live'
-              "
+              v-if="app.organizationRequired"
+              class="badge busy"
             >
               {{
-                app.organizationRequired
-                  ? app.creatingOrganization
-                    ? "创建组织中"
-                    : "组织未就绪"
-                  : "已连接"
+                app.creatingOrganization
+                  ? "创建组织中"
+                  : "组织未就绪"
               }}
             </span>
           </div>
@@ -250,16 +243,6 @@ defineProps<{ app: DesktopApp }>();
               />
               <RefreshCw v-else :size="16" aria-hidden="true" />
               {{ app.creatingOrganization ? "正在创建…" : "重试创建组织" }}
-            </button>
-            <button
-              v-if="app.accountConnected"
-              type="button"
-              class="danger compact"
-              :disabled="app.busy"
-              @click="app.logout"
-            >
-              <LogOut :size="15" aria-hidden="true" />
-              退出登录
             </button>
           </div>
         </article>

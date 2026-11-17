@@ -255,17 +255,30 @@ button:disabled {
   box-shadow: 0 0 0 4px var(--success-soft);
 }
 
+.sidebar-account-entry {
+  width: 100%;
+  margin-top: auto;
+}
+
 .sidebar-status {
   display: grid;
+  width: 100%;
   min-width: 0;
+  min-height: 0;
   grid-template-columns: 30px minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
-  margin-top: auto;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--panel);
+  text-align: left;
+}
+
+.sidebar-status:hover:not(:disabled),
+.sidebar-status[aria-expanded="true"] {
+  border-color: var(--accent-line);
+  background: color-mix(in srgb, var(--accent) 5%, var(--panel));
 }
 
 .sidebar-status.live {
@@ -325,6 +338,60 @@ button:disabled {
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.sidebar-account-menu {
+  position: fixed;
+  z-index: 95;
+  display: grid;
+  gap: 0;
+  padding: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  box-shadow: 0 24px 64px #00000075, 0 1px #ffffff0a inset;
+  backdrop-filter: blur(18px);
+  animation: account-menu-enter 120ms ease-out;
+}
+
+.sidebar-logout-action {
+  width: 100%;
+  min-height: 36px;
+  justify-content: flex-start;
+  padding: 8px 10px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted-strong);
+  font-size: 12px;
+  text-align: left;
+}
+
+.sidebar-logout-action svg {
+  color: var(--danger);
+}
+
+.sidebar-logout-action:hover:not(:disabled) {
+  border-color: rgba(255, 107, 120, 0.24);
+  background: var(--danger-soft);
+  color: var(--danger-text);
+}
+
+@keyframes account-menu-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-account-menu {
+    animation: none;
+  }
 }
 
 .content {

@@ -385,6 +385,8 @@ describe("App shell", () => {
     expect(wrapper.find(".account-avatar img").attributes("src")).toBe(
       "https://cnb.cool/users/tester/avatar/l",
     );
+    expect(wrapper.find(".account-head .badge").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("退出登录");
 
     await wrapper.findAll("nav button")[1].trigger("click");
     await flushPromises();
@@ -398,6 +400,41 @@ describe("App shell", () => {
     await wrapper.findAll("nav button")[3].trigger("click");
     await flushPromises();
     expect(wrapper.find(".details-card").text()).toContain("作者");
+    wrapper.unmount();
+  });
+
+  it("keeps an organization warning badge on a connected account", async () => {
+    const needsOrganizationSnapshot = {
+      ...snapshot,
+      account: { ...account, needsOrganization: true },
+      bridge: {
+        ...snapshot.bridge,
+        account: { ...account, needsOrganization: true },
+      },
+    };
+    mockWindows("main");
+    mockIPC(
+      (command) => {
+        switch (command) {
+          case "get_snapshot":
+            return needsOrganizationSnapshot;
+          case "get_logs":
+          case "list_http_traces":
+          case "list_namespaces":
+            return [];
+          case "get_cnb_usage":
+            return null;
+          default:
+            return null;
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+
+    expect(wrapper.get(".account-head .badge").text()).toBe("组织未就绪");
+    expect(wrapper.text()).not.toContain("退出登录");
     wrapper.unmount();
   });
 

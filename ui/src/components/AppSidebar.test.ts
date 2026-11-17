@@ -106,6 +106,26 @@ describe("AppSidebar", () => {
     ).toBe(true);
   });
 
+  it("opens account actions and logs out from the sidebar", async () => {
+    const logout = vi.fn();
+    const wrapper = mount(AppSidebar, {
+      attachTo: document.body,
+      props: { app: app({ logout }) },
+    });
+
+    await wrapper.get(".sidebar-status").trigger("click");
+    const logoutButton = document.body.querySelector(
+      ".sidebar-logout-action",
+    ) as HTMLElement;
+    expect(logoutButton.textContent).toContain("退出登录");
+    logoutButton.click();
+    await wrapper.vm.$nextTick();
+
+    expect(logout).toHaveBeenCalledOnce();
+    expect(document.body.querySelector(".sidebar-account-menu")).toBeNull();
+    wrapper.unmount();
+  });
+
   it("uses the bridge status label in the badge", () => {
     const cases = [
       { label: "桥接就绪", icon: "live" as const },

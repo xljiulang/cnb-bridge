@@ -1,19 +1,13 @@
 <script setup lang="ts">
 import {
-  Activity,
-  AlertTriangle,
   Cable,
-  CirclePause,
   Info,
-  LoaderCircle,
-  ScanQrCode,
   ScrollText,
-  Server,
   Settings as SettingsIcon,
 } from "@lucide/vue";
 import appIcon from "../assets/cnb-favicon.svg";
 import type { DesktopApp } from "../composables/useDesktopApp";
-import AccountAvatar from "./AccountAvatar.vue";
+import SidebarAccountMenu from "./SidebarAccountMenu.vue";
 
 defineProps<{ app: DesktopApp }>();
 </script>
@@ -64,63 +58,14 @@ defineProps<{ app: DesktopApp }>();
       </button>
     </nav>
 
-    <div
+    <SidebarAccountMenu
       v-if="app.accountConnected"
-      class="sidebar-status"
-      :class="{ live: app.ready }"
-    >
-      <span
-        class="status-icon"
-        :class="{ 'status-account-avatar': app.accountConnected }"
-      >
-        <AccountAvatar
-          v-if="app.accountConnected"
-          :avatar-url="app.snapshot?.account.avatarUrl"
-          :size="18"
-        />
-        <ScanQrCode
-          v-else-if="app.sidebarStatusIcon === 'scan'"
-          :size="16"
-          aria-hidden="true"
-        />
-        <Activity
-          v-else-if="app.sidebarStatusIcon === 'live'"
-          :size="16"
-          aria-hidden="true"
-        />
-        <LoaderCircle
-          v-else-if="app.sidebarStatusIcon === 'busy'"
-          class="spin"
-          :size="16"
-          aria-hidden="true"
-        />
-        <CirclePause
-          v-else-if="app.sidebarStatusIcon === 'pause'"
-          :size="16"
-          aria-hidden="true"
-        />
-        <AlertTriangle
-          v-else-if="app.sidebarStatusIcon === 'error'"
-          :size="16"
-          aria-hidden="true"
-        />
-        <Server v-else :size="16" aria-hidden="true" />
-      </span>
-      <div class="status-copy">
-        <strong>
-          {{
-            app.accountConnected
-              ? app.snapshot?.account.displayName || "CNB 已绑定"
-              : "等待扫码"
-          }}
-        </strong>
-      </div>
-      <span
-        class="badge sidebar-status-badge"
-        :class="{ live: app.ready }"
-      >
-        {{ app.statusLabel }}
-      </span>
-    </div>
+      :display-name="app.snapshot?.account.displayName || 'CNB 已绑定'"
+      :avatar-url="app.snapshot?.account.avatarUrl"
+      :status-label="app.statusLabel"
+      :live="app.ready"
+      :disabled="app.busy"
+      @logout="app.logout"
+    />
   </aside>
 </template>
