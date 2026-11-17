@@ -667,6 +667,7 @@ mod tests {
             .complete_token_login(
                 "token",
                 Some("alice".to_string()),
+                None,
                 Some(AccountBridgeSettings {
                     repo_namespace: "alice-team".to_string(),
                     repo_name: "alice-bridge".to_string(),
@@ -772,7 +773,7 @@ mod tests {
         let account =
             AccountManager::with_store(AccountStore::new(temp.path().join("account.bin")));
         account
-            .complete_token_login("token", Some("cnb.new-user".to_string()), None)
+            .complete_token_login("token", Some("cnb.new-user".to_string()), None, None)
             .unwrap();
         account.set_needs_organization(true);
         let mut bridge = Bridge::new(

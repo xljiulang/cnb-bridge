@@ -3,7 +3,7 @@
 use crate::dpapi;
 use crate::paths;
 use rand::rngs::OsRng;
-use ssh_key::{Algorithm, PrivateKey};
+use ssh_key::{Algorithm, HashAlg, PrivateKey};
 use std::path::{Path, PathBuf};
 
 /// CNB Bridge never reuses a user's existing `~/.ssh` keys.
@@ -11,6 +11,13 @@ use std::path::{Path, PathBuf};
 pub struct SshKeyStore {
     private_path: PathBuf,
     public_path: PathBuf,
+}
+
+/// Returns the standard SHA-256 fingerprint for an OpenSSH public key.
+pub fn public_key_fingerprint(public_key: &str) -> Result<String, String> {
+    let public_key = ssh_key::PublicKey::from_openssh(public_key.trim())
+        .map_err(|error| format!("解析 SSH 公钥失败: {error}"))?;
+    Ok(public_key.fingerprint(HashAlg::Sha256).to_string())
 }
 
 impl SshKeyStore {
@@ -107,6 +114,16 @@ impl SshKeyStore {
             .map_err(|error| format!("替换 SSH 私钥失败: {error}"))?;
         Ok(())
     }
+}
+
+#[test]
+fn computes_the_standard_sha256_public_key_fingerprint() {
+    let public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILM+rvN+ot98qgEN796jTiQfZfG1KaT0PtFDJ/XFSqti user@example.com";
+
+    assert_eq!(
+        public_key_fingerprint(public_key).unwrap(),
+        "SHA256:UCUiLr7Pjs9wFFJMDByLgc3NrtdU344OgUM45wZPcIQ"
+    );
 }
 
 #[cfg(all(test, windows))]

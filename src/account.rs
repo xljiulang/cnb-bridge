@@ -25,6 +25,8 @@ pub struct Credentials {
     pub username: Option<String>,
     #[serde(default)]
     pub auth_method: AuthMethod,
+    #[serde(default)]
+    pub token_id: Option<String>,
 }
 
 /// Per-account settings used by the bridge runtime.
@@ -154,7 +156,7 @@ pub enum AccountError {
     Storage(String),
 }
 
-const ACCOUNT_BOOK_VERSION: u32 = 2;
+const ACCOUNT_BOOK_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -425,6 +427,7 @@ impl AccountManager {
         &self,
         access_token: impl Into<String>,
         username: Option<String>,
+        token_id: Option<String>,
         bridge_settings: Option<AccountBridgeSettings>,
     ) -> Result<AccountStatus, AccountError> {
         let username = username
@@ -436,6 +439,9 @@ impl AccountManager {
             access_token: access_token.into(),
             username: Some(username.to_string()),
             auth_method: AuthMethod::PersonalAccessToken,
+            token_id: token_id
+                .map(|token_id| token_id.trim().to_string())
+                .filter(|token_id| !token_id.is_empty()),
         };
         if credentials.access_token.trim().is_empty() {
             return Err(AccountError::Authorization(
@@ -632,15 +638,91 @@ mod tests {
     use crate::dpapi;
 
     #[test]
+    fn persists_pat_token_id_across_rescans_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AccountStore::new(dir.path().join("account-auth.bin"));
+        let manager = AccountManager::with_store(store.clone());
+        manager
+            .complete_token_login(
+                "first-token",
+                Some("alice".to_string()),
+                Some("token-1".to_string()),
+                None,
+            )
+            .unwrap();
+        manager
+            .complete_token_login(
+                "second-token",
+                Some("alice".to_string()),
+                Some("token-2".to_string()),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            manager
+                .credentials_for("alice")
+                .unwrap()
+                .token_id
+                .as_deref(),
+            Some("token-2")
+        );
+        assert_eq!(
+            AccountManager::with_store(store)
+                .credentials_for("alice")
+                .unwrap()
+                .token_id
+                .as_deref(),
+            Some("token-2")
+        );
+    }
+
+    #[test]
+    fn migrates_a_version_two_account_book_without_token_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("account-auth.bin");
+        let settings = AccountBridgeSettings {
+            repo_namespace: "alice-team".to_string(),
+            repo_name: "alice-bridge".to_string(),
+        };
+        let version_two = AccountBook {
+            version: 2,
+            active_username: Some("alice".to_string()),
+            accounts: vec![StoredAccount {
+                username: "alice".to_string(),
+                credentials: Credentials {
+                    access_token: "legacy-token".to_string(),
+                    username: Some("alice".to_string()),
+                    auth_method: AuthMethod::PersonalAccessToken,
+                    token_id: None,
+                },
+                last_login_at: 42,
+                bridge_settings: Some(settings.clone()),
+            }],
+        };
+        let encrypted =
+            dpapi::protect(serde_json::to_vec(&version_two).unwrap().as_slice()).unwrap();
+        std::fs::write(&path, encrypted).unwrap();
+
+        let manager = AccountManager::with_store(AccountStore::new(path));
+        let book = manager.book.lock().unwrap();
+
+        assert_eq!(book.version, 3);
+        assert_eq!(book.active_username.as_deref(), Some("alice"));
+        assert_eq!(book.accounts[0].credentials.token_id, None);
+        assert_eq!(book.accounts[0].bridge_settings.as_ref(), Some(&settings));
+    }
+
+    #[test]
     fn account_book_round_trips_multiple_accounts_and_hides_tokens() {
         let dir = tempfile::tempdir().unwrap();
         let store = AccountStore::new(dir.path().join("account-auth.bin"));
         let manager = AccountManager::with_store(store.clone());
         manager
-            .complete_token_login("alice-token", Some("alice".to_string()), None)
+            .complete_token_login("alice-token", Some("alice".to_string()), None, None)
             .unwrap();
         manager
-            .complete_token_login("bob-token", Some("bob".to_string()), None)
+            .complete_token_login("bob-token", Some("bob".to_string()), None, None)
             .unwrap();
 
         let raw = std::fs::read(store.path()).unwrap();
@@ -671,11 +753,12 @@ mod tests {
             .complete_token_login(
                 "first-token",
                 Some("Alice".to_string()),
+                None,
                 Some(settings.clone()),
             )
             .unwrap();
         manager
-            .complete_token_login("second-token", Some("alice".to_string()), None)
+            .complete_token_login("second-token", Some("alice".to_string()), None, None)
             .unwrap();
 
         let accounts = manager.accounts();
@@ -694,7 +777,7 @@ mod tests {
         let store = AccountStore::new(dir.path().join("account-auth.bin"));
         let manager = AccountManager::with_store(store.clone());
         manager
-            .complete_token_login("alice-token", Some("alice".to_string()), None)
+            .complete_token_login("alice-token", Some("alice".to_string()), None, None)
             .unwrap();
 
         let status = manager.logout().unwrap();
@@ -718,6 +801,7 @@ mod tests {
             .complete_token_login(
                 "alice-token",
                 Some("alice".to_string()),
+                None,
                 Some(AccountBridgeSettings {
                     repo_namespace: "alice-team".to_string(),
                     repo_name: "alice-bridge".to_string(),
@@ -728,6 +812,7 @@ mod tests {
             .complete_token_login(
                 "bob-token",
                 Some("bob".to_string()),
+                None,
                 Some(AccountBridgeSettings {
                     repo_namespace: "bob-team".to_string(),
                     repo_name: "bob-bridge".to_string(),
@@ -757,7 +842,7 @@ mod tests {
         let store = AccountStore::new(dir.path().join("account-auth.bin"));
         let manager = AccountManager::with_store(store.clone());
         manager
-            .complete_token_login("alice-token", Some("alice".to_string()), None)
+            .complete_token_login("alice-token", Some("alice".to_string()), None, None)
             .unwrap();
         let settings = AccountBridgeSettings {
             repo_namespace: "alice-team".to_string(),
@@ -783,6 +868,7 @@ mod tests {
             .complete_token_login(
                 "alice-token",
                 Some("alice".to_string()),
+                None,
                 Some(AccountBridgeSettings {
                     repo_namespace: "alice-team".to_string(),
                     repo_name: "alice-bridge".to_string(),
@@ -793,6 +879,7 @@ mod tests {
             .complete_token_login(
                 "bob-token",
                 Some("bob".to_string()),
+                None,
                 Some(AccountBridgeSettings {
                     repo_namespace: "bob-team".to_string(),
                     repo_name: "bob-bridge".to_string(),
@@ -839,7 +926,7 @@ mod tests {
         let manager =
             AccountManager::with_store(AccountStore::new(dir.path().join("account-auth.bin")));
         manager
-            .complete_token_login("alice-token", Some("alice".to_string()), None)
+            .complete_token_login("alice-token", Some("alice".to_string()), None, None)
             .unwrap();
 
         assert!(manager.remove_account("alice").is_err());
@@ -877,6 +964,7 @@ mod tests {
             access_token: "legacy-token".to_string(),
             username: Some("legacy-user".to_string()),
             auth_method: AuthMethod::PersonalAccessToken,
+            token_id: None,
         };
         let encrypted =
             dpapi::protect(serde_json::to_vec(&credentials).unwrap().as_slice()).unwrap();
@@ -909,7 +997,12 @@ mod tests {
         assert!(!status.needs_organization);
 
         let status = manager
-            .complete_token_login("personal-access-token", Some("new-user".to_string()), None)
+            .complete_token_login(
+                "personal-access-token",
+                Some("new-user".to_string()),
+                None,
+                None,
+            )
             .unwrap();
         assert!(!status.needs_organization);
 
@@ -936,7 +1029,7 @@ mod tests {
         assert_eq!(status.error.as_deref(), Some("请先完成实名认证"));
 
         let status = manager
-            .complete_token_login("token", Some("test-user".to_string()), None)
+            .complete_token_login("token", Some("test-user".to_string()), None, None)
             .unwrap();
         assert_eq!(status.error_action, None);
     }

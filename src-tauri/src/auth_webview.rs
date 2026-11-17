@@ -1,9 +1,12 @@
 use crate::state::DesktopState;
-use cnb_bridge::account::{AccountAction, AccountStatus};
+use cnb_bridge::account::{AccountAction, AccountError, AccountManager, AccountStatus};
 use cnb_bridge::api::CnbApi;
+use cnb_bridge::logging::Logger;
 use cnb_bridge::paths;
+use cnb_bridge::ssh_key::public_key_fingerprint;
 use cnb_bridge::web_auth::{
-    is_allowed_auth_url, session_from_cookies, CreatedPat, WebAuthClient, WebAuthError, WebSession,
+    is_allowed_auth_url, session_from_cookies, token_description_for_fingerprint, CreatedPat,
+    ReplacePatError, WebAuthClient, WebAuthError, WebSession,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -12,7 +15,6 @@ use url::Url;
 
 const AUTH_URL: &str = "https://cnb.cool/?s_url=%2Fprofile%2Ftoken";
 const WINDOW_LABEL: &str = "cnb-auth";
-const TOKEN_DESCRIPTION: &str = "CNB Bridge";
 const IDENTITY_VERIFICATION_URL: &str = "https://cnb.cool/profile/auth";
 const IDENTITY_VERIFICATION_MESSAGE: &str =
     "当前 CNB 账号尚未完成实名认证，无法创建访问令牌。请先完成实名认证，然后重新扫码登录。";
@@ -71,34 +73,10 @@ pub fn launch(app: tauri::AppHandle) -> Result<AccountStatus, String> {
         .await;
         match result {
             Ok(authorized) => {
-                let status = account
-                    .complete_token_login(authorized.pat.token.clone(), authorized.username, None)
-                    .map(|_| account.set_needs_organization(authorized.needs_organization));
-                match status {
+                match complete_authorized_pat(&account, &WebAuthClient::new(), &authorized, &logger)
+                    .await
+                {
                     Ok(_) => {
-                        logger.log("info", "CNB personal access token is ready");
-                        if !authorized.pat.token_id.trim().is_empty() {
-                            let client = WebAuthClient::new();
-                            if let Err(error) = client
-                                .delete_old_tokens(
-                                    &authorized.session,
-                                    TOKEN_DESCRIPTION,
-                                    &authorized.pat.token_id,
-                                )
-                                .await
-                            {
-                                logger.log("warn", format!("清理旧 CNB Bridge 令牌失败: {error}"));
-                            } else if let Err(error) = client
-                                .rename_token(
-                                    &authorized.session,
-                                    &authorized.pat.token_id,
-                                    TOKEN_DESCRIPTION,
-                                )
-                                .await
-                            {
-                                logger.log("warn", format!("重命名 CNB Bridge 令牌失败: {error}"));
-                            }
-                        }
                         bridge.account_connected().await;
                     }
                     Err(error) => {
@@ -166,41 +144,51 @@ async fn authorize(
         .map_err(|error| format!("读取 CNB 命名空间失败: {error}"))?;
     let namespace = (namespaces.len() == 1).then(|| namespaces[0].path.as_str());
     let public_key = bridge.ensure_ssh_key()?;
+    let fingerprint = public_key_fingerprint(&public_key)?;
+    let token_description = token_description_for_fingerprint(&fingerprint)?;
     client
-        .ensure_ssh_key(&session, TOKEN_DESCRIPTION, &public_key)
+        .ensure_ssh_key(&session, &token_description, &public_key)
         .await
         .map_err(|error| format!("自动添加 SSH 公钥失败: {error}"))?;
-    let temporary_description = format!(
-        "{TOKEN_DESCRIPTION} {}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    );
     let pat = match client
-        .create_pat(&session, &temporary_description, namespace)
+        .replace_pat(&session, &token_description, namespace)
         .await
     {
         Ok(pat) => pat,
-        Err(WebAuthError::IdentityVerificationRequired) => {
+        Err(ReplacePatError::Create(WebAuthError::IdentityVerificationRequired)) => {
             return Err(AuthorizationFailure::IdentityVerificationRequired)
         }
-        Err(error) => {
-            return Err(format!("自动创建访问令牌失败: {error}").into());
+        Err(ReplacePatError::Create(error)) => {
+            return Err(format!(
+                "本机同名旧 PAT 已删除，但新 PAT 创建失败，请重新扫码重试: {error}"
+            )
+            .into());
+        }
+        Err(ReplacePatError::Cleanup(error)) => {
+            return Err(
+                format!("删除本机同名旧 PAT 失败，未创建新 PAT，请重新扫码重试: {error}").into(),
+            );
         }
     };
     let api = CnbApi::new();
-    let user = api
-        .current_user(&pat.token)
-        .await
-        .map_err(|error| format!("新访问令牌验证失败: {error}"))?;
+    let user = api.current_user(&pat.token).await.map_err(|error| {
+        format!("本机同名旧 PAT 已删除，但新 PAT 验证失败，请重新扫码重试: {error}")
+    })?;
     let owned_namespaces = api
         .list_owned_namespaces(&pat.token)
         .await
-        .map_err(|error| format!("检查 CNB Owner 组织失败: {error}"))?;
+        .map_err(|error| {
+            format!(
+                "本机同名旧 PAT 已删除，但新 PAT 无法检查 CNB Owner 组织，请重新扫码重试: {error}"
+            )
+        })?;
     let username = (!user.username.trim().is_empty()).then_some(user.username);
     if username.is_none() {
-        return Err("CNB 未返回账号名，无法保存账号凭据".to_string().into());
+        return Err(
+            "本机同名旧 PAT 已删除，但 CNB 未返回新 PAT 的账号名，请重新扫码重试"
+                .to_string()
+                .into(),
+        );
     }
     let mut needs_organization = owned_namespaces.is_empty();
     if needs_organization {
@@ -244,6 +232,44 @@ struct AuthorizationResult {
     username: Option<String>,
     session: WebSession,
     needs_organization: bool,
+}
+
+async fn complete_authorized_pat(
+    account: &AccountManager,
+    client: &WebAuthClient,
+    authorized: &AuthorizationResult,
+    logger: &Logger,
+) -> Result<AccountStatus, AccountError> {
+    let previous_token_id = authorized
+        .username
+        .as_deref()
+        .and_then(|username| account.credentials_for(username).ok())
+        .and_then(|credentials| credentials.token_id);
+    let new_token_id =
+        (!authorized.pat.token_id.trim().is_empty()).then(|| authorized.pat.token_id.clone());
+    account.complete_token_login(
+        authorized.pat.token.clone(),
+        authorized.username.clone(),
+        new_token_id.clone(),
+        None,
+    )?;
+    let status = account.set_needs_organization(authorized.needs_organization);
+    logger.log("info", "CNB personal access token is ready");
+
+    if let Some(token_id) = new_token_id {
+        if let Some(previous_token_id) = previous_token_id.as_deref() {
+            if previous_token_id != token_id {
+                if let Err(error) = client
+                    .delete_token_if_present(&authorized.session, previous_token_id)
+                    .await
+                {
+                    logger.log("warn", format!("清理本机旧 CNB Bridge 令牌失败: {error}"));
+                }
+            }
+        }
+    }
+
+    Ok(status)
 }
 
 enum AuthorizationFailure {
@@ -299,5 +325,55 @@ pub fn clear_web_data(app: &tauri::AppHandle) {
         let _ = window.clear_all_browsing_data();
     } else {
         let _ = std::fs::remove_dir_all(paths::auth_webview_dir());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cnb_bridge::account::{AccountManager, AccountState, AccountStore};
+    use cnb_bridge::logging::Logger;
+
+    #[tokio::test]
+    async fn saves_the_new_pat_before_best_effort_device_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let account =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account-auth.bin")));
+        account
+            .complete_token_login(
+                "old-token",
+                Some("alice".to_string()),
+                Some("old-id".to_string()),
+                None,
+            )
+            .unwrap();
+        let client = WebAuthClient::with_base_url("http://127.0.0.1:1");
+        let logger = Logger::new(32);
+
+        let status = complete_authorized_pat(
+            &account,
+            &client,
+            &AuthorizationResult {
+                pat: CreatedPat {
+                    token_id: "new-id".to_string(),
+                    token: "new-token".to_string(),
+                    git_username: "cnb".to_string(),
+                },
+                username: Some("alice".to_string()),
+                session: WebSession {
+                    cookie_header: "session=abc; csrftoken=csrf".to_string(),
+                    csrf_token: "csrf".to_string(),
+                },
+                needs_organization: false,
+            },
+            &logger,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status.state, AccountState::Connected);
+        let credentials = account.credentials_for("alice").unwrap();
+        assert_eq!(credentials.access_token, "new-token");
+        assert_eq!(credentials.token_id.as_deref(), Some("new-id"));
     }
 }

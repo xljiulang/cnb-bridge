@@ -390,7 +390,7 @@ mod tests {
         let manager =
             AccountManager::with_store(AccountStore::new(temp.path().join("account-auth.bin")));
         manager
-            .complete_token_login("alice-token", Some("alice".to_string()), None)
+            .complete_token_login("alice-token", Some("alice".to_string()), None, None)
             .unwrap();
         manager.logout().unwrap();
         (temp, manager)

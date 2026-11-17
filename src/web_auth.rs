@@ -10,6 +10,21 @@ use crate::net;
 /// Minimal scopes required by the bridge runtime.
 pub const AUTH_SCOPES: &str = "account-profile:r,account-engage:rw,group-manage:rw,group-resource:rw,repo-code:rw,repo-basic-info:r,repo-cnb-trigger:rw,repo-cnb-detail:rw";
 
+/// Builds the stable PAT description for one SSH public key.
+pub fn token_description_for_fingerprint(fingerprint: &str) -> Result<String, String> {
+    let suffix = fingerprint
+        .strip_prefix("SHA256:")
+        .ok_or_else(|| "SSH 公钥指纹缺少 SHA256: 前缀".to_string())?;
+    let short = suffix
+        .get(..30)
+        .ok_or_else(|| "SSH 公钥指纹长度不足".to_string())?;
+    let description = format!("CNB Bridge SHA256:{short}");
+    if description.chars().count() > 50 {
+        return Err("设备 PAT 描述超过 CNB 的 50 字符限制".to_string());
+    }
+    Ok(description)
+}
+
 /// Cookies and CSRF token extracted from the authenticated CNB WebView.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebSession {
@@ -60,6 +75,15 @@ impl From<reqwest::Error> for WebAuthError {
             source: error,
         }
     }
+}
+
+/// Errors raised while replacing a stable-named personal access token.
+#[derive(Debug, thiserror::Error)]
+pub enum ReplacePatError {
+    #[error("删除同名旧 PAT 失败: {0}")]
+    Cleanup(#[source] WebAuthError),
+    #[error("创建同名新 PAT 失败: {0}")]
+    Create(#[source] WebAuthError),
 }
 
 /// Client for CNB browser-session endpoints.
@@ -214,12 +238,25 @@ impl WebAuthClient {
         })
     }
 
-    /// Deletes old PATs with the same description, excluding the replacement.
-    pub async fn delete_old_tokens(
+    /// Deletes the existing same-named PAT, then creates its replacement.
+    pub async fn replace_pat(
         &self,
         session: &WebSession,
         description: &str,
-        keep_token_id: &str,
+        namespace: Option<&str>,
+    ) -> Result<CreatedPat, ReplacePatError> {
+        self.delete_tokens_with_description(session, description)
+            .await
+            .map_err(ReplacePatError::Cleanup)?;
+        self.create_pat(session, description, namespace)
+            .await
+            .map_err(ReplacePatError::Create)
+    }
+
+    async fn delete_tokens_with_description(
+        &self,
+        session: &WebSession,
+        description: &str,
     ) -> Result<(), WebAuthError> {
         let value = self
             .request(
@@ -236,37 +273,44 @@ impl WebAuthClient {
                 .or_else(|| token.get("id"))
                 .and_then(scalar_string)
                 .unwrap_or_default();
-            if token_id.is_empty() || token_id == keep_token_id {
+            if token_id.is_empty()
+                || token.get("description").and_then(Value::as_str) != Some(description)
+            {
                 continue;
             }
-            if token.get("description").and_then(Value::as_str) == Some(description) {
-                self.request(
-                    Method::DELETE,
-                    &format!("/user/personal_access_tokens/{token_id}"),
-                    session,
-                    None,
-                )
-                .await?;
-            }
+            self.request(
+                Method::DELETE,
+                &format!("/user/personal_access_tokens/{token_id}"),
+                session,
+                None,
+            )
+            .await?;
         }
         Ok(())
     }
 
-    /// Renames a created token after its replacement has been validated.
-    pub async fn rename_token(
+    /// Deletes a known PAT, treating a missing token as already removed.
+    pub async fn delete_token_if_present(
         &self,
         session: &WebSession,
         token_id: &str,
-        description: &str,
     ) -> Result<(), WebAuthError> {
-        self.request(
-            Method::PATCH,
-            &format!("/user/personal_access_tokens/{token_id}"),
-            session,
-            Some(json!({ "description": description })),
-        )
-        .await?;
-        Ok(())
+        match self
+            .request(
+                Method::DELETE,
+                &format!("/user/personal_access_tokens/{token_id}"),
+                session,
+                None,
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(WebAuthError::Remote {
+                status: StatusCode::NOT_FOUND,
+                ..
+            }) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     async fn request(
@@ -388,6 +432,19 @@ mod tests {
             cookie_header: "session=abc; csrftoken=csrf".to_string(),
             csrf_token: "csrf".to_string(),
         }
+    }
+
+    #[test]
+    fn builds_a_stable_short_device_token_description_from_the_key_fingerprint() {
+        let description =
+            token_description_for_fingerprint("SHA256:UCUiLr7Pjs9wFFJMDByLgc3NrtdU344OgUM45wZPcIQ")
+                .unwrap();
+
+        assert_eq!(
+            description,
+            "CNB Bridge SHA256:UCUiLr7Pjs9wFFJMDByLgc3NrtdU34"
+        );
+        assert_eq!(description.chars().count(), 48);
     }
 
     #[tokio::test]
@@ -548,6 +605,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replaces_a_stable_named_pat_by_deleting_then_recreating() {
+        let server = MockServer::start().await;
+        let description = "CNB Bridge SHA256:THIS-DEVICE";
+        Mock::given(method("GET"))
+            .and(path("/user/personal_access_tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [
+                    { "token_id": "old", "description": description },
+                    {
+                        "token_id": "other-device",
+                        "description": "CNB Bridge SHA256:OTHER-DEVICE"
+                    },
+                    { "token_id": "legacy", "description": "CNB Bridge" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/user/personal_access_tokens/old"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/user/personal_access_tokens"))
+            .and(body_json(json!({
+                "description": description,
+                "scope": AUTH_SCOPES
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "result": {
+                    "token_id": "new",
+                    "token": "pat-value",
+                    "git_username": "cnb"
+                }
+            })))
+            .mount(&server)
+            .await;
+        let client = WebAuthClient::with_base_url(server.uri());
+
+        let pat = client
+            .replace_pat(&session(), description, None)
+            .await
+            .unwrap();
+
+        assert_eq!(pat.token_id, "new");
+        let methods = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|request| request.method.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(methods, vec!["GET", "DELETE", "POST"]);
+    }
+
+    #[tokio::test]
+    async fn does_not_create_a_pat_when_same_named_cleanup_fails() {
+        let server = MockServer::start().await;
+        let description = "CNB Bridge SHA256:THIS-DEVICE";
+        Mock::given(method("GET"))
+            .and(path("/user/personal_access_tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [{ "token_id": "old", "description": description }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/user/personal_access_tokens/old"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+                "errmsg": "delete failed"
+            })))
+            .mount(&server)
+            .await;
+        let client = WebAuthClient::with_base_url(server.uri());
+
+        let error = client
+            .replace_pat(&session(), description, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ReplacePatError::Cleanup(_)));
+        let methods = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|request| request.method.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(methods, vec!["GET", "DELETE"]);
+    }
+
+    #[tokio::test]
+    async fn treats_a_missing_previous_pat_as_already_deleted() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/user/personal_access_tokens/previous"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "errmsg": "not found"
+            })))
+            .mount(&server)
+            .await;
+        let client = WebAuthClient::with_base_url(server.uri());
+
+        client
+            .delete_token_if_present(&session(), "previous")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn parses_numeric_token_id_without_losing_cleanup_guard() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -569,52 +736,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(token.token_id, "123456789");
-    }
-
-    #[tokio::test]
-    async fn deletes_only_old_bridge_tokens_after_replacement_exists() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/user/personal_access_tokens"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "result": [
-                    { "token_id": "old", "description": "CNB Bridge" },
-                    { "token_id": "new", "description": "CNB Bridge" },
-                    { "token_id": "other", "description": "Other app" }
-                ]
-            })))
-            .mount(&server)
-            .await;
-        Mock::given(method("DELETE"))
-            .and(path("/user/personal_access_tokens/old"))
-            .and(header("csrftoken", "csrf"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
-            .mount(&server)
-            .await;
-        let client = WebAuthClient::with_base_url(server.uri());
-
-        client
-            .delete_old_tokens(&session(), "CNB Bridge", "new")
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn renames_replacement_token_after_validation() {
-        let server = MockServer::start().await;
-        Mock::given(method("PATCH"))
-            .and(path("/user/personal_access_tokens/new"))
-            .and(header("csrftoken", "csrf"))
-            .and(body_json(json!({ "description": "CNB Bridge" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
-            .mount(&server)
-            .await;
-        let client = WebAuthClient::with_base_url(server.uri());
-
-        client
-            .rename_token(&session(), "new", "CNB Bridge")
-            .await
-            .unwrap();
     }
 
     #[tokio::test]
