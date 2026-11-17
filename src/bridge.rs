@@ -148,7 +148,7 @@ impl Bridge {
     }
 
     async fn start_locked(&self) -> Result<BridgeSnapshot, BridgeError> {
-        let settings = match self.settings.load() {
+        let settings = match self.load_settings() {
             Ok(settings) => settings,
             Err(error) => {
                 self.set_error(BridgeState::Failed, error.clone()).await;
@@ -464,7 +464,7 @@ impl Bridge {
 
     /// Returns the current UI snapshot.
     pub async fn snapshot(&self) -> BridgeSnapshot {
-        let settings = self.settings.load().unwrap_or_default();
+        let settings = self.load_settings().unwrap_or_default();
         let runtime = self.runtime.lock().await;
         let state = runtime.state.unwrap_or(BridgeState::SignedOut);
         BridgeSnapshot {
@@ -495,6 +495,15 @@ impl Bridge {
 
     pub(crate) fn logger_handle(&self) -> Arc<Logger> {
         Arc::clone(&self.logger)
+    }
+
+    fn load_settings(&self) -> Result<crate::settings::Settings, String> {
+        let mut settings = self.settings.load()?;
+        if let Some(account_settings) = self.account.active_bridge_settings() {
+            settings.repo_namespace = account_settings.repo_namespace;
+            settings.repo_name = account_settings.repo_name;
+        }
+        Ok(settings)
     }
 
     pub(crate) fn http_log_filter(&self) -> crate::settings::HttpLogFilter {
@@ -619,7 +628,7 @@ async fn check_health_once(port: u16) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::account::AccountStore;
+    use crate::account::{AccountBridgeSettings, AccountStore};
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -647,6 +656,45 @@ mod tests {
             serde_json::to_string(&BridgeState::Idle).unwrap(),
             r#""idle""#
         );
+    }
+
+    #[test]
+    fn effective_settings_use_the_active_account_bridge_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let account =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account.bin")));
+        account
+            .complete_token_login(
+                "token",
+                Some("alice".to_string()),
+                Some(AccountBridgeSettings {
+                    repo_namespace: "alice-team".to_string(),
+                    repo_name: "alice-bridge".to_string(),
+                }),
+            )
+            .unwrap();
+        let settings_store = SettingsStore::new(temp.path().join("settings.json"));
+        settings_store
+            .save(&crate::settings::Settings {
+                repo_namespace: "global-team".to_string(),
+                repo_name: "global-bridge".to_string(),
+                ..crate::settings::Settings::default()
+            })
+            .unwrap();
+        let bridge = Bridge::new(
+            account,
+            settings_store,
+            SshKeyStore::new(
+                temp.path().join("id_ed25519"),
+                temp.path().join("id_ed25519.pub"),
+            ),
+            Arc::new(Logger::new(32)),
+        );
+
+        let settings = bridge.load_settings().unwrap();
+
+        assert_eq!(settings.repo_namespace, "alice-team");
+        assert_eq!(settings.repo_name, "alice-bridge");
     }
 
     #[tokio::test]
@@ -724,7 +772,7 @@ mod tests {
         let account =
             AccountManager::with_store(AccountStore::new(temp.path().join("account.bin")));
         account
-            .complete_token_login("token", Some("cnb.new-user".to_string()))
+            .complete_token_login("token", Some("cnb.new-user".to_string()), None)
             .unwrap();
         account.set_needs_organization(true);
         let mut bridge = Bridge::new(

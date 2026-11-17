@@ -29,6 +29,19 @@ pub enum ApiError {
     InvalidResponse(String),
 }
 
+impl ApiError {
+    /// Returns whether the remote endpoint definitively rejected the credential.
+    pub fn is_auth_rejection(&self) -> bool {
+        matches!(
+            self,
+            Self::Remote {
+                status: StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN,
+                ..
+            }
+        )
+    }
+}
+
 impl From<reqwest::Error> for ApiError {
     fn from(error: reqwest::Error) -> Self {
         Self::Http {
@@ -525,6 +538,30 @@ mod tests {
             parse_remote_error(r#"{"errcode":10024,"errmsg":"resource mismatch"}"#);
         assert_eq!(code, Some(10024));
         assert_eq!(message, "resource mismatch");
+    }
+
+    #[test]
+    fn classifies_only_401_and_403_as_auth_rejections() {
+        for status in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN] {
+            assert!(ApiError::Remote {
+                status,
+                code: None,
+                message: "denied".to_string(),
+            }
+            .is_auth_rejection());
+        }
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert!(!ApiError::Remote {
+                status,
+                code: None,
+                message: "retry".to_string(),
+            }
+            .is_auth_rejection());
+        }
     }
 
     #[tokio::test]

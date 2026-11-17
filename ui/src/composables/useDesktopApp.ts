@@ -15,10 +15,12 @@ import {
   getSnapshot,
   listHttpTraces,
   listNamespaces,
+  loginWithAccount as loginWithAccountApi,
   logout as logoutApi,
   openExternal,
   openHttpTrace,
   openLogsFolder as openLogsFolderApi,
+  removeAccount as removeAccountApi,
   saveSettings,
   startBridge as startBridgeApi,
   startLogin,
@@ -68,6 +70,7 @@ export function useDesktopApp() {
   const usageLoading = ref(false);
   const usageError = ref<string | null>(null);
   const creatingOrganization = ref(false);
+  const accountLoginUsername = ref<string | null>(null);
   const settingsDraft = reactive<Settings>({
     repoNamespace: "",
     repoName: "cnb-ai-bridge",
@@ -95,6 +98,10 @@ export function useDesktopApp() {
     () => snapshot.value?.account.state ?? "signedOut",
   );
   const accountConnected = computed(() => accountState.value === "connected");
+  const accounts = computed(() => snapshot.value?.accounts ?? []);
+  const activeAccount = computed(
+    () => accounts.value.find((account) => account.active) ?? null,
+  );
   const organizationRequired = computed(
     () =>
       accountConnected.value &&
@@ -314,6 +321,22 @@ export function useDesktopApp() {
 
   async function login() {
     await run(() => startLogin());
+  }
+
+  async function loginSavedAccount(username: string) {
+    if (busy.value) return;
+    accountLoginUsername.value = username;
+    try {
+      await run(() => loginWithAccountApi(username));
+    } finally {
+      accountLoginUsername.value = null;
+    }
+  }
+
+  async function removeSavedAccount(username: string) {
+    if (busy.value) return;
+    if (!window.confirm(`确认从本机移除账号 ${username}？`)) return;
+    await run(() => removeAccountApi(username), "账号已移除");
   }
 
   async function logout() {
@@ -575,6 +598,9 @@ export function useDesktopApp() {
     repoCreationNeeded,
     accountState,
     accountConnected,
+    accounts,
+    activeAccount,
+    accountLoginUsername,
     organizationRequired,
     organizationReady,
     settingsDirty,
@@ -590,6 +616,8 @@ export function useDesktopApp() {
     mainActionLabel,
     pipelineSteps,
     login,
+    loginSavedAccount,
+    removeSavedAccount,
     logout,
     cancelLogin,
     startBridge,

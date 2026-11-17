@@ -20,6 +20,7 @@ import {
   formatInputModalities,
 } from "../format";
 import type { DesktopApp } from "../composables/useDesktopApp";
+import AccountMenu from "./AccountMenu.vue";
 
 defineProps<{ app: DesktopApp }>();
 </script>
@@ -87,42 +88,56 @@ defineProps<{ app: DesktopApp }>();
         >
           <div class="account-head">
             <div class="account-main">
-              <span class="account-avatar" :class="{ scan: !app.accountConnected }">
-                <CircleUserRound v-if="app.accountConnected" :size="23" aria-hidden="true" />
-                <ScanQrCode v-else :size="24" aria-hidden="true" />
+              <span v-if="app.accountConnected" class="account-avatar">
+                <CircleUserRound :size="23" aria-hidden="true" />
               </span>
-              <div>
+              <div v-if="app.accountConnected">
                 <span class="card-label">CNB 账号</span>
-                <strong>{{ app.snapshot?.account.username || "尚未绑定" }}</strong>
+                <strong>{{ app.snapshot?.account.username }}</strong>
+              </div>
+              <AccountMenu
+                v-else-if="app.accounts.length"
+                :accounts="app.accounts"
+                :busy-username="app.accountLoginUsername"
+                :disabled="app.busy || app.accountState === 'signingIn'"
+                @login="app.loginSavedAccount"
+                @remove="app.removeSavedAccount"
+                @scan="app.login"
+              />
+              <div v-else class="empty-account-title">
+                <span class="account-picker-icon" aria-hidden="true">
+                  <CircleUserRound :size="20" />
+                </span>
+                <div>
+                  <span class="card-label">CNB 账号</span>
+                  <strong>登录 CNB</strong>
+                </div>
               </div>
             </div>
             <span
+              v-if="app.accountConnected"
               class="badge"
               :class="
-                app.accountConnected
-                  ? 'live'
-                  : app.accountState === 'signingIn'
-                    ? 'busy'
-                    : app.accountState === 'failed'
-                      ? 'danger'
-                      : 'muted'
+                app.organizationRequired
+                  ? 'busy'
+                  : 'live'
               "
             >
               {{
-                app.accountConnected
-                  ? app.organizationRequired
-                    ? app.creatingOrganization
-                      ? "创建组织中"
-                      : "组织未就绪"
-                    : "已连接"
-                  : app.accountState === "signingIn"
-                    ? "等待扫码"
-                    : "未登录"
+                app.organizationRequired
+                  ? app.creatingOrganization
+                    ? "创建组织中"
+                    : "组织未就绪"
+                  : "已连接"
               }}
             </span>
           </div>
           <p v-if="!app.accountConnected" class="account-intro">
-            扫码完成 CNB 授权后，即可解锁模型、本机接入地址和桥接配置。
+            {{
+              app.accounts.length
+                ? "账号凭据只保存在本机。选择账号后会验证登录状态。"
+                : "首次使用请扫码完成 CNB 授权，之后可以从已保存账号快速登录。"
+            }}
           </p>
           <p
             v-else-if="app.organizationRequired"
@@ -148,9 +163,14 @@ defineProps<{ app: DesktopApp }>();
           <div class="account-actions">
             <template v-if="!app.accountConnected">
               <button
+                v-if="!app.accounts.length"
                 type="button"
                 class="primary"
-                :disabled="app.busy || app.accountState === 'signingIn'"
+                :disabled="
+                  app.busy ||
+                  app.accountState === 'signingIn' ||
+                  Boolean(app.activeAccount)
+                "
                 @click="app.login"
               >
                 <ScanQrCode
@@ -168,6 +188,16 @@ defineProps<{ app: DesktopApp }>();
                 @click="app.cancelLogin"
               >
                 取消扫码
+              </button>
+              <button
+                v-if="app.activeAccount"
+                type="button"
+                class="danger compact"
+                :disabled="app.busy"
+                @click="app.logout"
+              >
+                <LogOut :size="15" aria-hidden="true" />
+                退出登录
               </button>
             </template>
             <button

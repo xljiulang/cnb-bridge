@@ -12,6 +12,7 @@ const account = {
 };
 const snapshot = {
   account,
+  accounts: [],
   bridge: {
     state: "idle",
     account,
@@ -44,6 +45,36 @@ const snapshot = {
       supportsTools: true,
       supportsStreaming: true,
       supportsReasoningSummaries: true,
+    },
+  ],
+};
+const signedOutSnapshot = {
+  ...snapshot,
+  account: {
+    ...account,
+    state: "signedOut",
+    username: null,
+  },
+  bridge: {
+    ...snapshot.bridge,
+    state: "signedOut",
+    account: {
+      ...account,
+      state: "signedOut",
+      username: null,
+    },
+    username: null,
+  },
+  accounts: [
+    {
+      username: "alice",
+      lastLoginAt: 200,
+      active: false,
+    },
+    {
+      username: "bob",
+      lastLoginAt: 100,
+      active: false,
     },
   ],
 };
@@ -115,6 +146,95 @@ function mockSettingsIpc(namespaces: { name: string; path: string }[]) {
 }
 
 describe("App shell", () => {
+  it("shows a direct scan action when no account is saved", async () => {
+    const emptySnapshot = { ...signedOutSnapshot, accounts: [] };
+    mockWindows("main");
+    mockIPC(
+      (command) => {
+        switch (command) {
+          case "get_snapshot":
+            return emptySnapshot;
+          case "get_logs":
+          case "list_http_traces":
+          case "list_namespaces":
+            return [];
+          default:
+            return null;
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+
+    expect(wrapper.find(".empty-account-title").text()).toContain("登录 CNB");
+    expect(wrapper.find(".account-picker-trigger").exists()).toBe(false);
+    expect(wrapper.find(".account-actions .primary").text()).toContain(
+      "扫码绑定 CNB",
+    );
+    wrapper.unmount();
+  });
+
+  it("logs in with a selected saved account and confirms removal", async () => {
+    const calls: { command: string; args: unknown }[] = [];
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    mockWindows("main");
+    mockIPC(
+      (command, args) => {
+        calls.push({ command, args });
+        switch (command) {
+          case "get_snapshot":
+            return signedOutSnapshot;
+          case "get_logs":
+          case "list_http_traces":
+          case "list_namespaces":
+            return [];
+          default:
+            return null;
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+
+    expect(wrapper.find(".account-main > .account-avatar").exists()).toBe(false);
+    await wrapper.find(".account-picker-trigger").trigger("click");
+    const accountRows = [
+      ...document.body.querySelectorAll<HTMLElement>(".account-menu-row"),
+    ];
+    expect(accountRows).toHaveLength(2);
+    expect(accountRows[0].textContent).toContain("alice");
+
+    (accountRows[0].querySelector(".account-choice") as HTMLElement).click();
+    await flushPromises();
+    expect(
+      calls.find((call) => call.command === "login_with_account")?.args,
+    ).toEqual({ username: "alice" });
+
+    await wrapper.findAll("nav button")[1].trigger("click");
+    await flushPromises();
+    expect(
+      wrapper.find('input[spellcheck="false"]').attributes("disabled"),
+    ).toBeDefined();
+    expect(wrapper.find(".select-trigger").attributes("disabled")).toBeDefined();
+
+    await wrapper.findAll("nav button")[0].trigger("click");
+    await flushPromises();
+    await wrapper.find(".account-picker-trigger").trigger("click");
+    const removeButtons = [
+      ...document.body.querySelectorAll<HTMLElement>(".remove-saved-account"),
+    ];
+    removeButtons[1].click();
+    await flushPromises();
+    expect(window.confirm).toHaveBeenCalledOnce();
+    expect(
+      calls.find((call) => call.command === "remove_account")?.args,
+    ).toEqual({ username: "bob" });
+
+    wrapper.unmount();
+  });
+
   it("switches between all views through the sidebar", async () => {
     mockSnapshotIpc();
     const wrapper = mount(App);

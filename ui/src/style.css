@@ -513,28 +513,22 @@ small {
 }
 
 .account-card-signed-out {
-  display: grid;
-  grid-column: 1 / -1;
-  grid-template-areas:
-    "head head"
-    "intro actions";
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-rows: auto auto;
-  column-gap: 28px;
-  align-items: center;
+  display: flex;
+  grid-column: auto;
+  align-items: stretch;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .account-card-signed-out .account-head {
-  grid-area: head;
+  width: 100%;
 }
 
 .account-card-signed-out .account-intro {
-  grid-area: intro;
-  margin: 6px 0 0 53px;
+  margin: 0;
 }
 
 .account-card-signed-out .account-actions {
-  grid-area: actions;
   justify-content: flex-start;
   margin: 0;
   padding: 0;
@@ -577,6 +571,7 @@ small {
 
 .account-main {
   display: flex;
+  width: 100%;
   min-width: 0;
   align-items: center;
   gap: 11px;
@@ -620,6 +615,255 @@ small {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.6;
+}
+
+.account-menu-entry {
+  width: 100%;
+  min-width: 0;
+}
+
+.account-picker-trigger {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 58px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--panel-raised);
+  color: var(--text);
+  text-align: left;
+}
+
+.account-picker-trigger:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 5%, var(--panel-raised));
+  color: var(--text);
+}
+
+.account-picker-trigger[aria-expanded="true"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--panel-raised));
+}
+
+.account-picker-icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  place-items: center;
+  border: 1px solid rgba(244, 184, 96, 0.22);
+  border-radius: 9px;
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.account-picker-copy {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
+.account-picker-copy strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-picker-chevron {
+  flex: 0 0 auto;
+  color: var(--muted);
+  transition: transform 160ms ease;
+}
+
+.account-picker-chevron.open {
+  transform: rotate(180deg);
+}
+
+.account-menu {
+  position: fixed;
+  z-index: 90;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  box-shadow:
+    0 24px 64px rgba(0, 0, 0, 0.46),
+    0 1px 0 rgba(255, 255, 255, 0.04) inset;
+  backdrop-filter: blur(18px);
+}
+
+.account-menu-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 5px 8px 7px;
+}
+
+.account-menu-head strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.account-menu-head > span {
+  display: grid;
+  min-width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--panel-raised);
+  color: var(--muted-strong);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.account-menu-list {
+  display: grid;
+  max-height: min(280px, calc(100vh - 230px));
+  overflow-y: auto;
+}
+
+.account-menu-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border-radius: 11px;
+}
+
+.account-menu-row:hover,
+.account-menu-row:focus-within {
+  background: var(--panel-raised);
+}
+
+.account-choice {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 11px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  text-align: left;
+}
+
+.account-choice:hover:not(:disabled) {
+  background: transparent;
+}
+
+.account-choice:focus-visible {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  outline: none;
+}
+
+.account-choice-avatar {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--panel-raised);
+  color: var(--muted-strong);
+}
+
+.account-choice-copy {
+  display: block;
+  justify-items: start;
+  min-width: 0;
+  text-align: left;
+}
+
+.account-choice-copy strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 630;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remove-saved-account {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  opacity: 0.55;
+}
+
+.account-menu-row:hover .remove-saved-account,
+.remove-saved-account:focus-visible {
+  opacity: 1;
+}
+
+.remove-saved-account:hover:not(:disabled) {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.remove-saved-account:focus-visible {
+  background: var(--danger-soft);
+  box-shadow: inset 0 0 0 1px var(--danger);
+  color: var(--danger);
+  opacity: 1;
+  outline: none;
+}
+
+.account-menu-footer {
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.add-account-action {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--accent-text);
+  font-size: 12px;
+  font-weight: 620;
+  text-align: left;
+}
+
+.add-account-action:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.empty-account-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+}
+
+.empty-account-title > div {
+  min-width: 0;
 }
 
 .organization-intro {

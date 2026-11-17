@@ -1,11 +1,11 @@
-use cnb_bridge::account::AccountStatus;
+use cnb_bridge::account::{AccountBridgeSettings, AccountState, AccountStatus};
 use cnb_bridge::api::{ApiError, CnbApi, CnbUsageSummary, Namespace};
 use cnb_bridge::bridge::BridgeError;
 use cnb_bridge::http_trace::{HttpTraceStore, HttpTraceSummary};
 use cnb_bridge::logging::LogEntry;
 use cnb_bridge::settings::Settings;
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::auth_webview;
 use crate::state::{self, AppSnapshot, DesktopState};
@@ -56,6 +56,17 @@ pub async fn save_settings(
         }
         return Err(CommandError::new("settings_save_failed", message));
     }
+    if state.account.status().state == AccountState::Connected {
+        state
+            .account
+            .update_active_bridge_settings(AccountBridgeSettings {
+                repo_namespace: settings.repo_namespace.clone(),
+                repo_name: settings.repo_name.clone(),
+            })
+            .map_err(|error| {
+                CommandError::new("account_settings_save_failed", error.to_string())
+            })?;
+    }
     let autostart_warning = state::apply_autostart(&app, settings.launch_at_login).err();
     let mut snapshot = state.snapshot().await?;
     if let Some(warning) = autostart_warning {
@@ -66,6 +77,14 @@ pub async fn save_settings(
 
 #[tauri::command]
 pub async fn start_login(state: State<'_, DesktopState>) -> Result<AccountStatus, CommandError> {
+    if state.account.active_credentials().is_some()
+        || state.account.status().state == AccountState::SigningIn
+    {
+        return Err(CommandError::new(
+            "logout_required",
+            "请先退出当前账号再扫码登录",
+        ));
+    }
     auth_webview::launch(state.app.clone())
         .map_err(|error| CommandError::new("login_start_failed", error))
 }
@@ -85,6 +104,113 @@ pub async fn logout(state: State<'_, DesktopState>) -> Result<AccountStatus, Com
         .map_err(|error| CommandError::new("logout_failed", error.to_string()))?;
     state.bridge.account_signed_out().await;
     Ok(status)
+}
+
+#[tauri::command]
+pub async fn login_with_account(
+    state: State<'_, DesktopState>,
+    username: String,
+) -> Result<AccountStatus, CommandError> {
+    if state.account.active_credentials().is_some()
+        || state.account.status().state == AccountState::SigningIn
+    {
+        return Err(CommandError::new(
+            "logout_required",
+            "请先退出当前账号再选择其他账号",
+        ));
+    }
+    let credentials = state
+        .account
+        .credentials_for(&username)
+        .map_err(|error| CommandError::new("account_not_found", error.to_string()))?;
+    state
+        .account
+        .begin_account_login(&username)
+        .map_err(|error| CommandError::new("account_login_failed", error.to_string()))?;
+
+    let api = CnbApi::new();
+    let user = match api.current_user(&credentials.access_token).await {
+        Ok(user) => user,
+        Err(error) => {
+            let message = apply_account_validation_error(&state.account, &username, error);
+            return Err(CommandError::new("account_login_failed", message));
+        }
+    };
+    if !user.username.eq_ignore_ascii_case(&username) {
+        remove_invalid_account(&state.account, &username);
+        return Err(CommandError::new(
+            "account_identity_mismatch",
+            "保存的凭据与账号不匹配，已移除该账号",
+        ));
+    }
+    let namespaces = match api.list_owned_namespaces(&credentials.access_token).await {
+        Ok(namespaces) => namespaces,
+        Err(error) => {
+            let message = apply_account_validation_error(&state.account, &username, error);
+            return Err(CommandError::new("account_login_failed", message));
+        }
+    };
+
+    state
+        .account
+        .activate_account(&username)
+        .map_err(|error| CommandError::new("account_login_failed", error.to_string()))?;
+    state.account.set_needs_organization(namespaces.is_empty());
+    state.bridge.account_connected().await;
+    if namespaces.is_empty() {
+        if let Err(error) = state.bridge.ensure_account_organization().await {
+            state
+                .logger
+                .log("warn", format!("账号 {username} 根组织准备失败: {error}"));
+        }
+    }
+    let _ = state.app.emit(
+        "cnb-bridge://snapshot",
+        state
+            .login_generation
+            .load(std::sync::atomic::Ordering::SeqCst),
+    );
+    Ok(state.account.status())
+}
+
+#[tauri::command]
+pub async fn remove_account(
+    state: State<'_, DesktopState>,
+    username: String,
+) -> Result<AccountStatus, CommandError> {
+    if state.account.active_credentials().is_some()
+        || state.account.status().state == AccountState::SigningIn
+    {
+        return Err(CommandError::new(
+            "logout_required",
+            "请先退出当前账号再移除账号",
+        ));
+    }
+    state
+        .account
+        .remove_account(&username)
+        .map_err(|error| CommandError::new("account_remove_failed", error.to_string()))?;
+    Ok(state.account.status())
+}
+
+fn apply_account_validation_error(
+    account: &cnb_bridge::account::AccountManager,
+    username: &str,
+    error: ApiError,
+) -> String {
+    if error.is_auth_rejection() {
+        remove_invalid_account(account, username);
+        "账号凭据已失效，已从本机移除".to_string()
+    } else {
+        let message = format!("账号登录失败: {error}");
+        account.fail_account_login(username, message.clone());
+        message
+    }
+}
+
+fn remove_invalid_account(account: &cnb_bridge::account::AccountManager, username: &str) {
+    let _ = account.remove_account(username);
+    account.fail_token_login("账号凭据已失效，已从本机移除");
 }
 
 #[tauri::command]
@@ -252,9 +378,23 @@ pub fn open_http_trace(id: String) -> Result<(), CommandError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_allowed_external_url, map_organization_create_error};
+    use super::{
+        apply_account_validation_error, is_allowed_external_url, map_organization_create_error,
+    };
+    use cnb_bridge::account::{AccountManager, AccountState, AccountStore};
     use cnb_bridge::api::{ApiError, StatusCode};
     use cnb_bridge::bridge::BridgeError;
+
+    fn signed_out_manager_with_alice() -> (tempfile::TempDir, std::sync::Arc<AccountManager>) {
+        let temp = tempfile::tempdir().unwrap();
+        let manager =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account-auth.bin")));
+        manager
+            .complete_token_login("alice-token", Some("alice".to_string()), None)
+            .unwrap();
+        manager.logout().unwrap();
+        (temp, manager)
+    }
 
     #[test]
     fn allows_any_well_formed_http_or_https_url() {
@@ -299,5 +439,45 @@ mod tests {
         }));
 
         assert_eq!(error.code, "namespace_not_created");
+    }
+
+    #[test]
+    fn auth_rejection_removes_saved_account() {
+        let (_temp, manager) = signed_out_manager_with_alice();
+
+        let message = apply_account_validation_error(
+            &manager,
+            "alice",
+            ApiError::Remote {
+                status: StatusCode::UNAUTHORIZED,
+                code: None,
+                message: "expired".to_string(),
+            },
+        );
+
+        assert!(manager.accounts().is_empty());
+        assert_eq!(manager.status().state, AccountState::Failed);
+        assert_eq!(manager.status().username, None);
+        assert!(message.contains("失效"));
+    }
+
+    #[test]
+    fn transient_validation_failure_keeps_saved_account() {
+        let (_temp, manager) = signed_out_manager_with_alice();
+
+        let message = apply_account_validation_error(
+            &manager,
+            "alice",
+            ApiError::Remote {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: None,
+                message: "offline".to_string(),
+            },
+        );
+
+        assert_eq!(manager.accounts().len(), 1);
+        assert_eq!(manager.status().state, AccountState::Failed);
+        assert_eq!(manager.status().username.as_deref(), Some("alice"));
+        assert!(message.contains("offline"));
     }
 }

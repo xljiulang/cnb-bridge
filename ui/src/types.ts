@@ -23,6 +23,12 @@ export interface AccountStatus {
   needsOrganization: boolean;
 }
 
+export interface SavedAccount {
+  username: string;
+  lastLoginAt: number;
+  active: boolean;
+}
+
 export interface BridgeSnapshot {
   state: BridgeState;
   account: AccountStatus;
@@ -72,6 +78,7 @@ export interface CnbUsageSummary {
 
 export interface AppSnapshot {
   account: AccountStatus;
+  accounts: SavedAccount[];
   bridge: BridgeSnapshot;
   settings: Settings;
   version: string;

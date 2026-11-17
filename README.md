@@ -118,10 +118,10 @@ $env:PATH = "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\C
 
 ## 运行流程
 
-1. 首次启动点击“扫码绑定 CNB”，客户端 WebView 打开 `https://cnb.cool/?s_url=%2Fprofile%2Ftoken`。
+1. 登录页可选择已保存的 CNB 账号，或点击“扫码绑定 CNB”打开 `https://cnb.cool/?s_url=%2Fprofile%2Ftoken`。
 2. 微信扫码成功后，客户端上传专用 Ed25519 公钥、创建包含组织管理权限的永久 PAT，并检查 Owner 组织。
 3. 若账号没有 Owner 组织，客户端使用账号名自动创建根组织，无需再手动启动一次请求来触发建仓。
-4. PAT 通过 DPAPI 加密保存，扫码会话随后清理，后续启动无需再次扫码。
+4. 多账号凭据和账号级仓库设置通过 DPAPI 加密保存；同一 username 再次扫码会更新最近凭据，退出登录只断开当前账号，不删除本机凭据。
 5. 客户端启动后只运行本机网关，不会立即启动 CNB 工作空间。
 6. 把任意 OpenAI 兼容客户端的 base URL 指向 `http://127.0.0.1:11233/v1`；首个请求会按需创建或连接工作空间。
 7. 最后一次请求结束 5 分钟后关闭 SSH 隧道，之后由 CNB 默认空闲规则回收工作空间。

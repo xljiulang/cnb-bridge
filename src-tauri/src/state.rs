@@ -1,6 +1,6 @@
 use crate::commands::CommandError;
 use crate::tray;
-use cnb_bridge::account::{AccountManager, AccountStatus};
+use cnb_bridge::account::{AccountManager, AccountStatus, SavedAccount};
 use cnb_bridge::bridge::{Bridge, BridgeSnapshot};
 use cnb_bridge::lifecycle::AppLifecycleMutex;
 use cnb_bridge::logging::Logger;
@@ -19,6 +19,7 @@ use tauri_plugin_autostart::ManagerExt as AutostartExt;
 #[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {
     pub account: AccountStatus,
+    pub accounts: Vec<SavedAccount>,
     pub bridge: BridgeSnapshot,
     pub settings: Settings,
     pub version: String,
@@ -44,7 +45,12 @@ pub struct DesktopState {
 impl DesktopState {
     /// Current persisted settings.
     pub fn settings(&self) -> Settings {
-        self.settings_store.load().unwrap_or_default()
+        let mut settings = self.settings_store.load().unwrap_or_default();
+        if let Some(account_settings) = self.account.active_bridge_settings() {
+            settings.repo_namespace = account_settings.repo_namespace;
+            settings.repo_name = account_settings.repo_name;
+        }
+        settings
     }
 
     /// Builds the snapshot shown by the renderer.
@@ -52,6 +58,7 @@ impl DesktopState {
         let settings = self.settings_store.load().unwrap_or_default();
         Ok(AppSnapshot {
             account: self.account.status(),
+            accounts: self.account.accounts(),
             bridge: self.bridge.snapshot().await,
             settings,
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -114,20 +121,91 @@ pub fn initialize(
 
 fn ensure_organization_on_startup(bridge: Arc<Bridge>, app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        if bridge.snapshot().await.account.state != cnb_bridge::account::AccountState::Connected {
+        let status = bridge.snapshot().await.account;
+        if status.state != cnb_bridge::account::AccountState::Connected {
             return;
+        }
+        let Some(username) = status.username else {
+            return;
+        };
+        let Some(state) = app.try_state::<DesktopState>() else {
+            return;
+        };
+        let token = match state.account.access_token().await {
+            Ok(token) => token,
+            Err(_) => return,
+        };
+        let api = cnb_bridge::api::CnbApi::new();
+        match api.current_user(&token).await {
+            Ok(user) if user.username.eq_ignore_ascii_case(&username) => {}
+            Ok(_) => {
+                invalidate_restored_account(&app, &username, "保存的账号与凭据不匹配");
+                return;
+            }
+            Err(error) if error.is_auth_rejection() => {
+                invalidate_restored_account(&app, &username, &format!("登录凭据已失效: {error}"));
+                return;
+            }
+            Err(error) => {
+                state
+                    .account
+                    .fail_account_login(&username, format!("恢复登录失败: {error}"));
+                state
+                    .logger
+                    .log("warn", format!("启动时校验账号 {username} 失败: {error}"));
+                bridge.account_signed_out().await;
+                let _ = app.emit("cnb-bridge://snapshot", ());
+                return;
+            }
+        }
+        match api.list_owned_namespaces(&token).await {
+            Ok(_) => {}
+            Err(error) if error.is_auth_rejection() => {
+                invalidate_restored_account(&app, &username, &format!("登录凭据已失效: {error}"));
+                return;
+            }
+            Err(error) => {
+                state
+                    .account
+                    .fail_account_login(&username, format!("恢复登录失败: {error}"));
+                state.logger.log(
+                    "warn",
+                    format!("启动时读取账号 {username} 组织失败: {error}"),
+                );
+                bridge.account_signed_out().await;
+                let _ = app.emit("cnb-bridge://snapshot", ());
+                return;
+            }
         }
         match bridge.ensure_account_organization().await {
             Ok(()) => {}
             Err(error) => {
-                if let Some(state) = app.try_state::<DesktopState>() {
-                    state
-                        .logger
-                        .log("warn", format!("启动时检查 CNB Owner 组织失败: {error}"));
-                }
+                state
+                    .logger
+                    .log("warn", format!("启动时检查 CNB Owner 组织失败: {error}"));
             }
         }
         let _ = app.emit("cnb-bridge://snapshot", ());
+    });
+}
+
+fn invalidate_restored_account(app: &AppHandle, username: &str, message: &str) {
+    let Some(state) = app.try_state::<DesktopState>() else {
+        return;
+    };
+    let _ = state.account.logout();
+    let _ = state.account.remove_account(username);
+    state.account.fail_token_login(message);
+    state
+        .logger
+        .log("warn", format!("已删除失效账号 {username}: {message}"));
+    tauri::async_runtime::spawn({
+        let bridge = Arc::clone(&state.bridge);
+        let app = app.clone();
+        async move {
+            bridge.account_signed_out().await;
+            let _ = app.emit("cnb-bridge://snapshot", ());
+        }
     });
 }
 

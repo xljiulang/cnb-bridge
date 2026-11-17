@@ -46,6 +46,9 @@ defineProps<{ app: DesktopApp }>();
             创建位置
           </h2>
           <p>桥接配置会保存在该 CNB 仓库中。</p>
+          <small v-if="!app.accountConnected">
+            登录 CNB 账号后才能修改账号级仓库设置。
+          </small>
         </div>
         <div class="settings-fields">
           <div class="settings-field-grid">
@@ -54,6 +57,7 @@ defineProps<{ app: DesktopApp }>();
               <SelectMenu
                 v-model="app.settingsDraft.repoNamespace"
                 :options="app.namespaceOptions"
+                :disabled="!app.accountConnected"
                 aria-label="仓库命名空间"
               />
               <small>自动选择：优先复用同名仓库，否则用唯一命名空间创建。</small>
@@ -62,6 +66,7 @@ defineProps<{ app: DesktopApp }>();
               <span>仓库名</span>
               <input
                 v-model="app.settingsDraft.repoName"
+                :disabled="!app.accountConnected"
                 spellcheck="false"
               />
               <small>桥接隧道与配置使用的仓库名称。</small>

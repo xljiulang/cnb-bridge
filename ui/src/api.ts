@@ -16,9 +16,15 @@ export const saveSettings = (settings: Settings) =>
 
 export const startLogin = () => invoke<AccountStatus>("start_login");
 
+export const loginWithAccount = (username: string) =>
+  invoke<AccountStatus>("login_with_account", { username });
+
 export const cancelLogin = () => invoke<AccountStatus>("cancel_login");
 
 export const logout = () => invoke<AccountStatus>("logout");
+
+export const removeAccount = (username: string) =>
+  invoke<AccountStatus>("remove_account", { username });
 
 export const startBridge = () => invoke<AppSnapshot>("start_bridge");
 
