@@ -103,16 +103,61 @@ export function formatInputModalities(modalities: string[]): string {
   return modalities.map((modality) => labels[modality] ?? modality).join(" / ");
 }
 
-export function formatCreditsUsage(usedMilli: number, totalMilli: number): string {
+export type CreditsUsageTone = "normal" | "warning" | "danger" | "unavailable";
+
+function creditsUsagePercentValue(
+  usedMilli: number,
+  totalMilli: number,
+): number | null {
+  if (!Number.isFinite(usedMilli) || !Number.isFinite(totalMilli) || totalMilli <= 0) {
+    return null;
+  }
+  const used = Math.max(0, usedMilli) / 1000;
+  const total = totalMilli / 1000;
+  return (used / total) * 100;
+}
+
+export function formatCreditsAmount(
+  usedMilli: number,
+  totalMilli: number,
+): string {
   if (!Number.isFinite(usedMilli) || !Number.isFinite(totalMilli) || totalMilli <= 0) {
     return "-- / --";
   }
   const used = Math.max(0, usedMilli) / 1000;
   const total = totalMilli / 1000;
-  const percent = ((used / total) * 100)
+  return `${used} / ${total} Credits`;
+}
+
+export function formatCreditsPercent(
+  usedMilli: number,
+  totalMilli: number,
+): string {
+  const percent = creditsUsagePercentValue(usedMilli, totalMilli);
+  if (percent === null) return "--";
+  return `${percent
     .toFixed(1)
-    .replace(/\.0$/, "");
-  return `${used} / ${total} Credits (${percent}%)`;
+    .replace(/\.0$/, "")}%`;
+}
+
+export function creditsUsageProgress(
+  usedMilli: number,
+  totalMilli: number,
+): number | null {
+  const percent = creditsUsagePercentValue(usedMilli, totalMilli);
+  if (percent === null) return null;
+  return Math.round(Math.min(100, Math.max(0, percent)) * 10) / 10;
+}
+
+export function creditsUsageTone(
+  usedMilli: number,
+  totalMilli: number,
+): CreditsUsageTone {
+  const percent = creditsUsagePercentValue(usedMilli, totalMilli);
+  if (percent === null) return "unavailable";
+  if (percent >= 100) return "danger";
+  if (percent >= 80) return "warning";
+  return "normal";
 }
 
 export function validatePort(value: number): string | null {

@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   bridgeLabel,
+  creditsUsageProgress,
+  creditsUsageTone,
+  formatCreditsAmount,
+  formatCreditsPercent,
   formatError,
   formatContextWindow,
-  formatCreditsUsage,
   formatInputModalities,
   isBridgeTransitioning,
   statusIconKind,
@@ -96,9 +99,32 @@ describe("format helpers", () => {
     expect(settingsEqual({ ...savedSettings, launchAtLogin: true }, savedSettings)).toBe(false);
   });
 
-  it("formats total AI Credit usage and ignores surplus percentage", () => {
-    expect(formatCreditsUsage(22_540, 1_166_000)).toBe("22.54 / 1166 Credits (1.9%)");
-    expect(formatCreditsUsage(1_500, 1_000)).toBe("1.5 / 1 Credits (150%)");
-    expect(formatCreditsUsage(0, 0)).toBe("-- / --");
+  it("formats AI Credit amount and percentage separately", () => {
+    expect(formatCreditsAmount(22_540, 1_166_000)).toBe(
+      "22.54 / 1166 Credits",
+    );
+    expect(formatCreditsPercent(22_540, 1_166_000)).toBe("1.9%");
+    expect(formatCreditsAmount(1_500, 1_000)).toBe("1.5 / 1 Credits");
+    expect(formatCreditsPercent(1_500, 1_000)).toBe("150%");
+    expect(formatCreditsAmount(0, 0)).toBe("-- / --");
+    expect(formatCreditsPercent(0, 0)).toBe("--");
+  });
+
+  it("clamps progress while preserving the displayed surplus percentage", () => {
+    expect(creditsUsageProgress(0, 1_000)).toBe(0);
+    expect(creditsUsageProgress(225_400, 1_166_000)).toBe(19.3);
+    expect(creditsUsageProgress(800, 1_000)).toBe(80);
+    expect(creditsUsageProgress(1_000, 1_000)).toBe(100);
+    expect(creditsUsageProgress(1_500, 1_000)).toBe(100);
+    expect(creditsUsageProgress(0, 0)).toBeNull();
+    expect(creditsUsageProgress(Number.NaN, 1_000)).toBeNull();
+  });
+
+  it("assigns normal, warning, danger and unavailable usage tones", () => {
+    expect(creditsUsageTone(18.4, 100)).toBe("normal");
+    expect(creditsUsageTone(80, 100)).toBe("warning");
+    expect(creditsUsageTone(100, 100)).toBe("danger");
+    expect(creditsUsageTone(150, 100)).toBe("danger");
+    expect(creditsUsageTone(0, 0)).toBe("unavailable");
   });
 });

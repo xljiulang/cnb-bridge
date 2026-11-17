@@ -28,7 +28,10 @@ import {
 } from "../api";
 import {
   bridgeLabel,
-  formatCreditsUsage,
+  creditsUsageProgress as calculateCreditsUsageProgress,
+  creditsUsageTone as calculateCreditsUsageTone,
+  formatCreditsAmount,
+  formatCreditsPercent,
   formatError,
   isBridgeTransitioning,
   settingsEqual,
@@ -180,15 +183,44 @@ export function useDesktopApp() {
     { value: "abnormal", label: "仅异常" },
     { value: "all", label: "所有" },
   ];
-  const creditsUsageLabel = computed(() => {
+  const creditsUsageAmount = computed(() => {
     if (usage.value) {
-      return formatCreditsUsage(
+      return formatCreditsAmount(
         usage.value.creditsUsedMilli,
         usage.value.creditsTotalMilli,
       );
     }
     if (usageError.value) return "用量暂不可用";
     return usageLoading.value ? "正在获取…" : "-- / --";
+  });
+  const creditsUsagePercent = computed(() =>
+    usage.value
+      ? formatCreditsPercent(
+          usage.value.creditsUsedMilli,
+          usage.value.creditsTotalMilli,
+        )
+      : "--",
+  );
+  const creditsUsageProgress = computed(() =>
+    usage.value
+      ? calculateCreditsUsageProgress(
+          usage.value.creditsUsedMilli,
+          usage.value.creditsTotalMilli,
+        )
+      : null,
+  );
+  const creditsUsageTone = computed(() =>
+    usage.value
+      ? calculateCreditsUsageTone(
+          usage.value.creditsUsedMilli,
+          usage.value.creditsTotalMilli,
+        )
+      : "unavailable",
+  );
+  const creditsUsageAriaText = computed(() => {
+    if (usageLoading.value && !usage.value) return "AI Credits 正在获取";
+    if (!usage.value || usageError.value) return "AI Credits 用量暂不可用";
+    return `AI Credits ${creditsUsageAmount.value}，${creditsUsagePercent.value}`;
   });
   const mainActionLabel = computed(() => {
     if (bridgeTransitioning.value) return "正在启动…";
@@ -612,7 +644,11 @@ export function useDesktopApp() {
     namespaceOptions,
     logLevelOptions,
     httpLogOptions,
-    creditsUsageLabel,
+    creditsUsageAmount,
+    creditsUsagePercent,
+    creditsUsageProgress,
+    creditsUsageTone,
+    creditsUsageAriaText,
     mainActionLabel,
     pipelineSteps,
     login,

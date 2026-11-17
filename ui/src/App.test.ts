@@ -100,8 +100,8 @@ function mockSnapshotIpc() {
           return {
             namespace: "tester",
             month: "2026-11",
-            creditsUsedMilli: 0,
-            creditsTotalMilli: 1000,
+            creditsUsedMilli: 214_720,
+            creditsTotalMilli: 1_166_000,
             fetchedAt: "2026-11-17T00:00:00Z",
           };
         default:
@@ -146,6 +146,24 @@ function mockSettingsIpc(namespaces: { name: string; path: string }[]) {
 }
 
 describe("App shell", () => {
+  it("shows AI Credits amount and progress percentage separately", async () => {
+    mockSnapshotIpc();
+    const wrapper = mount(App);
+    await flushPromises();
+
+    expect(wrapper.find(".usage-amount").text()).toBe(
+      "214.72 / 1166 Credits",
+    );
+    expect(wrapper.find(".usage-amount").text()).not.toContain("18.4%");
+    expect(wrapper.find(".usage-percent").text()).toBe("18.4%");
+    const progress = wrapper.get('.usage-progress-track[role="progressbar"]');
+    expect(progress.attributes("aria-valuenow")).toBe("18.4");
+    expect(
+      (progress.get(".usage-progress-fill").element as HTMLElement).style.width,
+    ).toBe("18.4%");
+    wrapper.unmount();
+  });
+
   it("shows a direct scan action when no account is saved", async () => {
     const emptySnapshot = { ...signedOutSnapshot, accounts: [] };
     mockWindows("main");
