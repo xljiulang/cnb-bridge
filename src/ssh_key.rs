@@ -5,6 +5,9 @@ use crate::paths;
 use rand::rngs::OsRng;
 use ssh_key::{Algorithm, HashAlg, PrivateKey};
 use std::path::{Path, PathBuf};
+use xxhash_rust::xxh3::xxh3_64;
+
+const RESOURCE_NAME_PREFIX: &str = "cnb-bridge-";
 
 /// CNB Bridge never reuses a user's existing `~/.ssh` keys.
 #[derive(Debug, Clone)]
@@ -18,6 +21,24 @@ pub fn public_key_fingerprint(public_key: &str) -> Result<String, String> {
     let public_key = ssh_key::PublicKey::from_openssh(public_key.trim())
         .map_err(|error| format!("解析 SSH 公钥失败: {error}"))?;
     Ok(public_key.fingerprint(HashAlg::Sha256).to_string())
+}
+
+/// Returns the XXH3-64 hash of the canonical OpenSSH public key body.
+pub fn public_key_hash(public_key: &str) -> Result<u64, String> {
+    let public_key = ssh_key::PublicKey::from_openssh(public_key.trim())
+        .map_err(|error| format!("解析 SSH 公钥失败: {error}"))?;
+    let bytes = public_key
+        .to_bytes()
+        .map_err(|error| format!("编码 SSH 公钥失败: {error}"))?;
+    Ok(xxh3_64(&bytes))
+}
+
+/// Returns the stable CNB resource name for an OpenSSH public key.
+pub fn public_key_resource_name(public_key: &str) -> Result<String, String> {
+    Ok(format!(
+        "{RESOURCE_NAME_PREFIX}{}",
+        public_key_hash(public_key)?
+    ))
 }
 
 impl SshKeyStore {
@@ -124,6 +145,42 @@ fn computes_the_standard_sha256_public_key_fingerprint() {
         public_key_fingerprint(public_key).unwrap(),
         "SHA256:UCUiLr7Pjs9wFFJMDByLgc3NrtdU344OgUM45wZPcIQ"
     );
+}
+
+#[test]
+fn computes_the_canonical_xxh3_public_key_hash() {
+    let public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILM+rvN+ot98qgEN796jTiQfZfG1KaT0PtFDJ/XFSqti user@example.com";
+
+    assert_eq!(public_key_hash(public_key).unwrap(), 15459454312938932541);
+}
+
+#[test]
+fn builds_the_public_key_resource_name_from_its_hash() {
+    let public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILM+rvN+ot98qgEN796jTiQfZfG1KaT0PtFDJ/XFSqti user@example.com";
+
+    assert_eq!(
+        public_key_resource_name(public_key).unwrap(),
+        "cnb-bridge-15459454312938932541"
+    );
+}
+
+#[test]
+fn public_key_hash_ignores_the_comment() {
+    let without_comment =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILM+rvN+ot98qgEN796jTiQfZfG1KaT0PtFDJ/XFSqti";
+    let with_comment = format!("{without_comment} another@example.com");
+
+    assert_eq!(
+        public_key_hash(without_comment).unwrap(),
+        public_key_hash(&with_comment).unwrap()
+    );
+}
+
+#[test]
+fn public_key_hash_rejects_invalid_key_material() {
+    assert!(public_key_hash("not-a-public-key")
+        .unwrap_err()
+        .contains("解析 SSH 公钥失败"));
 }
 
 #[cfg(all(test, windows))]

@@ -523,6 +523,21 @@ impl AccountManager {
             .ok_or_else(|| AccountError::Authorization("账号不存在".to_string()))
     }
 
+    /// Finds saved credentials by the persisted PAT token ID.
+    pub fn credentials_by_token_id(&self, token_id: &str) -> Option<Credentials> {
+        let token_id = token_id.trim();
+        if token_id.is_empty() {
+            return None;
+        }
+        self.book
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .accounts
+            .iter()
+            .find(|account| account.credentials.token_id.as_deref() == Some(token_id))
+            .map(|account| account.credentials.clone())
+    }
+
     /// Returns the active account credentials.
     pub fn active_credentials(&self) -> Option<Credentials> {
         self.book
@@ -675,6 +690,30 @@ mod tests {
                 .as_deref(),
             Some("token-2")
         );
+    }
+
+    #[test]
+    fn finds_saved_credentials_by_token_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager =
+            AccountManager::with_store(AccountStore::new(dir.path().join("account-auth.bin")));
+        manager
+            .complete_token_login(
+                "saved-token",
+                Some("alice".to_string()),
+                Some("token-1".to_string()),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            manager
+                .credentials_by_token_id("token-1")
+                .unwrap()
+                .access_token,
+            "saved-token"
+        );
+        assert!(manager.credentials_by_token_id("missing").is_none());
     }
 
     #[test]

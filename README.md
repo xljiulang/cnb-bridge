@@ -83,22 +83,24 @@ agent 从云会话继承 `CNB_TOKEN`，只监听 loopback。客户端侧传入�
 - Microsoft Edge WebView2 Runtime（Tauri 界面）
 
 ```powershell
-# 前端
+# 依赖
 npm --prefix ui install
-npm --prefix ui run build
 
 # Rust 核心与 Tauri 壳
 cargo test
 
-# 独立 debug 客户端（内嵌已构建的前端资源，不依赖 Vite）
-cargo build -p cnb-bridge-desktop --features custom-protocol
+# 独立 debug 客户端（先构建最新前端，再编译 Tauri 壳）
+pwsh -File scripts/build-debug.ps1
 
 # release 客户端
+npm --prefix ui run build
 cargo build --release -p cnb-bridge-desktop --features custom-protocol
 
 # 安装包（需要 Inno Setup 6.7.3+）
 iscc installer\cnb-bridge.iss
 ```
+
+`cargo build` 不会执行 `tauri.conf.json` 中的 `beforeBuildCommand`，因此直接编译 Tauri 客户端会内嵌现有的 `ui/dist`。本地调试请使用 `scripts/build-debug.ps1`；它固定先执行前端类型检查和 Vite 构建，再执行 Rust debug 编译，避免运行到旧版界面。
 
 仓库内固定包含安装包所需的 `installer\runtime\vcruntime140.dll`、`installer\languages\ChineseSimplified.isl` 和 `installer\assets\cnb-bridge.ico`。本地与 CI 打包都不依赖系统 Inno Setup 语言目录，安装器、快捷方式和卸载信息统一使用项目图标。新安装默认创建桌面快捷方式。
 
@@ -119,9 +121,9 @@ $env:PATH = "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\C
 ## 运行流程
 
 1. 登录页可选择已保存的 CNB 账号，或点击“扫码绑定 CNB”打开 `https://cnb.cool/?s_url=%2Fprofile%2Ftoken`。
-2. 微信扫码成功后，客户端上传专用 Ed25519 公钥、创建包含组织管理权限的永久 PAT，并检查 Owner 组织。公钥和 PAT 使用本机指纹生成的固定描述 `CNB Bridge SHA256:<指纹前30位>`，应用界面不展示该内部标识。重新登录时先删除同名的本机旧 PAT，再用相同名称创建新 PAT；新 PAT 创建失败时需要重新扫码重试。
+2. 微信扫码成功后，客户端上传专用 Ed25519 公钥、创建包含组织管理权限的永久 PAT，并检查 Owner 组织。公钥名称固定为 `cnb-bridge-{XXH3-64(公钥)}`；PAT 名称固定为 `cnb-bridge-{公钥hash XOR AUTH_SCOPES hash}`。两个 hash 都使用无符号十进制表示，应用界面不展示这些内部标识。名称正确且可用的公钥和本机 PAT 会直接复用；同名公钥内容冲突或 PAT 无法在本机复用时，会删除同名资源后重建。`AUTH_SCOPES` 变化会生成新的 PAT 名称。
 3. 若账号没有 Owner 组织，客户端使用账号名自动创建根组织，无需再手动启动一次请求来触发建仓。
-4. 多账号凭据和账号级仓库设置通过 DPAPI 加密保存；同一 username 再次扫码会更新最近凭据，退出登录只断开当前账号，不删除本机凭据。同一 CNB 账号可在多台机器登录，每台机器只轮换自己的指纹 PAT，其他机器及旧版无指纹 `CNB Bridge` 令牌不会被删除。
+4. 多账号凭据和账号级仓库设置通过 DPAPI 加密保存；同一 username 再次扫码会更新最近凭据，退出登录只断开当前账号，不删除本机凭据。同一 CNB 账号可在多台机器登录，每台机器只使用自己的公钥派生名称，其他机器及旧名称的资源不会被主动删除。
 5. 客户端启动后只运行本机网关，不会立即启动 CNB 工作空间。
 6. 把任意 OpenAI 兼容客户端的 base URL 指向 `http://127.0.0.1:11233/v1`；首个请求会按需创建或连接工作空间。
 7. 最后一次请求结束 5 分钟后关闭 SSH 隧道，之后由 CNB 默认空闲规则回收工作空间。

@@ -4,25 +4,18 @@ use reqwest::{Client, Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::net;
+use crate::ssh_key::public_key_hash;
 
 /// Minimal scopes required by the bridge runtime.
 pub const AUTH_SCOPES: &str = "account-profile:r,account-engage:rw,group-manage:rw,group-resource:rw,repo-code:rw,repo-basic-info:r,repo-cnb-trigger:rw,repo-cnb-detail:rw";
 
-/// Builds the stable PAT description for one SSH public key.
-pub fn token_description_for_fingerprint(fingerprint: &str) -> Result<String, String> {
-    let suffix = fingerprint
-        .strip_prefix("SHA256:")
-        .ok_or_else(|| "SSH 公钥指纹缺少 SHA256: 前缀".to_string())?;
-    let short = suffix
-        .get(..30)
-        .ok_or_else(|| "SSH 公钥指纹长度不足".to_string())?;
-    let description = format!("CNB Bridge SHA256:{short}");
-    if description.chars().count() > 50 {
-        return Err("设备 PAT 描述超过 CNB 的 50 字符限制".to_string());
-    }
-    Ok(description)
+/// Builds the stable PAT name for one SSH public key and the current scopes.
+pub fn pat_resource_name(public_key: &str) -> Result<String, String> {
+    let hash = public_key_hash(public_key)? ^ xxh3_64(AUTH_SCOPES.as_bytes());
+    Ok(format!("cnb-bridge-{hash}"))
 }
 
 /// Cookies and CSRF token extracted from the authenticated CNB WebView.
@@ -51,6 +44,19 @@ pub struct CreatedPat {
     pub git_username: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SshKeyRecord {
+    id: String,
+    name: String,
+    public_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PatRecord {
+    token_id: String,
+    description: String,
+}
+
 /// Errors returned by CNB web-session endpoints.
 #[derive(Debug, thiserror::Error)]
 pub enum WebAuthError {
@@ -75,15 +81,6 @@ impl From<reqwest::Error> for WebAuthError {
             source: error,
         }
     }
-}
-
-/// Errors raised while replacing a stable-named personal access token.
-#[derive(Debug, thiserror::Error)]
-pub enum ReplacePatError {
-    #[error("删除同名旧 PAT 失败: {0}")]
-    Cleanup(#[source] WebAuthError),
-    #[error("创建同名新 PAT 失败: {0}")]
-    Create(#[source] WebAuthError),
 }
 
 /// Client for CNB browser-session endpoints.
@@ -138,35 +135,33 @@ impl WebAuthClient {
         name: &str,
         public_key: &str,
     ) -> Result<(), WebAuthError> {
-        let value = self
-            .request(
-                Method::GET,
-                "/user/sign-ssh-keys?page=1&page_size=100",
-                session,
-                None,
-            )
-            .await?;
-        let keys = unwrap_result(value);
-        let already_exists = keys.as_array().is_some_and(|keys| {
-            keys.iter().any(|key| {
-                key.get("public_key")
-                    .or_else(|| key.get("publicKey"))
-                    .and_then(Value::as_str)
-                    .is_some_and(|value| value.trim() == public_key.trim())
-            })
-        });
-        if already_exists {
+        let keys = self.list_ssh_keys(session).await?;
+        let name_matches = keys
+            .iter()
+            .filter(|key| key.name == name)
+            .collect::<Vec<_>>();
+        let exact_match = keys
+            .iter()
+            .any(|key| key.name == name && key.public_key.trim() == public_key.trim());
+        if name_matches.len() == 1 && exact_match {
             return Ok(());
         }
+        let conflicting_ids = keys
+            .iter()
+            .filter(|key| key.name == name || key.public_key.trim() == public_key.trim())
+            .map(|key| key.id.clone())
+            .collect::<Vec<_>>();
+        self.delete_ssh_keys(session, conflicting_ids).await?;
         let encoded = url::form_urlencoded::byte_serialize(public_key.as_bytes())
             .collect::<String>()
             .replace('+', "%20");
+        let body = json!({ "name": name, "public_key": encoded });
         match self
             .request(
                 Method::POST,
                 "/user/sign-ssh-keys",
                 session,
-                Some(json!({ "name": name, "public_key": encoded })),
+                Some(body.clone()),
             )
             .await
         {
@@ -176,8 +171,70 @@ impl WebAuthClient {
                 message,
             }) if message
                 .to_ascii_lowercase()
-                .contains("key is already in use") => {}
+                .contains("key is already in use") =>
+            {
+                let keys = self.list_ssh_keys(session).await?;
+                let existing_ids = keys
+                    .into_iter()
+                    .filter(|key| key.public_key.trim() == public_key.trim())
+                    .map(|key| key.id)
+                    .collect::<Vec<_>>();
+                if !existing_ids.is_empty() {
+                    self.delete_ssh_keys(session, existing_ids).await?;
+                    self.request(Method::POST, "/user/sign-ssh-keys", session, Some(body))
+                        .await?;
+                }
+            }
             Err(error) => return Err(error),
+        }
+        Ok(())
+    }
+
+    async fn list_ssh_keys(&self, session: &WebSession) -> Result<Vec<SshKeyRecord>, WebAuthError> {
+        let mut records = Vec::new();
+        let mut page = 1;
+        loop {
+            let value = self
+                .request(
+                    Method::GET,
+                    &format!("/user/sign-ssh-keys?page={page}&page_size=100"),
+                    session,
+                    None,
+                )
+                .await?;
+            let page_records = parse_ssh_key_records(unwrap_result(value));
+            records.extend(page_records);
+            if records.len() < page * 100 {
+                break;
+            }
+            page += 1;
+        }
+        Ok(records)
+    }
+
+    async fn delete_ssh_keys(
+        &self,
+        session: &WebSession,
+        key_ids: Vec<String>,
+    ) -> Result<(), WebAuthError> {
+        let mut deleted = Vec::new();
+        for key_id in key_ids {
+            if key_id.is_empty() {
+                return Err(WebAuthError::InvalidResponse(
+                    "同名 SSH 公钥缺少 id".to_string(),
+                ));
+            }
+            if deleted.contains(&key_id) {
+                continue;
+            }
+            self.request(
+                Method::DELETE,
+                &format!("/user/sign-ssh-keys/{key_id}"),
+                session,
+                None,
+            )
+            .await?;
+            deleted.push(key_id);
         }
         Ok(())
     }
@@ -238,55 +295,36 @@ impl WebAuthClient {
         })
     }
 
-    /// Deletes the existing same-named PAT, then creates its replacement.
-    pub async fn replace_pat(
+    /// Returns the token ID for an exact PAT description.
+    pub async fn find_pat_id_by_description(
         &self,
         session: &WebSession,
         description: &str,
-        namespace: Option<&str>,
-    ) -> Result<CreatedPat, ReplacePatError> {
-        self.delete_tokens_with_description(session, description)
-            .await
-            .map_err(ReplacePatError::Cleanup)?;
-        self.create_pat(session, description, namespace)
-            .await
-            .map_err(ReplacePatError::Create)
-    }
-
-    async fn delete_tokens_with_description(
-        &self,
-        session: &WebSession,
-        description: &str,
-    ) -> Result<(), WebAuthError> {
-        let value = self
-            .request(
-                Method::GET,
-                "/user/personal_access_tokens?page=1&page_size=100",
-                session,
-                None,
-            )
-            .await?;
-        let value = unwrap_result(value);
-        for token in value.as_array().into_iter().flatten() {
-            let token_id = token
-                .get("token_id")
-                .or_else(|| token.get("id"))
-                .and_then(scalar_string)
-                .unwrap_or_default();
-            if token_id.is_empty()
-                || token.get("description").and_then(Value::as_str) != Some(description)
+    ) -> Result<Option<String>, WebAuthError> {
+        let mut page = 1;
+        loop {
+            let value = self
+                .request(
+                    Method::GET,
+                    &format!("/user/personal_access_tokens?page={page}&page_size=100"),
+                    session,
+                    None,
+                )
+                .await?;
+            let records = parse_pat_records(unwrap_result(value));
+            let page_len = records.len();
+            if let Some(record) = records
+                .into_iter()
+                .find(|record| record.description == description)
             {
-                continue;
+                return Ok(Some(record.token_id));
             }
-            self.request(
-                Method::DELETE,
-                &format!("/user/personal_access_tokens/{token_id}"),
-                session,
-                None,
-            )
-            .await?;
+            if page_len < 100 {
+                break;
+            }
+            page += 1;
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Deletes a known PAT, treating a missing token as already removed.
@@ -379,6 +417,52 @@ fn unwrap_result(value: Value) -> Value {
     value.get("result").cloned().unwrap_or(value)
 }
 
+fn parse_ssh_key_records(value: Value) -> Vec<SshKeyRecord> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|key| SshKeyRecord {
+            id: key
+                .get("id")
+                .or_else(|| key.get("key_id"))
+                .and_then(scalar_string)
+                .unwrap_or_default(),
+            name: key
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            public_key: key
+                .get("public_key")
+                .or_else(|| key.get("publicKey"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        })
+        .collect()
+}
+
+fn parse_pat_records(value: Value) -> Vec<PatRecord> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|token| PatRecord {
+            token_id: token
+                .get("token_id")
+                .or_else(|| token.get("id"))
+                .and_then(scalar_string)
+                .unwrap_or_default(),
+            description: token
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        })
+        .collect()
+}
+
 fn scalar_string(value: &Value) -> Option<String> {
     value
         .as_str()
@@ -435,16 +519,13 @@ mod tests {
     }
 
     #[test]
-    fn builds_a_stable_short_device_token_description_from_the_key_fingerprint() {
-        let description =
-            token_description_for_fingerprint("SHA256:UCUiLr7Pjs9wFFJMDByLgc3NrtdU344OgUM45wZPcIQ")
-                .unwrap();
+    fn derives_the_pat_name_from_the_public_key_and_scope_hashes() {
+        let public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILM+rvN+ot98qgEN796jTiQfZfG1KaT0PtFDJ/XFSqti test@example.com";
 
         assert_eq!(
-            description,
-            "CNB Bridge SHA256:UCUiLr7Pjs9wFFJMDByLgc3NrtdU34"
+            pat_resource_name(public_key).unwrap(),
+            "cnb-bridge-5484799157515295671"
         );
-        assert_eq!(description.chars().count(), 48);
     }
 
     #[tokio::test]
@@ -485,19 +566,161 @@ mod tests {
     async fn skips_public_key_that_is_already_registered() {
         let server = MockServer::start().await;
         let public_key = "ssh-ed25519 AAAATEST cnb";
+        let name = "cnb-bridge-123";
         Mock::given(method("GET"))
             .and(path("/user/sign-ssh-keys"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "result": [{ "id": "1", "name": "Existing", "public_key": public_key }]
+                "result": [{ "id": "1", "name": name, "public_key": public_key }]
             })))
             .mount(&server)
             .await;
         let client = WebAuthClient::with_base_url(server.uri());
 
         client
-            .ensure_ssh_key(&session(), "CNB Bridge", public_key)
+            .ensure_ssh_key(&session(), name, public_key)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn migrates_a_registered_key_to_the_target_name() {
+        let server = MockServer::start().await;
+        let public_key = "ssh-ed25519 AAAATEST cnb";
+        let target_name = "cnb-bridge-123";
+        Mock::given(method("GET"))
+            .and(path("/user/sign-ssh-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [{
+                    "id": "legacy",
+                    "name": "CNB Bridge SHA256:LEGACY",
+                    "public_key": public_key
+                }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/user/sign-ssh-keys/legacy"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/user/sign-ssh-keys"))
+            .and(body_json(json!({
+                "name": target_name,
+                "public_key": "ssh-ed25519%20AAAATEST%20cnb"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": {} })))
+            .mount(&server)
+            .await;
+        let client = WebAuthClient::with_base_url(server.uri());
+
+        client
+            .ensure_ssh_key(&session(), target_name, public_key)
+            .await
+            .unwrap();
+
+        let methods = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|request| request.method.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(methods, vec!["GET", "DELETE", "POST"]);
+    }
+
+    #[tokio::test]
+    async fn replaces_a_key_with_different_content_at_the_target_name() {
+        let server = MockServer::start().await;
+        let public_key = "ssh-ed25519 AAAANEW cnb";
+        let target_name = "cnb-bridge-123";
+        Mock::given(method("GET"))
+            .and(path("/user/sign-ssh-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [{
+                    "id": "conflict",
+                    "name": target_name,
+                    "public_key": "ssh-ed25519 AAAAOLD cnb"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/user/sign-ssh-keys/conflict"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/user/sign-ssh-keys"))
+            .and(body_json(json!({
+                "name": target_name,
+                "public_key": "ssh-ed25519%20AAAANEW%20cnb"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": {} })))
+            .mount(&server)
+            .await;
+        let client = WebAuthClient::with_base_url(server.uri());
+
+        client
+            .ensure_ssh_key(&session(), target_name, public_key)
+            .await
+            .unwrap();
+
+        let methods = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|request| request.method.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(methods, vec!["GET", "DELETE", "POST"]);
+    }
+
+    #[tokio::test]
+    async fn replaces_duplicate_keys_at_the_target_name() {
+        let server = MockServer::start().await;
+        let public_key = "ssh-ed25519 AAAANEW cnb";
+        let target_name = "cnb-bridge-123";
+        Mock::given(method("GET"))
+            .and(path("/user/sign-ssh-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [
+                    { "id": "first", "name": target_name, "public_key": public_key },
+                    { "id": "second", "name": target_name, "public_key": public_key }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/user/sign-ssh-keys/first"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/user/sign-ssh-keys/second"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/user/sign-ssh-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": {} })))
+            .mount(&server)
+            .await;
+        let client = WebAuthClient::with_base_url(server.uri());
+
+        client
+            .ensure_ssh_key(&session(), target_name, public_key)
+            .await
+            .unwrap();
+
+        let methods = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|request| request.method.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(methods, vec!["GET", "DELETE", "DELETE", "POST"]);
     }
 
     #[tokio::test]
@@ -523,6 +746,67 @@ mod tests {
             .ensure_ssh_key(&session(), "CNB Bridge", "ssh-ed25519 AAAATEST cnb")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn migrates_a_conflicting_legacy_key_after_a_create_conflict() {
+        let server = MockServer::start().await;
+        let public_key = "ssh-ed25519 AAAATEST cnb";
+        let target_name = "cnb-bridge-123";
+        Mock::given(method("GET"))
+            .and(path("/user/sign-ssh-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": [] })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user/sign-ssh-keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [{
+                    "id": "legacy",
+                    "name": "CNB Bridge",
+                    "public_key": public_key
+                }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/user/sign-ssh-keys"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+                "errmsg": "the key is already in use"
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/user/sign-ssh-keys/legacy"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/user/sign-ssh-keys"))
+            .and(body_json(json!({
+                "name": target_name,
+                "public_key": "ssh-ed25519%20AAAATEST%20cnb"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "result": {} })))
+            .mount(&server)
+            .await;
+        let client = WebAuthClient::with_base_url(server.uri());
+
+        client
+            .ensure_ssh_key(&session(), target_name, public_key)
+            .await
+            .unwrap();
+
+        let methods = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|request| request.method.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(methods, vec!["GET", "POST", "GET", "DELETE", "POST"]);
     }
 
     #[tokio::test]
@@ -556,6 +840,34 @@ mod tests {
         assert_eq!(token.token_id, "token-1");
         assert_eq!(token.token, "pat-value");
         assert_eq!(token.git_username, "cnb");
+    }
+
+    #[tokio::test]
+    async fn finds_the_pat_id_by_its_exact_description() {
+        let server = MockServer::start().await;
+        let description = "cnb-bridge-5484799157515295671";
+        Mock::given(method("GET"))
+            .and(path("/user/personal_access_tokens"))
+            .and(query_param("page", "1"))
+            .and(query_param("page_size", "100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [
+                    { "token_id": "target", "description": description },
+                    { "token_id": "other", "description": "cnb-bridge-1" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let client = WebAuthClient::with_base_url(server.uri());
+
+        assert_eq!(
+            client
+                .find_pat_id_by_description(&session(), description)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("target")
+        );
     }
 
     #[tokio::test]
@@ -602,98 +914,6 @@ mod tests {
                 ..
             }
         ));
-    }
-
-    #[tokio::test]
-    async fn replaces_a_stable_named_pat_by_deleting_then_recreating() {
-        let server = MockServer::start().await;
-        let description = "CNB Bridge SHA256:THIS-DEVICE";
-        Mock::given(method("GET"))
-            .and(path("/user/personal_access_tokens"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "result": [
-                    { "token_id": "old", "description": description },
-                    {
-                        "token_id": "other-device",
-                        "description": "CNB Bridge SHA256:OTHER-DEVICE"
-                    },
-                    { "token_id": "legacy", "description": "CNB Bridge" }
-                ]
-            })))
-            .mount(&server)
-            .await;
-        Mock::given(method("DELETE"))
-            .and(path("/user/personal_access_tokens/old"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/user/personal_access_tokens"))
-            .and(body_json(json!({
-                "description": description,
-                "scope": AUTH_SCOPES
-            })))
-            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-                "result": {
-                    "token_id": "new",
-                    "token": "pat-value",
-                    "git_username": "cnb"
-                }
-            })))
-            .mount(&server)
-            .await;
-        let client = WebAuthClient::with_base_url(server.uri());
-
-        let pat = client
-            .replace_pat(&session(), description, None)
-            .await
-            .unwrap();
-
-        assert_eq!(pat.token_id, "new");
-        let methods = server
-            .received_requests()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|request| request.method.as_str().to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(methods, vec!["GET", "DELETE", "POST"]);
-    }
-
-    #[tokio::test]
-    async fn does_not_create_a_pat_when_same_named_cleanup_fails() {
-        let server = MockServer::start().await;
-        let description = "CNB Bridge SHA256:THIS-DEVICE";
-        Mock::given(method("GET"))
-            .and(path("/user/personal_access_tokens"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "result": [{ "token_id": "old", "description": description }]
-            })))
-            .mount(&server)
-            .await;
-        Mock::given(method("DELETE"))
-            .and(path("/user/personal_access_tokens/old"))
-            .respond_with(ResponseTemplate::new(500).set_body_json(json!({
-                "errmsg": "delete failed"
-            })))
-            .mount(&server)
-            .await;
-        let client = WebAuthClient::with_base_url(server.uri());
-
-        let error = client
-            .replace_pat(&session(), description, None)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, ReplacePatError::Cleanup(_)));
-        let methods = server
-            .received_requests()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|request| request.method.as_str().to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(methods, vec!["GET", "DELETE"]);
     }
 
     #[tokio::test]

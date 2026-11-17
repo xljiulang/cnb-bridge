@@ -33,6 +33,7 @@ tempfile = "3.13"
 thiserror = "2.0"
 tokio = { version = "1.40", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 url = "2.5"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Threading"] }

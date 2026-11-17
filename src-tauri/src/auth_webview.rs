@@ -3,10 +3,10 @@ use cnb_bridge::account::{AccountAction, AccountError, AccountManager, AccountSt
 use cnb_bridge::api::CnbApi;
 use cnb_bridge::logging::Logger;
 use cnb_bridge::paths;
-use cnb_bridge::ssh_key::public_key_fingerprint;
+use cnb_bridge::ssh_key::public_key_resource_name;
 use cnb_bridge::web_auth::{
-    is_allowed_auth_url, session_from_cookies, token_description_for_fingerprint, CreatedPat,
-    ReplacePatError, WebAuthClient, WebAuthError, WebSession,
+    is_allowed_auth_url, pat_resource_name, session_from_cookies, CreatedPat, WebAuthClient,
+    WebAuthError, WebSession,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -67,24 +67,21 @@ pub fn launch(app: tauri::AppHandle) -> Result<AccountStatus, String> {
         let result = authorize(
             app_for_task.clone(),
             Arc::clone(&cancel),
+            Arc::clone(&account),
             Arc::clone(&bridge),
             Arc::clone(&logger),
         )
         .await;
         match result {
-            Ok(authorized) => {
-                match complete_authorized_pat(&account, &WebAuthClient::new(), &authorized, &logger)
-                    .await
-                {
-                    Ok(_) => {
-                        bridge.account_connected().await;
-                    }
-                    Err(error) => {
-                        account.fail_token_login(error.to_string());
-                        logger.log("error", format!("保存 CNB 访问令牌失败: {error}"));
-                    }
+            Ok(authorized) => match complete_authorized_pat(&account, &authorized, &logger).await {
+                Ok(_) => {
+                    bridge.account_connected().await;
                 }
-            }
+                Err(error) => {
+                    account.fail_token_login(error.to_string());
+                    logger.log("error", format!("保存 CNB 访问令牌失败: {error}"));
+                }
+            },
             Err(AuthorizationFailure::IdentityVerificationRequired) => {
                 account.fail_token_login_with_action(
                     IDENTITY_VERIFICATION_MESSAGE,
@@ -133,6 +130,7 @@ pub fn cancel(app: &tauri::AppHandle) -> AccountStatus {
 async fn authorize(
     app: tauri::AppHandle,
     cancel: Arc<AtomicBool>,
+    account: Arc<AccountManager>,
     bridge: Arc<cnb_bridge::bridge::Bridge>,
     logger: Arc<cnb_bridge::logging::Logger>,
 ) -> Result<AuthorizationResult, AuthorizationFailure> {
@@ -144,51 +142,28 @@ async fn authorize(
         .map_err(|error| format!("读取 CNB 命名空间失败: {error}"))?;
     let namespace = (namespaces.len() == 1).then(|| namespaces[0].path.as_str());
     let public_key = bridge.ensure_ssh_key()?;
-    let fingerprint = public_key_fingerprint(&public_key)?;
-    let token_description = token_description_for_fingerprint(&fingerprint)?;
+    let public_key_name = public_key_resource_name(&public_key)?;
+    let pat_name = pat_resource_name(&public_key)?;
     client
-        .ensure_ssh_key(&session, &token_description, &public_key)
+        .ensure_ssh_key(&session, &public_key_name, &public_key)
         .await
         .map_err(|error| format!("自动添加 SSH 公钥失败: {error}"))?;
-    let pat = match client
-        .replace_pat(&session, &token_description, namespace)
-        .await
-    {
-        Ok(pat) => pat,
-        Err(ReplacePatError::Create(WebAuthError::IdentityVerificationRequired)) => {
-            return Err(AuthorizationFailure::IdentityVerificationRequired)
-        }
-        Err(ReplacePatError::Create(error)) => {
-            return Err(format!(
-                "本机同名旧 PAT 已删除，但新 PAT 创建失败，请重新扫码重试: {error}"
-            )
-            .into());
-        }
-        Err(ReplacePatError::Cleanup(error)) => {
-            return Err(
-                format!("删除本机同名旧 PAT 失败，未创建新 PAT，请重新扫码重试: {error}").into(),
-            );
-        }
-    };
     let api = CnbApi::new();
-    let user = api.current_user(&pat.token).await.map_err(|error| {
-        format!("本机同名旧 PAT 已删除，但新 PAT 验证失败，请重新扫码重试: {error}")
-    })?;
+    let ResolvedPat { pat, reused } =
+        resolve_named_pat(&account, &client, &api, &session, &pat_name, namespace).await?;
+    let user = api
+        .current_user(&pat.token)
+        .await
+        .map_err(|error| format!("PAT 验证失败，请重新扫码重试: {error}"))?;
     let owned_namespaces = api
         .list_owned_namespaces(&pat.token)
         .await
-        .map_err(|error| {
-            format!(
-                "本机同名旧 PAT 已删除，但新 PAT 无法检查 CNB Owner 组织，请重新扫码重试: {error}"
-            )
-        })?;
+        .map_err(|error| format!("PAT 无法检查 CNB Owner 组织，请重新扫码重试: {error}"))?;
     let username = (!user.username.trim().is_empty()).then_some(user.username);
     if username.is_none() {
-        return Err(
-            "本机同名旧 PAT 已删除，但 CNB 未返回新 PAT 的账号名，请重新扫码重试"
-                .to_string()
-                .into(),
-        );
+        return Err("PAT 已就绪，但 CNB 未返回账号名，请重新扫码重试"
+            .to_string()
+            .into());
     }
     let mut needs_organization = owned_namespaces.is_empty();
     if needs_organization {
@@ -222,29 +197,75 @@ async fn authorize(
     Ok(AuthorizationResult {
         pat,
         username,
-        session,
         needs_organization,
+        reused_pat: reused,
     })
 }
 
 struct AuthorizationResult {
     pat: CreatedPat,
     username: Option<String>,
-    session: WebSession,
     needs_organization: bool,
+    reused_pat: bool,
+}
+
+#[derive(Debug)]
+struct ResolvedPat {
+    pat: CreatedPat,
+    reused: bool,
+}
+
+async fn resolve_named_pat(
+    account: &AccountManager,
+    web_client: &WebAuthClient,
+    api: &CnbApi,
+    session: &WebSession,
+    description: &str,
+    namespace: Option<&str>,
+) -> Result<ResolvedPat, AuthorizationFailure> {
+    if let Some(token_id) = web_client
+        .find_pat_id_by_description(session, description)
+        .await
+        .map_err(|error| format!("读取同名 PAT 失败: {error}"))?
+    {
+        if let Some(credentials) = account.credentials_by_token_id(&token_id) {
+            match api.current_user(&credentials.access_token).await {
+                Ok(_) => {
+                    return Ok(ResolvedPat {
+                        pat: CreatedPat {
+                            token_id,
+                            token: credentials.access_token,
+                            git_username: "cnb".to_string(),
+                        },
+                        reused: true,
+                    });
+                }
+                Err(error) if !error.is_auth_rejection() => {
+                    return Err(format!("验证本机已有 PAT 失败: {error}").into());
+                }
+                Err(_) => {}
+            }
+        }
+        web_client
+            .delete_token_if_present(session, &token_id)
+            .await
+            .map_err(|error| format!("删除不可复用的同名 PAT 失败: {error}"))?;
+    }
+
+    match web_client.create_pat(session, description, namespace).await {
+        Ok(pat) => Ok(ResolvedPat { pat, reused: false }),
+        Err(WebAuthError::IdentityVerificationRequired) => {
+            Err(AuthorizationFailure::IdentityVerificationRequired)
+        }
+        Err(error) => Err(format!("创建 PAT 失败: {error}").into()),
+    }
 }
 
 async fn complete_authorized_pat(
     account: &AccountManager,
-    client: &WebAuthClient,
     authorized: &AuthorizationResult,
     logger: &Logger,
 ) -> Result<AccountStatus, AccountError> {
-    let previous_token_id = authorized
-        .username
-        .as_deref()
-        .and_then(|username| account.credentials_for(username).ok())
-        .and_then(|credentials| credentials.token_id);
     let new_token_id =
         (!authorized.pat.token_id.trim().is_empty()).then(|| authorized.pat.token_id.clone());
     account.complete_token_login(
@@ -254,24 +275,19 @@ async fn complete_authorized_pat(
         None,
     )?;
     let status = account.set_needs_organization(authorized.needs_organization);
-    logger.log("info", "CNB personal access token is ready");
-
-    if let Some(token_id) = new_token_id {
-        if let Some(previous_token_id) = previous_token_id.as_deref() {
-            if previous_token_id != token_id {
-                if let Err(error) = client
-                    .delete_token_if_present(&authorized.session, previous_token_id)
-                    .await
-                {
-                    logger.log("warn", format!("清理本机旧 CNB Bridge 令牌失败: {error}"));
-                }
-            }
-        }
-    }
+    logger.log(
+        "info",
+        if authorized.reused_pat {
+            "Reused the saved CNB personal access token"
+        } else {
+            "Created a new CNB personal access token"
+        },
+    );
 
     Ok(status)
 }
 
+#[derive(Debug)]
 enum AuthorizationFailure {
     Message(String),
     IdentityVerificationRequired,
@@ -333,9 +349,300 @@ mod tests {
     use super::*;
     use cnb_bridge::account::{AccountManager, AccountState, AccountStore};
     use cnb_bridge::logging::Logger;
+    use serde_json::json;
+    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
-    async fn saves_the_new_pat_before_best_effort_device_cleanup() {
+    async fn reuses_a_named_pat_backed_by_valid_local_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let account =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account-auth.bin")));
+        account
+            .complete_token_login(
+                "saved-token",
+                Some("alice".to_string()),
+                Some("existing-id".to_string()),
+                None,
+            )
+            .unwrap();
+        let server = MockServer::start().await;
+        let description = "cnb-bridge-5484799157515295671";
+        Mock::given(method("GET"))
+            .and(path("/user/personal_access_tokens"))
+            .and(query_param("page", "1"))
+            .and(query_param("page_size", "100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [{
+                    "token_id": "existing-id",
+                    "description": description
+                }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .and(header("authorization", "Bearer saved-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "username": "alice" })))
+            .mount(&server)
+            .await;
+        let web_client = WebAuthClient::with_base_url(server.uri());
+        let api = CnbApi::with_base_url(server.uri());
+
+        let resolved = resolve_named_pat(
+            &account,
+            &web_client,
+            &api,
+            &WebSession {
+                cookie_header: "session=abc; csrftoken=csrf".to_string(),
+                csrf_token: "csrf".to_string(),
+            },
+            description,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(resolved.reused);
+        assert_eq!(resolved.pat.token_id, "existing-id");
+        assert_eq!(resolved.pat.token, "saved-token");
+    }
+
+    #[tokio::test]
+    async fn recreates_an_existing_named_pat_without_local_plaintext() {
+        let temp = tempfile::tempdir().unwrap();
+        let account =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account-auth.bin")));
+        let server = MockServer::start().await;
+        let description = "cnb-bridge-5484799157515295671";
+        Mock::given(method("GET"))
+            .and(path("/user/personal_access_tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [{ "token_id": "existing-id", "description": description }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/user/personal_access_tokens/existing-id"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/user/personal_access_tokens"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "result": {
+                    "token_id": "new-id",
+                    "token": "new-token",
+                    "git_username": "cnb"
+                }
+            })))
+            .mount(&server)
+            .await;
+        let web_client = WebAuthClient::with_base_url(server.uri());
+        let api = CnbApi::with_base_url(server.uri());
+
+        let resolved = resolve_named_pat(
+            &account,
+            &web_client,
+            &api,
+            &WebSession {
+                cookie_header: "session=abc; csrftoken=csrf".to_string(),
+                csrf_token: "csrf".to_string(),
+            },
+            description,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(!resolved.reused);
+        assert_eq!(resolved.pat.token_id, "new-id");
+        assert_eq!(resolved.pat.token, "new-token");
+        let methods = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|request| request.method.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(methods, vec!["GET", "DELETE", "POST"]);
+    }
+
+    #[tokio::test]
+    async fn creates_a_pat_without_deleting_a_legacy_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let account =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account-auth.bin")));
+        let server = MockServer::start().await;
+        let description = "cnb-bridge-5484799157515295671";
+        Mock::given(method("GET"))
+            .and(path("/user/personal_access_tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [{
+                    "token_id": "legacy-id",
+                    "description": "CNB Bridge"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/user/personal_access_tokens"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "result": {
+                    "token_id": "new-id",
+                    "token": "new-token",
+                    "git_username": "cnb"
+                }
+            })))
+            .mount(&server)
+            .await;
+        let web_client = WebAuthClient::with_base_url(server.uri());
+        let api = CnbApi::with_base_url(server.uri());
+
+        let resolved = resolve_named_pat(
+            &account,
+            &web_client,
+            &api,
+            &WebSession {
+                cookie_header: "session=abc; csrftoken=csrf".to_string(),
+                csrf_token: "csrf".to_string(),
+            },
+            description,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(!resolved.reused);
+        assert_eq!(resolved.pat.token, "new-token");
+        let methods = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|request| request.method.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(methods, vec!["GET", "POST"]);
+    }
+
+    #[tokio::test]
+    async fn does_not_create_a_pat_when_named_cleanup_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let account =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account-auth.bin")));
+        let server = MockServer::start().await;
+        let description = "cnb-bridge-5484799157515295671";
+        Mock::given(method("GET"))
+            .and(path("/user/personal_access_tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [{ "token_id": "existing-id", "description": description }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/user/personal_access_tokens/existing-id"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+                "errmsg": "delete failed"
+            })))
+            .mount(&server)
+            .await;
+        let web_client = WebAuthClient::with_base_url(server.uri());
+        let api = CnbApi::with_base_url(server.uri());
+
+        let error = resolve_named_pat(
+            &account,
+            &web_client,
+            &api,
+            &WebSession {
+                cookie_header: "session=abc; csrftoken=csrf".to_string(),
+                csrf_token: "csrf".to_string(),
+            },
+            description,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(format!("{error:?}").contains("删除不可复用的同名 PAT 失败"));
+        let methods = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|request| request.method.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(methods, vec!["GET", "DELETE"]);
+    }
+
+    #[tokio::test]
+    async fn recreates_an_existing_named_pat_when_local_credentials_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let account =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account-auth.bin")));
+        account
+            .complete_token_login(
+                "expired-token",
+                Some("alice".to_string()),
+                Some("existing-id".to_string()),
+                None,
+            )
+            .unwrap();
+        let server = MockServer::start().await;
+        let description = "cnb-bridge-5484799157515295671";
+        Mock::given(method("GET"))
+            .and(path("/user/personal_access_tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "result": [{ "token_id": "existing-id", "description": description }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .and(header("authorization", "Bearer expired-token"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                "message": "forbidden"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/user/personal_access_tokens/existing-id"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/user/personal_access_tokens"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "result": {
+                    "token_id": "new-id",
+                    "token": "new-token",
+                    "git_username": "cnb"
+                }
+            })))
+            .mount(&server)
+            .await;
+        let web_client = WebAuthClient::with_base_url(server.uri());
+        let api = CnbApi::with_base_url(server.uri());
+
+        let resolved = resolve_named_pat(
+            &account,
+            &web_client,
+            &api,
+            &WebSession {
+                cookie_header: "session=abc; csrftoken=csrf".to_string(),
+                csrf_token: "csrf".to_string(),
+            },
+            description,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(!resolved.reused);
+        assert_eq!(resolved.pat.token_id, "new-id");
+    }
+
+    #[tokio::test]
+    async fn saves_the_new_pat_and_token_id() {
         let temp = tempfile::tempdir().unwrap();
         let account =
             AccountManager::with_store(AccountStore::new(temp.path().join("account-auth.bin")));
@@ -347,12 +654,10 @@ mod tests {
                 None,
             )
             .unwrap();
-        let client = WebAuthClient::with_base_url("http://127.0.0.1:1");
         let logger = Logger::new(32);
 
         let status = complete_authorized_pat(
             &account,
-            &client,
             &AuthorizationResult {
                 pat: CreatedPat {
                     token_id: "new-id".to_string(),
@@ -360,11 +665,8 @@ mod tests {
                     git_username: "cnb".to_string(),
                 },
                 username: Some("alice".to_string()),
-                session: WebSession {
-                    cookie_header: "session=abc; csrftoken=csrf".to_string(),
-                    csrf_token: "csrf".to_string(),
-                },
                 needs_organization: false,
+                reused_pat: false,
             },
             &logger,
         )

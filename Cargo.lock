@@ -759,6 +759,7 @@ dependencies = [
  "url",
  "windows-sys 0.60.2",
  "wiremock",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -776,6 +777,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+ "wiremock",
 ]
 
 [[package]]
@@ -7040,6 +7042,12 @@ dependencies = [
  "windows-core",
  "windows-version",
 ]
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40de123dbb523ebcc00d61ec01840ad192578afc378d859f3429caa38308fad5"
 
 [[package]]
 name = "yoke"
