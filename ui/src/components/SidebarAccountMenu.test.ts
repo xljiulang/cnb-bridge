@@ -7,6 +7,10 @@ const props = {
   avatarUrl: "https://cnb.cool/users/alice/avatar/l",
   statusLabel: "空闲待命",
   live: false,
+  accountState: "connected" as const,
+  accounts: [],
+  activeAccount: true,
+  busyUsername: null,
 };
 
 describe("SidebarAccountMenu", () => {
@@ -31,6 +35,39 @@ describe("SidebarAccountMenu", () => {
     expect(document.activeElement).toBe(
       panel?.querySelector(".sidebar-logout-action"),
     );
+    wrapper.unmount();
+  });
+
+  it("renders saved accounts when signed out", async () => {
+    const account = {
+      username: "alice",
+      displayName: "爱丽丝",
+      avatarUrl: "https://cnb.cool/users/alice/avatar/l",
+      lastLoginAt: 200,
+      active: false,
+    };
+    const wrapper = mount(SidebarAccountMenu, {
+      attachTo: document.body,
+      props: {
+        ...props,
+        displayName: "登录 CNB",
+        avatarUrl: null,
+        statusLabel: "未登录",
+        accountState: "signedOut",
+        accounts: [account],
+        activeAccount: false,
+      },
+    });
+
+    await wrapper.get(".sidebar-status").trigger("click");
+    const panel = document.body.querySelector(
+      ".sidebar-account-menu",
+    ) as HTMLElement;
+    expect(panel.textContent).toContain("已保存账号");
+    expect(panel.textContent).toContain("爱丽丝");
+    expect(panel.textContent).toContain("扫码登录 CNB 账号");
+    expect(panel.textContent).not.toContain("退出登录");
+    expect(panel.textContent).not.toContain("取消扫码");
     wrapper.unmount();
   });
 

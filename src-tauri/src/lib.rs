@@ -50,7 +50,6 @@ pub fn run() {
             commands::save_settings,
             commands::start_login,
             commands::login_with_account,
-            commands::cancel_login,
             commands::logout,
             commands::remove_account,
             commands::start_bridge,

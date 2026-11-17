@@ -8,7 +8,6 @@ import {
 } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
-  cancelLogin as cancelLoginApi,
   createCnbNamespace,
   dismissError as dismissErrorApi,
   getCnbUsage,
@@ -38,7 +37,6 @@ import {
   isBridgeTransitioning,
   settingsEqual,
   shouldShowConnectionDetails,
-  statusIconKind,
   validatePort,
 } from "../format";
 import type {
@@ -118,13 +116,6 @@ export function useDesktopApp() {
   const organizationReady = computed(
     () => accountConnected.value && !organizationRequired.value,
   );
-  const sidebarStatusIcon = computed(() =>
-    statusIconKind(
-      bridgeState.value,
-      accountConnected.value,
-      creatingOrganization.value,
-    ),
-  );
   const settingsDirty = computed(() => {
     const persisted = snapshot.value?.settings;
     return persisted ? !settingsEqual(settingsDraft, persisted) : false;
@@ -135,15 +126,17 @@ export function useDesktopApp() {
       Boolean(snapshot.value?.account.needsOrganization),
     ),
   );
-  const statusLabel = computed(() =>
-    organizationRequired.value
-      ? creatingOrganization.value
-        ? "创建组织中"
-        : "组织未就绪"
-      : snapshot.value
-        ? bridgeLabel(snapshot.value.bridge.state)
-        : "正在加载",
-  );
+  const statusLabel = computed(() => {
+    if (accountState.value === "signingIn") return "等待授权";
+    if (accountState.value === "failed") return "登录失败";
+    if (accountState.value === "signedOut") return "未登录";
+    if (organizationRequired.value) {
+      return creatingOrganization.value ? "创建组织中" : "组织未就绪";
+    }
+    return snapshot.value
+      ? bridgeLabel(snapshot.value.bridge.state)
+      : "正在加载";
+  });
   const baseUrl = computed(
     () =>
       snapshot.value?.bridge.baseUrl ??
@@ -437,10 +430,6 @@ export function useDesktopApp() {
     await run(() => logoutApi());
   }
 
-  async function cancelLogin() {
-    await run(() => cancelLoginApi());
-  }
-
   async function startBridge() {
     await run(() => startBridgeApi());
   }
@@ -697,7 +686,6 @@ export function useDesktopApp() {
     ready,
     bridgeState,
     bridgeTransitioning,
-    sidebarStatusIcon,
     idle,
     repoCreationNeeded,
     accountState,
@@ -733,7 +721,6 @@ export function useDesktopApp() {
     loginSavedAccount,
     removeSavedAccount,
     logout,
-    cancelLogin,
     startBridge,
     stopBridge,
     createOrganization,

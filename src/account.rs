@@ -486,6 +486,13 @@ impl AccountManager {
         Ok(())
     }
 
+    /// Ends a cancelled WebView authorization without changing saved accounts.
+    pub fn cancel_token_login(&self) -> AccountStatus {
+        let status = AccountStatus::signed_out();
+        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status.clone();
+        status
+    }
+
     /// Saves a PAT created by the WebView authorization flow.
     pub fn complete_token_login(
         &self,
@@ -1137,6 +1144,28 @@ mod tests {
         assert!(!manager.accounts()[0].active);
         assert!(manager.active_credentials().is_none());
 
+        let reopened = AccountManager::with_store(store);
+        assert_eq!(reopened.status().state, AccountState::SignedOut);
+        assert_eq!(reopened.accounts().len(), 1);
+    }
+
+    #[test]
+    fn cancelled_scan_returns_to_signed_out_without_clearing_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AccountStore::new(dir.path().join("account-auth.bin"));
+        let manager = AccountManager::with_store(store.clone());
+        manager
+            .complete_token_login("alice-token", Some("alice".to_string()), None, None, None)
+            .unwrap();
+        manager.logout().unwrap();
+        manager.begin_token_login();
+
+        let status = manager.cancel_token_login();
+
+        assert_eq!(status.state, AccountState::SignedOut);
+        assert!(status.error.is_none());
+        assert_eq!(manager.accounts().len(), 1);
+        assert!(manager.active_credentials().is_none());
         let reopened = AccountManager::with_store(store);
         assert_eq!(reopened.status().state, AccountState::SignedOut);
         assert_eq!(reopened.accounts().len(), 1);

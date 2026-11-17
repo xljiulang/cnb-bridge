@@ -59,12 +59,21 @@ defineProps<{ app: DesktopApp }>();
     </nav>
 
     <SidebarAccountMenu
-      v-if="app.accountConnected"
-      :display-name="app.snapshot?.account.displayName || 'CNB 已绑定'"
+      :account-state="app.accountState"
+      :accounts="app.accounts"
+      :active-account="Boolean(app.activeAccount)"
+      :busy-username="app.accountLoginUsername"
+      :display-name="
+        app.snapshot?.account.displayName ||
+        (app.accountState === 'signingIn' ? '正在登录' : '登录 CNB')
+      "
       :avatar-url="app.snapshot?.account.avatarUrl"
       :status-label="app.statusLabel"
       :live="app.ready"
-      :disabled="app.busy"
+      :disabled="app.busy || app.accountState === 'signingIn'"
+      @login="app.loginSavedAccount"
+      @remove="app.removeSavedAccount"
+      @scan="app.login"
       @logout="app.logout"
     />
   </aside>

@@ -304,7 +304,7 @@ describe("App shell", () => {
     wrapper.unmount();
   });
 
-  it("shows a direct scan action when no account is saved", async () => {
+  it("shows a centered sign-in guide and no connection cards when no account is saved", async () => {
     const emptySnapshot = { ...signedOutSnapshot, accounts: [] };
     mockWindows("main");
     mockIPC(
@@ -325,10 +325,56 @@ describe("App shell", () => {
     const wrapper = mount(App);
     await flushPromises();
 
-    expect(wrapper.find(".empty-account-title").text()).toContain("登录 CNB");
-    expect(wrapper.find(".account-picker-trigger").exists()).toBe(false);
-    expect(wrapper.find(".account-actions .primary").text()).toContain(
-      "扫码绑定 CNB",
+    expect(wrapper.get(".connect-signed-out").text()).toContain("登录 CNB");
+    expect(wrapper.get(".connect-signed-out").text()).toContain("左下角");
+    expect(wrapper.find(".account-card").exists()).toBe(false);
+    expect(wrapper.find(".sidebar-account-menu").exists()).toBe(false);
+    expect(wrapper.find(".model-card").exists()).toBe(false);
+    expect(wrapper.find(".endpoint-card").exists()).toBe(false);
+    expect(wrapper.find(".api-key-card").exists()).toBe(false);
+    expect(wrapper.find(".pipeline-card").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("扫码绑定 CNB");
+
+    await wrapper.get(".sidebar-status").trigger("click");
+    expect(document.body.textContent).toContain("扫码登录 CNB 账号");
+    wrapper.unmount();
+  });
+
+  it("derives the sidebar login status from the account while authorization is pending", async () => {
+    const pendingSnapshot = {
+      ...signedOutSnapshot,
+      account: {
+        ...account,
+        state: "signingIn",
+        username: "alice",
+        displayName: "爱丽丝",
+        avatarUrl: "https://cnb.cool/users/alice/avatar/l",
+      },
+    };
+    mockWindows("main");
+    mockIPC(
+      (command) => {
+        switch (command) {
+          case "get_snapshot":
+            return pendingSnapshot;
+          case "get_logs":
+          case "list_http_traces":
+          case "list_namespaces":
+            return [];
+          default:
+            return null;
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+
+    expect(wrapper.get(".sidebar-status").text()).toContain("爱丽丝");
+    expect(wrapper.get(".sidebar-status-badge").text()).toBe("等待授权");
+    expect(wrapper.text()).not.toContain("取消扫码");
+    expect(wrapper.get(".connect-signed-out").text()).toContain(
+      "正在登录 爱丽丝",
     );
     wrapper.unmount();
   });
@@ -357,7 +403,7 @@ describe("App shell", () => {
     await flushPromises();
 
     expect(wrapper.find(".account-main > .account-avatar").exists()).toBe(false);
-    await wrapper.find(".account-picker-trigger").trigger("click");
+    await wrapper.find(".sidebar-status").trigger("click");
     const accountRows = [
       ...document.body.querySelectorAll<HTMLElement>(".account-menu-row"),
     ];
@@ -381,7 +427,7 @@ describe("App shell", () => {
 
     await wrapper.findAll("nav button")[0].trigger("click");
     await flushPromises();
-    await wrapper.find(".account-picker-trigger").trigger("click");
+    await wrapper.find(".sidebar-status").trigger("click");
     const removeButtons = [
       ...document.body.querySelectorAll<HTMLElement>(".remove-saved-account"),
     ];

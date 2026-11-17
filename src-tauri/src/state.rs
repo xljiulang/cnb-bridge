@@ -10,7 +10,7 @@ use cnb_bridge::settings::{Settings, SettingsStore};
 use cnb_bridge::ssh_key::SshKeyStore;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tauri::{App, AppHandle, Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
 
@@ -36,7 +36,6 @@ pub struct DesktopState {
     pub settings_store: SettingsStore,
     pub logger: Arc<Logger>,
     pub models: Vec<ModelSummary>,
-    pub login_cancel: Mutex<Option<Arc<AtomicBool>>>,
     pub login_generation: AtomicU64,
     pub organization_create_lock: tokio::sync::Mutex<()>,
     _lifecycle_mutex: AppLifecycleMutex,
@@ -95,7 +94,6 @@ pub fn initialize(
         settings_store,
         logger,
         models,
-        login_cancel: Mutex::new(None),
         login_generation: AtomicU64::new(0),
         organization_create_lock: tokio::sync::Mutex::new(()),
         _lifecycle_mutex: lifecycle_mutex,

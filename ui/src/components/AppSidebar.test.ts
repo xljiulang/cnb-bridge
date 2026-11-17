@@ -3,12 +3,32 @@ import { describe, expect, it, vi } from "vitest";
 import type { DesktopApp } from "../composables/useDesktopApp";
 import AppSidebar from "./AppSidebar.vue";
 
+const savedAccounts = [
+  {
+    username: "alice",
+    displayName: "爱丽丝",
+    avatarUrl: "https://cnb.cool/users/alice/avatar/l",
+    lastLoginAt: 200,
+    active: false,
+  },
+  {
+    username: "bob",
+    displayName: "鲍勃",
+    avatarUrl: null,
+    lastLoginAt: 100,
+    active: false,
+  },
+];
+
 function app(overrides: Partial<DesktopApp> = {}): DesktopApp {
   return {
     tab: "connect",
     ready: false,
     accountConnected: true,
-    sidebarStatusIcon: "pause",
+    accountState: "connected",
+    accounts: savedAccounts,
+    activeAccount: savedAccounts[0],
+    accountLoginUsername: null,
     statusLabel: "空闲待命",
     snapshot: {
       account: {
@@ -35,6 +55,10 @@ function app(overrides: Partial<DesktopApp> = {}): DesktopApp {
     openSettings: () => {},
     openLogs: () => {},
     openAbout: () => {},
+    login: () => {},
+    loginSavedAccount: () => {},
+    removeSavedAccount: () => {},
+    logout: () => {},
     ...overrides,
   } as DesktopApp;
 }
@@ -60,17 +84,18 @@ describe("AppSidebar", () => {
   });
 
   it.each([
-    { accountState: "signedOut" as const, label: "未登录", icon: "scan" as const },
-    { accountState: "signingIn" as const, label: "等待授权", icon: "busy" as const },
-    { accountState: "failed" as const, label: "登录失败", icon: "error" as const },
+    { accountState: "signedOut" as const, label: "未登录" },
+    { accountState: "signingIn" as const, label: "等待授权" },
+    { accountState: "failed" as const, label: "登录失败" },
   ])(
-    "hides the entire status card while account state is $accountState",
-    ({ accountState, label, icon }) => {
+    "shows the account entry while account state is $accountState",
+    ({ accountState, label }) => {
       const wrapper = mount(AppSidebar, {
         props: {
           app: app({
             accountConnected: false,
-            sidebarStatusIcon: icon,
+            accountState,
+            activeAccount: null,
             statusLabel: label,
             snapshot: {
               ...app().snapshot!,
@@ -86,12 +111,98 @@ describe("AppSidebar", () => {
         },
       });
 
-      expect(wrapper.find(".sidebar-status").exists()).toBe(false);
-      expect(wrapper.text()).not.toContain("等待扫码");
-      expect(wrapper.text()).not.toContain(label);
+      expect(wrapper.get(".sidebar-status").text()).toContain(label);
+      expect(wrapper.text()).toContain(
+        accountState === "signingIn" ? "正在登录" : "登录 CNB",
+      );
       wrapper.unmount();
     },
   );
+
+  it("opens saved accounts from the signed-out sidebar entry", async () => {
+    const loginSavedAccount = vi.fn();
+    const removeSavedAccount = vi.fn();
+    const login = vi.fn();
+    const wrapper = mount(AppSidebar, {
+      attachTo: document.body,
+      props: {
+        app: app({
+          accountConnected: false,
+          accountState: "signedOut",
+          activeAccount: null,
+          statusLabel: "未登录",
+          loginSavedAccount,
+          removeSavedAccount,
+          login,
+          snapshot: {
+            ...app().snapshot!,
+            accounts: savedAccounts,
+            account: {
+              ...app().snapshot!.account,
+              state: "signedOut",
+              username: null,
+              displayName: null,
+              avatarUrl: null,
+            },
+          },
+        }),
+      },
+    });
+
+    await wrapper.get(".sidebar-status").trigger("click");
+    const rows = [
+      ...document.body.querySelectorAll<HTMLElement>(".account-menu-row"),
+    ];
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain("爱丽丝");
+    (rows[0].querySelector(".account-choice") as HTMLElement).click();
+    await wrapper.vm.$nextTick();
+    expect(loginSavedAccount).toHaveBeenCalledWith("alice");
+    expect(document.body.querySelector(".sidebar-account-menu")).toBeNull();
+
+    await wrapper.get(".sidebar-status").trigger("click");
+    (
+      document.body.querySelector(
+        '.remove-saved-account[aria-label="移除账号 鲍勃"]',
+      ) as HTMLElement
+    ).click();
+    expect(removeSavedAccount).toHaveBeenCalledWith("bob");
+
+    (
+      document.body.querySelector(".add-account-action") as HTMLElement
+    ).click();
+    expect(login).toHaveBeenCalledOnce();
+    expect(document.body.textContent).not.toContain("取消扫码");
+    wrapper.unmount();
+  });
+
+  it("disables the entry while login is in progress", () => {
+    const wrapper = mount(AppSidebar, {
+      props: {
+        app: app({
+          accountConnected: false,
+          accountState: "signingIn",
+          accountLoginUsername: "alice",
+          activeAccount: null,
+          statusLabel: "等待授权",
+          snapshot: {
+            ...app().snapshot!,
+            account: {
+              ...app().snapshot!.account,
+              state: "signingIn",
+              username: "alice",
+              displayName: "爱丽丝",
+              avatarUrl: "https://cnb.cool/users/alice/avatar/l",
+            },
+          },
+        }),
+      },
+    });
+
+    expect(wrapper.get(".sidebar-status").text()).toContain("爱丽丝");
+    expect(wrapper.get(".sidebar-status").attributes()).toHaveProperty("disabled");
+    wrapper.unmount();
+  });
 
   it("falls back to the user icon when the account avatar fails", async () => {
     const wrapper = mount(AppSidebar, {
@@ -126,24 +237,42 @@ describe("AppSidebar", () => {
     wrapper.unmount();
   });
 
-  it("uses the bridge status label in the badge", () => {
-    const cases = [
-      { label: "桥接就绪", icon: "live" as const },
-      { label: "建立 SSH 通道", icon: "busy" as const },
-      { label: "组织未就绪", icon: "busy" as const },
-    ];
+  it("keeps logout available when an active account is not connected", async () => {
+    const logout = vi.fn();
+    const wrapper = mount(AppSidebar, {
+      attachTo: document.body,
+      props: {
+        app: app({
+          accountConnected: false,
+          accountState: "failed",
+          statusLabel: "登录失败",
+          logout,
+        }),
+      },
+    });
 
-    for (const entry of cases) {
+    await wrapper.get(".sidebar-status").trigger("click");
+    const panel = document.body.querySelector(
+      ".sidebar-account-menu",
+    ) as HTMLElement;
+    expect(panel.textContent).toContain("退出登录");
+    expect(panel.querySelector(".account-menu-row")).toBeNull();
+    wrapper.unmount();
+  });
+
+  it("uses the bridge status label in the badge", () => {
+    const cases = ["桥接就绪", "建立 SSH 通道", "组织未就绪"];
+
+    for (const label of cases) {
       const wrapper = mount(AppSidebar, {
         props: {
           app: app({
-            statusLabel: entry.label,
-            sidebarStatusIcon: entry.icon,
+            statusLabel: label,
           }),
         },
       });
 
-      expect(wrapper.get(".sidebar-status-badge").text()).toBe(entry.label);
+      expect(wrapper.get(".sidebar-status-badge").text()).toBe(label);
       wrapper.unmount();
     }
   });

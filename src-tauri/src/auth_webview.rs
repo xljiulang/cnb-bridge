@@ -29,23 +29,10 @@ pub fn launch(app: tauri::AppHandle) -> Result<AccountStatus, String> {
         return Ok(state.account.status());
     }
     state.account.begin_token_login();
-    if let Some(previous) = state
-        .login_cancel
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take()
-    {
-        previous.store(true, Ordering::SeqCst);
-    }
-    let cancel = Arc::new(AtomicBool::new(false));
-    *state
-        .login_cancel
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&cancel));
     let generation = state.login_generation.fetch_add(1, Ordering::SeqCst) + 1;
 
     let url = Url::parse(AUTH_URL).map_err(|error| error.to_string())?;
-    if let Err(error) = WebviewWindowBuilder::new(&app, WINDOW_LABEL, WebviewUrl::External(url))
+    let window = match WebviewWindowBuilder::new(&app, WINDOW_LABEL, WebviewUrl::External(url))
         .title("CNB 扫码绑定")
         .inner_size(680.0, 700.0)
         .min_inner_size(520.0, 560.0)
@@ -55,9 +42,24 @@ pub fn launch(app: tauri::AppHandle) -> Result<AccountStatus, String> {
         .on_navigation(is_allowed_auth_url)
         .build()
     {
-        state.account.fail_token_login(error.to_string());
-        return Err(error.to_string());
-    }
+        Ok(window) => window,
+        Err(error) => {
+            state.account.fail_token_login(error.to_string());
+            return Err(error.to_string());
+        }
+    };
+    let close_requested = Arc::new(AtomicBool::new(false));
+    let close_signal = Arc::clone(&close_requested);
+    window.on_window_event(move |event| match event {
+        tauri::WindowEvent::CloseRequested { api, .. } => {
+            api.prevent_close();
+            close_signal.store(true, Ordering::SeqCst);
+        }
+        tauri::WindowEvent::Destroyed => {
+            close_signal.store(true, Ordering::SeqCst);
+        }
+        _ => {}
+    });
 
     let account = Arc::clone(&state.account);
     let bridge = Arc::clone(&state.bridge);
@@ -66,7 +68,7 @@ pub fn launch(app: tauri::AppHandle) -> Result<AccountStatus, String> {
     tauri::async_runtime::spawn(async move {
         let result = authorize(
             app_for_task.clone(),
-            Arc::clone(&cancel),
+            Arc::clone(&close_requested),
             Arc::clone(&account),
             Arc::clone(&bridge),
             Arc::clone(&logger),
@@ -96,45 +98,27 @@ pub fn launch(app: tauri::AppHandle) -> Result<AccountStatus, String> {
                 account.fail_token_login(error.clone());
                 logger.log("error", format!("CNB 扫码绑定失败: {error}"));
             }
+            Err(AuthorizationFailure::Cancelled) => {
+                account.cancel_token_login();
+                bridge.account_signed_out().await;
+                logger.log("info", "CNB 扫码登录已取消");
+            }
         }
         close_and_clear(&app_for_task);
-        if let Some(state) = app_for_task.try_state::<DesktopState>() {
-            let _ = state
-                .login_cancel
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take();
-        }
         let _ = app_for_task.emit("cnb-bridge://snapshot", generation);
     });
 
     Ok(state.account.status())
 }
 
-/// Cancels an active WebView authorization.
-pub fn cancel(app: &tauri::AppHandle) -> AccountStatus {
-    let state = app.state::<DesktopState>();
-    if let Some(cancel) = state
-        .login_cancel
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take()
-    {
-        cancel.store(true, Ordering::SeqCst);
-    }
-    close_and_clear(app);
-    state.account.fail_token_login("扫码绑定已取消");
-    state.account.status()
-}
-
 async fn authorize(
     app: tauri::AppHandle,
-    cancel: Arc<AtomicBool>,
+    close_requested: Arc<AtomicBool>,
     account: Arc<AccountManager>,
     bridge: Arc<cnb_bridge::bridge::Bridge>,
     logger: Arc<cnb_bridge::logging::Logger>,
 ) -> Result<AuthorizationResult, AuthorizationFailure> {
-    let session = wait_for_session(&app, cancel).await?;
+    let session = wait_for_session(&app, &close_requested).await?;
     let client = WebAuthClient::new();
     let namespaces = client
         .owned_namespaces(&session)
@@ -295,6 +279,7 @@ async fn complete_authorized_pat(
 enum AuthorizationFailure {
     Message(String),
     IdentityVerificationRequired,
+    Cancelled,
 }
 
 impl From<String> for AuthorizationFailure {
@@ -303,19 +288,22 @@ impl From<String> for AuthorizationFailure {
     }
 }
 
+fn should_poll_session(close_requested: bool, window_present: bool) -> bool {
+    !close_requested && window_present
+}
+
 async fn wait_for_session(
     app: &tauri::AppHandle,
-    cancel: Arc<AtomicBool>,
-) -> Result<WebSession, String> {
+    close_requested: &AtomicBool,
+) -> Result<WebSession, AuthorizationFailure> {
     let cookie_url = Url::parse("https://cnb.cool/").map_err(|error| error.to_string())?;
     let client = WebAuthClient::new();
     for _ in 0..300 {
-        if cancel.load(Ordering::SeqCst) {
-            return Err("扫码绑定已取消".to_string());
+        let window = app.get_webview_window(WINDOW_LABEL);
+        if !should_poll_session(close_requested.load(Ordering::SeqCst), window.is_some()) {
+            return Err(AuthorizationFailure::Cancelled);
         }
-        let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
-            return Err("扫码窗口已关闭".to_string());
-        };
+        let window = window.expect("window presence checked");
         if let Ok(cookies) = window.cookies_for_url(cookie_url.clone()) {
             if let Ok(session) = session_from_cookies(
                 cookies
@@ -329,7 +317,7 @@ async fn wait_for_session(
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
-    Err("扫码登录超时，请重试".to_string())
+    Err("扫码登录超时，请重试".to_string().into())
 }
 
 fn close_and_clear(app: &tauri::AppHandle) {
@@ -411,6 +399,14 @@ mod tests {
         assert!(resolved.reused);
         assert_eq!(resolved.pat.token_id, "existing-id");
         assert_eq!(resolved.pat.token, "saved-token");
+    }
+
+    #[test]
+    fn close_request_prevents_further_session_polls() {
+        assert!(should_poll_session(false, true));
+        assert!(!should_poll_session(false, false));
+        assert!(!should_poll_session(true, true));
+        assert!(!should_poll_session(true, false));
     }
 
     #[tokio::test]

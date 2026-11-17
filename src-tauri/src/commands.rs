@@ -97,11 +97,6 @@ pub async fn start_login(state: State<'_, DesktopState>) -> Result<AccountStatus
 }
 
 #[tauri::command]
-pub fn cancel_login(state: State<'_, DesktopState>) -> AccountStatus {
-    auth_webview::cancel(&state.app)
-}
-
-#[tauri::command]
 pub async fn logout(state: State<'_, DesktopState>) -> Result<AccountStatus, CommandError> {
     let _ = state.bridge.stop().await;
     auth_webview::clear_web_data(&state.app);
