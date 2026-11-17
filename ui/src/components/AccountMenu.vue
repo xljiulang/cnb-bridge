@@ -211,12 +211,16 @@ onBeforeUnmount(() => {
         <footer class="account-menu-footer">
           <button
             type="button"
-            class="add-account-action"
+            class="account-choice add-account-action"
             :disabled="Boolean(busyUsername)"
             @click="scan"
           >
-            <ScanQrCode :size="16" aria-hidden="true" />
-            扫码添加账号
+            <span class="account-choice-avatar" aria-hidden="true">
+              <ScanQrCode :size="19" />
+            </span>
+            <span class="account-choice-copy">
+              <strong>扫码登录 CNB 账号</strong>
+            </span>
           </button>
         </footer>
       </section>

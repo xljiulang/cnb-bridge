@@ -925,7 +925,7 @@ small {
 }
 
 .account-menu-footer {
-  padding-top: 8px;
+  padding: 8px 4px 4px;
   border-top: 1px solid var(--line);
 }
 
@@ -933,20 +933,25 @@ small {
   display: flex;
   width: 100%;
   align-items: center;
-  gap: 9px;
-  padding: 9px 10px;
+  justify-content: flex-start;
+  gap: 11px;
+  padding: 6px 8px;
   border: 0;
   border-radius: 9px;
   background: transparent;
-  color: var(--accent-text);
-  font-size: 12px;
-  font-weight: 620;
+  color: var(--text);
   text-align: left;
 }
 
-.add-account-action:hover:not(:disabled) {
+.add-account-action .account-choice-avatar {
+  border-color: var(--accent-line);
   background: var(--accent-soft);
   color: var(--accent-text);
+}
+
+.add-account-action:hover:not(:disabled) {
+  background: var(--panel-raised);
+  color: var(--text);
 }
 
 .empty-account-title {

@@ -87,9 +87,17 @@ describe("AccountMenu", () => {
       ).disabled,
     ).toBe(true);
 
-    (
-      document.body.querySelector(".add-account-action") as HTMLElement
-    ).click();
+    const scanAction = document.body.querySelector(
+      ".add-account-action",
+    ) as HTMLElement;
+    expect(scanAction.textContent).toContain("扫码登录 CNB 账号");
+    expect(scanAction.querySelector(".account-choice-avatar")).not.toBeNull();
+    expect(scanAction.querySelector(".account-choice-copy strong")?.textContent)
+      .toBe("扫码登录 CNB 账号");
+    expect(
+      scanAction.querySelector(".account-choice-avatar .lucide-scan-qr-code"),
+    ).not.toBeNull();
+    scanAction.click();
     expect(wrapper.emitted("scan")).toHaveLength(1);
     wrapper.unmount();
   });
