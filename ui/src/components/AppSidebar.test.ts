@@ -40,22 +40,26 @@ function app(overrides: Partial<DesktopApp> = {}): DesktopApp {
 }
 
 describe("AppSidebar", () => {
-  it("shows pause icon for idle and keeps the selected navigation", async () => {
+  it("shows the account avatar, display name and status badge when connected", async () => {
     const openSettings = vi.fn();
     const wrapper = mount(AppSidebar, {
       props: { app: app({ openSettings }) },
     });
 
-    expect(wrapper.find(".status-icon .lucide-circle-pause").exists()).toBe(true);
-    expect(wrapper.text()).toContain("空闲待命");
+    expect(wrapper.get(".status-icon img").attributes("src")).toBe(
+      "https://cnb.cool/users/tester/avatar/l",
+    );
     expect(wrapper.text()).toContain("测试用户");
+    expect(wrapper.get(".sidebar-status-badge").text()).toBe("空闲待命");
+    expect(wrapper.text()).not.toContain("11233");
+    expect(wrapper.find(".status-icon .lucide-circle-pause").exists()).toBe(false);
     expect(wrapper.find("nav button.active").text()).toContain("连接");
     await wrapper.findAll("nav button")[1].trigger("click");
     expect(openSettings).toHaveBeenCalledOnce();
     wrapper.unmount();
   });
 
-  it("shows the scan icon when signed out", () => {
+  it("shows the scan icon, waiting label and signed-out status when disconnected", () => {
     const wrapper = mount(AppSidebar, {
       props: {
         app: app({
@@ -68,6 +72,44 @@ describe("AppSidebar", () => {
 
     expect(wrapper.find(".status-icon .lucide-scan-qr-code").exists()).toBe(true);
     expect(wrapper.text()).toContain("等待扫码");
+    expect(wrapper.get(".sidebar-status-badge").text()).toBe("未登录");
+    expect(wrapper.find(".status-icon img").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("11233");
     wrapper.unmount();
+  });
+
+  it("falls back to the user icon when the account avatar fails", async () => {
+    const wrapper = mount(AppSidebar, {
+      props: { app: app() },
+    });
+
+    await wrapper.get(".status-icon img").trigger("error");
+
+    expect(wrapper.find(".status-icon img").exists()).toBe(false);
+    expect(
+      wrapper.find(".status-icon .lucide-circle-user-round").exists(),
+    ).toBe(true);
+  });
+
+  it("uses the bridge status label in the badge", () => {
+    const cases = [
+      { label: "桥接就绪", icon: "live" as const },
+      { label: "建立 SSH 通道", icon: "busy" as const },
+      { label: "组织未就绪", icon: "busy" as const },
+    ];
+
+    for (const entry of cases) {
+      const wrapper = mount(AppSidebar, {
+        props: {
+          app: app({
+            statusLabel: entry.label,
+            sidebarStatusIcon: entry.icon,
+          }),
+        },
+      });
+
+      expect(wrapper.get(".sidebar-status-badge").text()).toBe(entry.label);
+      wrapper.unmount();
+    }
   });
 });

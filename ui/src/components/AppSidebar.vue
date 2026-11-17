@@ -13,6 +13,7 @@ import {
 } from "@lucide/vue";
 import appIcon from "../assets/cnb-favicon.svg";
 import type { DesktopApp } from "../composables/useDesktopApp";
+import AccountAvatar from "./AccountAvatar.vue";
 
 defineProps<{ app: DesktopApp }>();
 </script>
@@ -64,9 +65,17 @@ defineProps<{ app: DesktopApp }>();
     </nav>
 
     <div class="sidebar-status" :class="{ live: app.ready }">
-      <span class="status-icon">
+      <span
+        class="status-icon"
+        :class="{ 'status-account-avatar': app.accountConnected }"
+      >
+        <AccountAvatar
+          v-if="app.accountConnected"
+          :avatar-url="app.snapshot?.account.avatarUrl"
+          :size="18"
+        />
         <ScanQrCode
-          v-if="app.sidebarStatusIcon === 'scan'"
+          v-else-if="app.sidebarStatusIcon === 'scan'"
           :size="16"
           aria-hidden="true"
         />
@@ -94,17 +103,19 @@ defineProps<{ app: DesktopApp }>();
         <Server v-else :size="16" aria-hidden="true" />
       </span>
       <div class="status-copy">
-        <strong>{{ app.statusLabel }}</strong>
-        <small>
+        <strong>
           {{
             app.accountConnected
               ? app.snapshot?.account.displayName || "CNB 已绑定"
               : "等待扫码"
           }}
-        </small>
+        </strong>
       </div>
-      <span class="badge mono muted">
-        {{ app.snapshot?.settings.localPort ?? 11233 }}
+      <span
+        class="badge sidebar-status-badge"
+        :class="{ live: app.ready }"
+      >
+        {{ app.statusLabel }}
       </span>
     </div>
   </aside>

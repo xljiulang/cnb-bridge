@@ -278,9 +278,14 @@ button:disabled {
   width: 30px;
   height: 30px;
   place-items: center;
+  overflow: hidden;
   border-radius: 9px;
   background: rgba(255, 255, 255, 0.045);
   color: var(--muted-strong);
+}
+
+.status-icon.status-account-avatar {
+  border-radius: 50%;
 }
 
 .sidebar-status.live .status-icon {
@@ -308,6 +313,18 @@ button:disabled {
   margin-top: 3px;
   color: var(--muted);
   font-size: 11px;
+}
+
+.sidebar-status-badge {
+  justify-self: end;
+  max-width: 112px;
+  min-height: 22px;
+  overflow: hidden;
+  padding: 3px 7px;
+  font-size: 10px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .content {
