@@ -74,6 +74,7 @@ function close(returnFocus = false) {
 function choose(username: string) {
   if (props.busyUsername) return;
   emit("login", username);
+  close(true);
 }
 
 function remove(username: string) {

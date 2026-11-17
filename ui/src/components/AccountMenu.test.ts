@@ -55,20 +55,24 @@ describe("AccountMenu", () => {
     ).toBe(true);
 
     (rows[0].querySelector(".account-choice") as HTMLElement).click();
+    await wrapper.vm.$nextTick();
     expect(wrapper.emitted("login")?.[0]).toEqual(["alice"]);
-    expect(document.body.querySelector(".account-menu")).not.toBeNull();
+    expect(document.body.querySelector(".account-menu")).toBeNull();
+    expect(document.activeElement).toBe(
+      wrapper.get(".account-picker-trigger").element,
+    );
 
-    await wrapper.setProps({ busyUsername: "alice" });
-    expect(
-      (
-        document.body.querySelector(
-          '.account-choice[aria-label="使用账号 bob 登录"]',
-        ) as HTMLButtonElement
-      ).disabled,
-    ).toBe(true);
-    expect(document.body.querySelector(".account-menu .spin")).not.toBeNull();
+    await wrapper.setProps({ busyUsername: "alice", disabled: true });
+    await wrapper.get(".account-picker-trigger").trigger("click");
+    expect(document.body.querySelector(".account-menu")).toBeNull();
+    expect(wrapper.get(".account-picker-trigger").text()).toContain(
+      "正在登录…",
+    );
+    expect(wrapper.find(".account-picker-trigger .spin").exists()).toBe(true);
 
-    await wrapper.setProps({ busyUsername: null });
+    await wrapper.setProps({ busyUsername: null, disabled: false });
+    await wrapper.get(".account-picker-trigger").trigger("click");
+    await wrapper.vm.$nextTick();
     (
       document.body.querySelector(
         '.remove-saved-account[aria-label="移除账号 爱丽丝"]',

@@ -349,6 +349,7 @@ describe("App shell", () => {
 
     (accountRows[0].querySelector(".account-choice") as HTMLElement).click();
     await flushPromises();
+    expect(document.body.querySelector(".account-menu")).toBeNull();
     expect(
       calls.find((call) => call.command === "login_with_account")?.args,
     ).toEqual({ username: "alice" });
