@@ -11,6 +11,8 @@ import type {
 
 export const getSnapshot = () => invoke<AppSnapshot>("get_snapshot");
 
+export const dismissError = () => invoke<AppSnapshot>("dismiss_error");
+
 export const saveSettings = (settings: Settings) =>
   invoke<AppSnapshot>("save_settings", { settings });
 

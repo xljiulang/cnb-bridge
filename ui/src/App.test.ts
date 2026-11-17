@@ -200,6 +200,74 @@ describe("App shell", () => {
     wrapper.unmount();
   });
 
+  it("keeps a dismissed error hidden across snapshot refreshes", async () => {
+    const calls: string[] = [];
+    const failedSnapshot = {
+      ...snapshot,
+      account: {
+        ...account,
+        state: "failed",
+        error: "扫码窗口已关闭",
+      },
+    };
+    const dismissedSnapshot = {
+      ...failedSnapshot,
+      account: {
+        ...failedSnapshot.account,
+        error: null,
+      },
+    };
+    let dismissed = false;
+    let nextError: string | null = null;
+    vi.useFakeTimers();
+    mockWindows("main");
+    mockIPC(
+      (command) => {
+        calls.push(command);
+        switch (command) {
+          case "get_snapshot":
+            if (nextError) {
+              return {
+                ...dismissedSnapshot,
+                account: { ...dismissedSnapshot.account, error: nextError },
+              };
+            }
+            return dismissed ? dismissedSnapshot : failedSnapshot;
+          case "dismiss_error":
+            dismissed = true;
+            return dismissedSnapshot;
+          case "get_logs":
+          case "list_http_traces":
+          case "list_namespaces":
+            return [];
+          case "get_cnb_usage":
+            return null;
+          default:
+            return null;
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("扫码窗口已关闭");
+    await wrapper.get('[aria-label="关闭错误"]').trigger("click");
+    await flushPromises();
+    expect(calls).toContain("dismiss_error");
+    expect(wrapper.text()).not.toContain("扫码窗口已关闭");
+
+    await vi.advanceTimersByTimeAsync(1600);
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("扫码窗口已关闭");
+
+    nextError = "新的扫码错误";
+    await vi.advanceTimersByTimeAsync(1600);
+    await flushPromises();
+    expect(wrapper.text()).toContain("新的扫码错误");
+    wrapper.unmount();
+  });
+
   it("shows AI Credits amount and progress percentage separately", async () => {
     mockSnapshotIpc();
     const wrapper = mount(App);

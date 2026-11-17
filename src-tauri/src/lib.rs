@@ -46,6 +46,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_snapshot,
+            commands::dismiss_error,
             commands::save_settings,
             commands::start_login,
             commands::login_with_account,

@@ -568,6 +568,14 @@ impl AccountManager {
         status
     }
 
+    /// Clears the current account error without changing account state.
+    pub fn dismiss_error(&self) -> AccountStatus {
+        let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        status.error = None;
+        status.error_action = None;
+        status.clone()
+    }
+
     /// Marks a saved-account login as failed.
     pub fn fail_account_login(&self, username: &str, error: impl Into<String>) {
         let nickname = self
@@ -1380,5 +1388,38 @@ mod tests {
             .complete_token_login("token", Some("test-user".to_string()), None, None, None)
             .unwrap();
         assert_eq!(status.error_action, None);
+    }
+
+    #[test]
+    fn dismissing_an_account_error_preserves_the_failed_state_and_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager =
+            AccountManager::with_store(AccountStore::new(dir.path().join("account-auth.bin")));
+        manager
+            .complete_token_login(
+                "token",
+                Some("alice".to_string()),
+                Some("爱丽丝".to_string()),
+                None,
+                None,
+            )
+            .unwrap();
+        manager.logout().unwrap();
+        manager.fail_token_login_with_action(
+            "扫码窗口已关闭",
+            AccountAction {
+                label: "实名认证".to_string(),
+                url: "https://cnb.cool/profile/auth".to_string(),
+            },
+        );
+
+        let status = manager.dismiss_error();
+
+        assert_eq!(status.state, AccountState::Failed);
+        assert_eq!(status.error, None);
+        assert_eq!(status.error_action, None);
+        assert_eq!(manager.accounts().len(), 1);
+        assert_eq!(manager.accounts()[0].display_name, "爱丽丝");
+        assert!(manager.active_credentials().is_none());
     }
 }

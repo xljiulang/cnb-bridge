@@ -41,7 +41,7 @@ const app = useDesktopApp();
             type="button"
             class="icon-button"
             aria-label="关闭错误"
-            @click="app.error = null"
+            @click="app.dismissError"
           >
             <X :size="16" aria-hidden="true" />
           </button>

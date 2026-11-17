@@ -459,6 +459,11 @@ impl Bridge {
         runtime.error = None;
     }
 
+    /// Clears the current bridge error without changing its lifecycle state.
+    pub async fn dismiss_error(&self) {
+        self.runtime.lock().await.error = None;
+    }
+
     /// Refreshes the UI state after credentials are removed.
     pub async fn account_signed_out(&self) {
         let mut runtime = self.runtime.lock().await;
@@ -658,6 +663,21 @@ mod tests {
             ),
             Arc::new(Logger::new(32)),
         )
+    }
+
+    #[tokio::test]
+    async fn dismissing_a_bridge_error_preserves_the_bridge_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&temp);
+        bridge
+            .set_error(BridgeState::Failed, "扫码窗口已关闭".to_string())
+            .await;
+
+        bridge.dismiss_error().await;
+
+        let snapshot = bridge.snapshot().await;
+        assert_eq!(snapshot.state, BridgeState::Failed);
+        assert_eq!(snapshot.error, None);
     }
 
     #[test]

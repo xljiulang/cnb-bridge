@@ -33,6 +33,13 @@ pub async fn get_snapshot(state: State<'_, DesktopState>) -> Result<AppSnapshot,
 }
 
 #[tauri::command]
+pub async fn dismiss_error(state: State<'_, DesktopState>) -> Result<AppSnapshot, CommandError> {
+    state.account.dismiss_error();
+    state.bridge.dismiss_error().await;
+    state.snapshot().await
+}
+
+#[tauri::command]
 pub async fn save_settings(
     app: AppHandle,
     state: State<'_, DesktopState>,

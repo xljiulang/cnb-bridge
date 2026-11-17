@@ -10,6 +10,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   cancelLogin as cancelLoginApi,
   createCnbNamespace,
+  dismissError as dismissErrorApi,
   getCnbUsage,
   getLogs,
   getSnapshot,
@@ -307,6 +308,15 @@ export function useDesktopApp() {
         error.value = null;
       }
       if (syncDraft) applySettingsDraft(next.settings);
+    } catch (cause) {
+      error.value = formatError(cause);
+    }
+  }
+
+  async function dismissError() {
+    error.value = null;
+    try {
+      snapshot.value = await dismissErrorApi();
     } catch (cause) {
       error.value = formatError(cause);
     }
@@ -689,6 +699,7 @@ export function useDesktopApp() {
     openTrace,
     openLogsFolder,
     clearNotice,
+    dismissError,
     formatBytes,
     httpTraceLabel,
   });
