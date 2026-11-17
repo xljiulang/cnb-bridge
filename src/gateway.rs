@@ -544,7 +544,7 @@ async fn handle_chat(
             )
         }
     };
-    let (bytes, mut gate_report, normalized) = prepare_chat_request(bytes);
+    let (bytes, mut gate_report, normalized) = prepare_chat_request(bytes, &headers);
     if normalized {
         apply_headers(&mut headers, &mut gate_report);
     }
@@ -561,11 +561,11 @@ async fn handle_chat(
     traced_upstream_response(exchange.response, trace, &request_id)
 }
 
-fn prepare_chat_request(bytes: Bytes) -> (Bytes, GateReport, bool) {
+fn prepare_chat_request(bytes: Bytes, headers: &HeaderMap) -> (Bytes, GateReport, bool) {
     let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) else {
         return (bytes, GateReport::default(), false);
     };
-    let report = normalize_chat(&mut value);
+    let report = normalize_chat(&mut value, headers);
     if !report.changed() {
         return (bytes, report, true);
     }
@@ -616,7 +616,7 @@ async fn handle_responses(
     if chat.get("stream_options").is_none() {
         chat["stream_options"] = json!({ "include_usage": true });
     }
-    let mut gate_report = normalize_chat(&mut chat);
+    let mut gate_report = normalize_chat(&mut chat, &headers);
     apply_headers(&mut headers, &mut gate_report);
     let exchange = loop {
         let encoded = match serde_json::to_vec(&chat) {
@@ -1385,6 +1385,11 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
+    const HARNESS_USER_AGENT: &str = concat!(
+        "deepseek-harness/0.2.2-rc.1 ",
+        "(+https://github.com/deepseek-ai/deepseek-harness)"
+    );
+
     #[test]
     fn gateway_config_uses_request_driven_defaults() {
         let config = GatewayConfig::new(11233);
@@ -1598,6 +1603,7 @@ mod tests {
 
         let response = client
             .post(format!("{base}/v1/responses"))
+            .header(header::USER_AGENT, HARNESS_USER_AGENT)
             .json(&json!({
                 "model": "deepseek-v4.1-flash",
                 "instructions": concat!(
@@ -1622,7 +1628,7 @@ mod tests {
         assert_eq!(
             translated["messages"][0]["content"],
             concat!(
-                "WorkBuddy and WorkBuddy. ",
+                "Harness of DeepSeek and Codex. ",
                 "Paths beginning with @ refer to resources the user explicitly named. ",
                 "Relative paths are resolved from the workspace root; ",
                 "absolute paths refer to host files or directories."
@@ -1893,6 +1899,7 @@ mod tests {
                 "http://127.0.0.1:{}/v1/chat/completions",
                 gateway.port()
             ))
+            .header(header::USER_AGENT, HARNESS_USER_AGENT)
             .json(&json!({
                 "model": "deepseek-v4.1-flash",
                 "messages": [{
@@ -1913,9 +1920,9 @@ mod tests {
         let forwarded = captured.lock().unwrap().clone().unwrap();
         assert_eq!(
             forwarded["messages"][0]["content"],
-            "WorkBuddy via WorkBuddy"
+            "Codex via Harness of DeepSeek"
         );
-        assert_eq!(forwarded["messages"][1]["content"][0]["text"], "WorkBuddy");
+        assert_eq!(forwarded["messages"][1]["content"][0]["text"], "CODEX");
         assert_eq!(forwarded["messages"][2]["content"], "Codex stays");
         gateway.stop().await;
 
@@ -1923,17 +1930,108 @@ mod tests {
         let summary = store.list(1).unwrap().remove(0);
         let (request_path, response_path) = store.record_paths(&summary.id).unwrap();
         let request = std::fs::read_to_string(request_path).unwrap();
-        assert!(request.contains("WorkBuddy via WorkBuddy"));
+        assert!(request.contains("Codex via Harness of DeepSeek"));
         assert!(!request.contains("Codex via DeepSeek Harness"));
         let response = std::fs::read_to_string(response_path).unwrap();
         assert!(response.contains("\"choices\":[]"));
         upstream_task.abort();
     }
 
+    #[tokio::test]
+    async fn non_harness_user_agent_skips_profile_on_chat_and_responses() {
+        let captured = Arc::new(Mutex::new(Vec::<(HeaderMap, Value)>::new()));
+        let captured_for_upstream = Arc::clone(&captured);
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(move |headers: HeaderMap, body: Bytes| {
+                let captured = Arc::clone(&captured_for_upstream);
+                async move {
+                    captured
+                        .lock()
+                        .unwrap()
+                        .push((headers, serde_json::from_slice(&body).unwrap()));
+                    Json(json!({
+                        "id": "chatcmpl-1",
+                        "model": "deepseek-v4.1-flash",
+                        "object": "chat.completion",
+                        "choices": [{
+                            "index": 0,
+                            "message": { "role": "assistant", "content": "ok" },
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 3,
+                            "completion_tokens": 1,
+                            "total_tokens": 4
+                        }
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_port = listener.local_addr().unwrap().port();
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+        let (_temp, _bridge, gateway) = test_gateway_with_upstream(upstream_port).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{}", gateway.port());
+        let instructions = concat!(
+            "DeepSeek Harness. ",
+            "Tokens prefixed with @ are paths the user explicitly referenced. ",
+            "Relative paths resolve from the workspace root; ",
+            "absolute paths identify files or directories on the host."
+        );
+
+        let chat = client
+            .post(format!("{base}/v1/chat/completions"))
+            .header(header::USER_AGENT, "codex_vscode/0.146.0")
+            .json(&json!({
+                "model": "deepseek-v4.1-flash",
+                "messages": [{ "role": "system", "content": instructions }],
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(chat.status(), reqwest::StatusCode::OK);
+
+        let responses = client
+            .post(format!("{base}/v1/responses"))
+            .header(header::USER_AGENT, "not-deepseek-harness/1.0")
+            .json(&json!({
+                "model": "deepseek-v4.1-flash",
+                "instructions": instructions,
+                "input": "hello",
+                "stream": false
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(responses.status(), reqwest::StatusCode::OK);
+
+        {
+            let captured = captured.lock().unwrap();
+            assert_eq!(captured.len(), 2);
+            for (headers, body) in captured.iter() {
+                assert_eq!(
+                    headers.get(header::USER_AGENT).unwrap(),
+                    crate::prompt_gate::WORKBUDDY_USER_AGENT
+                );
+                assert_eq!(body["messages"][0]["content"], instructions);
+            }
+        }
+
+        gateway.stop().await;
+        upstream_task.abort();
+    }
+
     #[test]
     fn non_json_chat_bodies_are_not_reencoded() {
         let body = Bytes::from_static(b"Codex is not JSON");
-        let (prepared, report, normalized) = prepare_chat_request(body.clone());
+        let headers = HeaderMap::new();
+        let (prepared, report, normalized) = prepare_chat_request(body.clone(), &headers);
         assert_eq!(prepared, body);
         assert!(!report.changed());
         assert!(!normalized);
@@ -2077,7 +2175,7 @@ mod tests {
                 "http://127.0.0.1:{}/v1/chat/completions",
                 gateway.port()
             ))
-            .header(header::USER_AGENT, "deepseek-harness/0.2.1-rc.5")
+            .header(header::USER_AGENT, HARNESS_USER_AGENT)
             .json(&json!({
                 "model": "deepseek-v4.1-flash",
                 "messages": [{
@@ -2109,7 +2207,7 @@ mod tests {
         assert_eq!(
             body["messages"][0]["content"],
             concat!(
-                "WorkBuddy and WorkBuddy. ",
+                "Harness of DeepSeek and Codex. ",
                 "Paths beginning with @ refer to resources the user explicitly named. ",
                 "Relative paths are resolved from the workspace root; ",
                 "absolute paths refer to host files or directories."

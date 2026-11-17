@@ -63,6 +63,7 @@ impl GateReport {
 
 struct GateProfile {
     id: &'static str,
+    user_agent_products: &'static [&'static str],
     rules: &'static [GateRule],
 }
 
@@ -70,39 +71,38 @@ enum GateRule {
     BrandBoundary {
         id: &'static str,
         terms: &'static [&'static str],
+        replacement: &'static str,
     },
     PathInstructions {
         id: &'static str,
     },
 }
 
-const PROFILES: &[GateProfile] = &[
-    GateProfile {
-        id: "harness",
-        rules: &[
-            GateRule::BrandBoundary {
-                id: "harness/brand",
-                terms: &["DeepSeek Harness"],
-            },
-            GateRule::PathInstructions {
-                id: "harness/path-instructions",
-            },
-        ],
-    },
-    GateProfile {
-        id: "codex",
-        rules: &[GateRule::BrandBoundary {
-            id: "codex/brand",
-            terms: &["Codex"],
-        }],
-    },
-];
+const PROFILES: &[GateProfile] = &[GateProfile {
+    id: "harness",
+    user_agent_products: &["deepseek-harness"],
+    rules: &[
+        GateRule::BrandBoundary {
+            id: "harness/brand",
+            terms: &["DeepSeek Harness"],
+            replacement: "Harness of DeepSeek",
+        },
+        GateRule::PathInstructions {
+            id: "harness/path-instructions",
+        },
+    ],
+}];
 
-/// Applies all registered profiles to system/developer message text and maps
-/// the `developer` role to `system`, which the upstream channel accepts.
-pub(crate) fn normalize_chat(body: &mut Value) -> GateReport {
+/// Applies User-Agent-matched profiles to system/developer message text and
+/// maps the `developer` role to `system`, which the upstream channel accepts.
+pub(crate) fn normalize_chat(body: &mut Value, headers: &HeaderMap) -> GateReport {
     let mut report = GateReport::default();
-    for profile in PROFILES {
+    let user_agent_product = user_agent_product(headers);
+    let profiles = PROFILES
+        .iter()
+        .filter(|profile| profile.matches(user_agent_product))
+        .collect::<Vec<_>>();
+    for profile in &profiles {
         report.profiles.push(profile.id);
     }
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
@@ -127,41 +127,64 @@ pub(crate) fn normalize_chat(body: &mut Value) -> GateReport {
         let Some(content) = message.get_mut("content") else {
             continue;
         };
-        normalize_content(content, &mut report);
+        normalize_content(content, &profiles, &mut report);
     }
     report.record_hit(DEVELOPER_ROLE_RULE, converted_roles);
     report
 }
 
-fn normalize_content(content: &mut Value, report: &mut GateReport) {
+impl GateProfile {
+    fn matches(&self, user_agent_product: Option<&str>) -> bool {
+        user_agent_product.is_some_and(|product| {
+            self.user_agent_products
+                .iter()
+                .any(|expected| product.eq_ignore_ascii_case(expected))
+        })
+    }
+}
+
+fn user_agent_product(headers: &HeaderMap) -> Option<&str> {
+    let user_agent = headers.get(header::USER_AGENT)?.to_str().ok()?;
+    let product = user_agent
+        .split_once('/')
+        .map_or(user_agent, |(product, _)| product)
+        .trim();
+    (!product.is_empty()).then_some(product)
+}
+
+fn normalize_content(content: &mut Value, profiles: &[&GateProfile], report: &mut GateReport) {
     match content {
-        Value::String(text) => normalize_text(text, report),
+        Value::String(text) => normalize_text(text, profiles, report),
         Value::Array(parts) => {
             for part in parts {
-                normalize_content(part, report);
+                normalize_content(part, profiles, report);
             }
         }
         Value::Object(object) => {
             if let Some(text) = object.get_mut("text") {
-                normalize_content(text, report);
+                normalize_content(text, profiles, report);
             }
             if let Some(content) = object.get_mut("content") {
-                normalize_content(content, report);
+                normalize_content(content, profiles, report);
             }
         }
         _ => {}
     }
 }
 
-fn normalize_text(text: &mut String, report: &mut GateReport) {
-    for profile in PROFILES {
+fn normalize_text(text: &mut String, profiles: &[&GateProfile], report: &mut GateReport) {
+    for profile in profiles {
         for rule in profile.rules {
             match rule {
-                GateRule::BrandBoundary { id, terms } => {
+                GateRule::BrandBoundary {
+                    id,
+                    terms,
+                    replacement,
+                } => {
                     let mut count = 0;
                     for term in *terms {
                         let (rewritten, matches) =
-                            replace_at_ascii_letter_boundaries(text, term, "WorkBuddy");
+                            replace_at_ascii_letter_boundaries(text, term, replacement);
                         if matches > 0 {
                             *text = rewritten;
                             count += matches;
@@ -277,8 +300,22 @@ mod tests {
     use axum::http::{header, HeaderMap, HeaderValue};
     use serde_json::json;
 
+    const HARNESS_USER_AGENT: &str = concat!(
+        "deepseek-harness/0.2.2-rc.1 ",
+        "(+https://github.com/deepseek-ai/deepseek-harness)"
+    );
+
+    fn headers_with_user_agent(user_agent: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::USER_AGENT,
+            HeaderValue::from_str(user_agent).unwrap(),
+        );
+        headers
+    }
+
     #[test]
-    fn applies_all_brand_profiles_in_order_and_reports_rule_hits() {
+    fn applies_harness_profile_and_reports_rule_hits() {
         let mut body = json!({
             "messages": [{
                 "role": "system",
@@ -290,22 +327,23 @@ mod tests {
                 )
             }]
         });
+        let headers = headers_with_user_agent(HARNESS_USER_AGENT);
 
-        let report = normalize_chat(&mut body);
+        let report = normalize_chat(&mut body, &headers);
 
         assert_eq!(
             body["messages"][0]["content"],
             concat!(
-                "WorkBuddy and WorkBuddy. ",
+                "Harness of DeepSeek and Codex. ",
                 "Paths beginning with @ refer to resources the user explicitly named. ",
                 "Relative paths are resolved from the workspace root; ",
                 "absolute paths refer to host files or directories."
             )
         );
-        assert_eq!(report.profile_order(), ["harness", "codex"]);
+        assert_eq!(report.profile_order(), ["harness"]);
         assert_eq!(report.hit_count("harness/brand"), 1);
         assert_eq!(report.hit_count("harness/path-instructions"), 1);
-        assert_eq!(report.hit_count("codex/brand"), 1);
+        assert_eq!(report.hit_count("codex/brand"), 0);
     }
 
     #[test]
@@ -328,16 +366,17 @@ mod tests {
                 "content": "Codex"
             }]
         });
+        let headers = headers_with_user_agent(HARNESS_USER_AGENT);
 
-        normalize_chat(&mut body);
+        normalize_chat(&mut body, &headers);
 
         assert_eq!(
             body["messages"][0]["content"][0]["text"],
-            "WorkBuddy WorkBuddy中文 WorkBuddy2 codexui opencode myCodex"
+            "Codex CODEX中文 Codex2 codexui opencode myCodex"
         );
         assert_eq!(
             body["messages"][0]["content"][1]["text"],
-            "WorkBuddy XDeepSeek Harness DeepSeek HarnessY"
+            "Harness of DeepSeek XDeepSeek Harness DeepSeek HarnessY"
         );
         assert_eq!(body["messages"][1]["content"], "Codex DeepSeek Harness");
         assert_eq!(body["messages"][2]["content"], "Codex");
@@ -358,8 +397,9 @@ mod tests {
                 "content": "Answer briefly."
             }]
         });
+        let headers = HeaderMap::new();
 
-        let report = normalize_chat(&mut body);
+        let report = normalize_chat(&mut body, &headers);
 
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][1]["role"], "user");
@@ -375,13 +415,97 @@ mod tests {
                 "content": "DeepSeek Harness Codex"
             }]
         });
-        let first = normalize_chat(&mut body);
+        let headers = headers_with_user_agent(HARNESS_USER_AGENT);
+        let first = normalize_chat(&mut body, &headers);
         let once = body.clone();
-        let second = normalize_chat(&mut body);
+        let second = normalize_chat(&mut body, &headers);
 
         assert!(first.changed());
         assert!(!second.changed());
         assert_eq!(body, once);
+    }
+
+    #[test]
+    fn selects_harness_profile_only_for_exact_user_agent_product() {
+        let cases = [
+            (HARNESS_USER_AGENT, true),
+            ("DEEPSEEK-HARNESS/0.2.2", true),
+            ("deepseek-harness", true),
+            ("not-deepseek-harness/1.0", false),
+            ("deepseek-harness-extra/1.0", false),
+            ("codex_vscode/0.146.0", false),
+            ("Mozilla/5.0 compatible; deepseek-harness/1.0", false),
+            ("", false),
+        ];
+
+        for (user_agent, should_match) in cases {
+            let mut body = json!({
+                "messages": [{
+                    "role": "system",
+                    "content": "DeepSeek Harness"
+                }]
+            });
+            let headers = headers_with_user_agent(user_agent);
+
+            let report = normalize_chat(&mut body, &headers);
+
+            assert_eq!(
+                report.profile_order(),
+                if should_match {
+                    &["harness"][..]
+                } else {
+                    &[][..]
+                },
+                "unexpected profile selection for User-Agent {user_agent:?}"
+            );
+            assert_eq!(
+                body["messages"][0]["content"],
+                if should_match {
+                    "Harness of DeepSeek"
+                } else {
+                    "DeepSeek Harness"
+                },
+                "unexpected body normalization for User-Agent {user_agent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_invalid_user_agent_for_profile_selection() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::USER_AGENT,
+            HeaderValue::from_bytes(&[0xff]).unwrap(),
+        );
+        let mut body = json!({
+            "messages": [{
+                "role": "system",
+                "content": "DeepSeek Harness"
+            }]
+        });
+
+        let report = normalize_chat(&mut body, &headers);
+
+        assert!(report.profile_order().is_empty());
+        assert_eq!(body["messages"][0]["content"], "DeepSeek Harness");
+    }
+
+    #[test]
+    fn keeps_developer_role_rule_global_without_harness_profile() {
+        let headers = headers_with_user_agent("codex_vscode/0.146.0");
+        let mut body = json!({
+            "messages": [{
+                "role": "developer",
+                "content": "DeepSeek Harness"
+            }]
+        });
+
+        let report = normalize_chat(&mut body, &headers);
+
+        assert!(report.profile_order().is_empty());
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][0]["content"], "DeepSeek Harness");
+        assert_eq!(report.hit_count("gate/developer-role"), 1);
     }
 
     #[test]

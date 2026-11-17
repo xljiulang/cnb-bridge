@@ -46,13 +46,12 @@ agent 从云会话继承 `CNB_TOKEN`，只监听 loopback。客户端侧传入�
 
 ## PromptGate 兼容层
 
-客户端的 Chat/Responses 请求在发往 workspace agent 前会执行编译内置的品牌 profile：
+客户端的 Chat/Responses 请求在发往 workspace agent 前会解析原始 `User-Agent`，并按产品选择编译内置门禁：
 
-- `harness`：处理 DeepSeek Harness 品牌和已确认会触发上游 `11128` 的 `@` 路径提示句。
-- `codex`：处理 Codex 品牌，并为未来 Codex 专属规则保留独立 profile。
+- `harness`：仅当 `User-Agent` 的产品 token 为 `deepseek-harness` 时启用，将 `DeepSeek Harness` 品牌表达改为 `Harness of DeepSeek`，并处理已确认会触发上游 `11128` 的 `@` 路径提示句。产品 token 取首个 `/` 前的内容并精确匹配，ASCII 大小写不敏感。
 - `gate/developer-role`：把消息里的 `developer` 角色改写为 `system`。实测携带 `developer` 的 Chat 请求会被上游以 `11128` 拒绝，改成 `system` 后可以通过。
 
-所有 profile 按 `harness`、`codex` 顺序执行，仅修改 system/developer 提示并统一角色名，不修改用户消息、工具参数或模型输出。规则幂等，可安全重复执行。
+多个匹配 profile 按注册顺序执行；未匹配时不修改品牌或路径文本。`developer` 角色改写保持全局生效。新增品牌门禁时只需注册目标 UA 产品和规则，无需修改 Chat/Responses 调用链。规则幂等，可安全重复执行。
 
 发往上游的 User-Agent 会统一覆盖为 `WorkBuddy/<客户端版本>`，当前版本为 `WorkBuddy/0.1.0`。Authorization、Cookie、会话头和其他客户端头保持不变。
 
