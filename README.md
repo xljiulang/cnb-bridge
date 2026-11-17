@@ -101,13 +101,13 @@ cargo build --release -p cnb-bridge-desktop --features custom-protocol
 iscc installer\cnb-bridge.iss
 ```
 
-仓库内固定包含安装包所需的 `installer\runtime\vcruntime140.dll`、`installer\languages\ChineseSimplified.isl` 和 `installer\assets\cnb-bridge.ico`。本地与 CI 打包都不依赖系统 Inno Setup 语言目录，安装器、快捷方式和卸载信息统一使用项目图标。
+仓库内固定包含安装包所需的 `installer\runtime\vcruntime140.dll`、`installer\languages\ChineseSimplified.isl` 和 `installer\assets\cnb-bridge.ico`。本地与 CI 打包都不依赖系统 Inno Setup 语言目录，安装器、快捷方式和卸载信息统一使用项目图标。新安装默认创建桌面快捷方式。
 
 ## GitHub Actions 手动打包
 
 在 GitHub Actions 中打开 `Package Windows Installer` 工作流并点击 `Run workflow`。工作流会执行前端与 Rust 测试、构建 release 客户端、编译简体中文 Inno Setup 安装包，并验证安装目录包含 `cnb-bridge.exe`、`vcruntime140.dll` 和 `app.ico`。
 
-安装和升级前会通过 `--shutdown-for-update` 优雅停止正在运行的客户端，替换完成后恢复启动；卸载前也会停止客户端并清理开机启动注册项。安装器不再检测 WebView2，也不会显示语言选择，只使用项目内简体中文。
+安装和升级前会通过 `--shutdown-for-update` 优雅停止正在运行的客户端，替换完成后保持关闭；完成页可通过默认不勾选的“运行cnb-bridge”立即启动。升级时会为已有开机启动注册项补充 `--autostart` 参数，卸载前也会停止客户端并清理开机启动注册项。安装器不再检测 WebView2，也不会显示语言选择，只使用项目内简体中文。
 
 成功后可下载名为 `cnb-bridge-v<version>-windows-x64-setup` 的 Artifact，其中只包含 `cnb-bridge-v<version>-windows-x64-setup.exe`。
 
@@ -126,7 +126,7 @@ $env:PATH = "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\C
 5. 客户端启动后只运行本机网关，不会立即启动 CNB 工作空间。
 6. 把任意 OpenAI 兼容客户端的 base URL 指向 `http://127.0.0.1:11233/v1`；首个请求会按需创建或连接工作空间。
 7. 最后一次请求结束 5 分钟后关闭 SSH 隧道，之后由 CNB 默认空闲规则回收工作空间。
-8. 关闭窗口固定最小化到托盘；托盘“退出客户端”只关闭本地资源，云主机由 CNB 稍后回收。
+8. 登录 Windows 自动启动时保持隐藏并驻留托盘；手动启动显示主窗口，关闭窗口固定最小化到托盘。托盘“退出客户端”只关闭本地资源，云主机由 CNB 稍后回收。
 
 ## 配置
 

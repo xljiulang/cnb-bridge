@@ -2,6 +2,7 @@
 #define MyAppExeName "cnb-bridge.exe"
 #define MyAppGuid "{7D6E6A92-3C6D-4B5E-BF1F-0C0B1D6E0001}"
 #define AppMutexName "Local\cool.cnb.bridge.desktop"
+#define AutostartArg "--autostart"
 
 #ifndef MyAppVersion
   #define MyAppVersion "0.1.0"
@@ -55,7 +56,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Name: "chinesesimp"; MessagesFile: "languages\ChineseSimplified.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加图标："; Flags: unchecked
+Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加图标："
 
 [Files]
 Source: "{#SourceDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
@@ -69,12 +70,9 @@ Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"; IconFilename: "
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\app.ico"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent; Check: ShouldOfferLaunch
+Filename: "{app}\{#MyAppExeName}"; Description: "运行cnb-bridge"; Flags: nowait postinstall skipifsilent unchecked
 
 [Code]
-var
-  AppWasRunning: Boolean;
-
 function IsApplicationRunning: Boolean;
 begin
   Result := CheckForMutexes('{#AppMutexName}');
@@ -82,6 +80,7 @@ end;
 
 function StopRunningApplication: String;
 var
+  AppWasRunning: Boolean;
   ExePath: String;
   ResultCode: Integer;
   Index: Integer;
@@ -113,8 +112,6 @@ begin
     ewWaitUntilTerminated,
     ResultCode
   );
-  if ResultCode = 0 then
-    AppWasRunning := True;
 
   for Index := 1 to 25 do
   begin
@@ -126,29 +123,41 @@ begin
   Result := '无法关闭正在运行的 {#MyAppName}。请从系统托盘退出应用后重试。';
 end;
 
+procedure UpdateAutostartRegistration;
+var
+  RunValue: String;
+  UpdatedValue: String;
+begin
+  if not RegQueryStringValue(
+    HKCU,
+    'Software\Microsoft\Windows\CurrentVersion\Run',
+    '{#MyAppName}',
+    RunValue
+  ) then
+    Exit;
+
+  if Pos(' {#AutostartArg}', ' ' + RunValue) > 0 then
+    Exit;
+
+  UpdatedValue :=
+    '"' + ExpandConstant('{app}\{#MyAppExeName}') + '" {#AutostartArg}';
+  RegWriteStringValue(
+    HKCU,
+    'Software\Microsoft\Windows\CurrentVersion\Run',
+    '{#MyAppName}',
+    UpdatedValue
+  );
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := StopRunningApplication;
 end;
 
-function ShouldOfferLaunch: Boolean;
-begin
-  Result := not AppWasRunning;
-end;
-
 procedure CurStepChanged(CurStep: TSetupStep);
-var
-  ResultCode: Integer;
 begin
-  if (CurStep = ssPostInstall) and AppWasRunning then
-    Exec(
-      ExpandConstant('{app}\{#MyAppExeName}'),
-      '',
-      ExpandConstant('{app}'),
-      SW_SHOWNORMAL,
-      ewNoWait,
-      ResultCode
-    );
+  if CurStep = ssPostInstall then
+    UpdateAutostartRegistration;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

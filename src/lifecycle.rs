@@ -1,7 +1,17 @@
 //! Desktop lifecycle coordination used by the Windows installer.
 
 pub const APP_MUTEX_NAME: &str = r"Local\cool.cnb.bridge.desktop";
+pub const AUTOSTART_ARG: &str = "--autostart";
 pub const SHUTDOWN_FOR_UPDATE_ARG: &str = "--shutdown-for-update";
+
+/// Returns true only when the autostart argument is present.
+pub fn is_autostart<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    has_argument(args, AUTOSTART_ARG)
+}
 
 /// Returns true only when the installer shutdown argument is present.
 pub fn is_shutdown_for_update<I, S>(args: I) -> bool
@@ -9,9 +19,17 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
+    has_argument(args, SHUTDOWN_FOR_UPDATE_ARG)
+}
+
+fn has_argument<I, S>(args: I, expected: &str) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     args.into_iter()
         .skip(1)
-        .any(|argument| argument.as_ref() == SHUTDOWN_FOR_UPDATE_ARG)
+        .any(|argument| argument.as_ref() == expected)
 }
 
 #[cfg(windows)]

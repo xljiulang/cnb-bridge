@@ -94,9 +94,43 @@ jobs:
           if ($iss -notmatch [regex]::Escape('--shutdown-for-update')) {
             throw "Installer graceful shutdown argument is missing"
           }
+          if ($iss -notmatch [regex]::Escape('--autostart')) {
+            throw "Installer autostart argument migration is missing"
+          }
+          if ($iss -notmatch 'UpdateAutostartRegistration') {
+            throw "Installer autostart registration migration is missing"
+          }
+          if ($iss -match 'ShouldOfferLaunch') {
+            throw "Installer still contains the obsolete launch condition"
+          }
+          if ($iss -match 'SW_SHOWNORMAL') {
+            throw "Installer still automatically restarts the application"
+          }
+
+          $desktopTask = [regex]::Match(
+            $iss,
+            '(?m)^Name:\s*"desktopicon"[^\r\n]*'
+          )
+          if (-not $desktopTask.Success) {
+            throw "Installer desktop shortcut task is missing"
+          }
+          if ($desktopTask.Value -match '(?i)\bunchecked\b') {
+            throw "Installer desktop shortcut task must be checked by default"
+          }
+
+          $runEntry = [regex]::Match(
+            $iss,
+            '(?m)^Filename:[^\r\n]*Description:\s*"运行cnb-bridge"[^\r\n]*'
+          )
+          if (-not $runEntry.Success) {
+            throw "Installer post-install run option is missing"
+          }
+          if ($runEntry.Value -notmatch '(?i)\bunchecked\b') {
+            throw "Installer post-install run option must be unchecked by default"
+          }
+
           foreach ($marker in @(
             'taskkill.exe',
-            'ShouldOfferLaunch',
             'Software\Microsoft\Windows\CurrentVersion\Run',
             'StartupApproved\Run'
           )) {
@@ -205,11 +239,33 @@ jobs:
           $icon.Dispose()
 
           $installDir = Join-Path $env:RUNNER_TEMP "cnb-bridge-install-${{ github.run_id }}"
+          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+          $startupApprovedKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+          $legacyExecutable = Join-Path $env:RUNNER_TEMP "legacy-cnb-bridge\cnb-bridge.exe"
+          $startupApprovedValue = [byte[]](
+            0x02, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00
+          )
+          New-Item -Path $runKey -Force | Out-Null
+          New-Item -Path $startupApprovedKey -Force | Out-Null
+          New-ItemProperty `
+            -Path $runKey `
+            -Name "CNB Bridge" `
+            -Value "`"$legacyExecutable`"" `
+            -PropertyType String `
+            -Force | Out-Null
+          New-ItemProperty `
+            -Path $startupApprovedKey `
+            -Name "CNB Bridge" `
+            -Value $startupApprovedValue `
+            -PropertyType Binary `
+            -Force | Out-Null
+
           $arguments = @(
             "/VERYSILENT"
             "/SUPPRESSMSGBOXES"
             "/NORESTART"
-            "/NOICONS"
             "/LANG=chinesesimp"
             "/DIR=$installDir"
           )
@@ -223,6 +279,30 @@ jobs:
             if (-not (Test-Path -LiteralPath $installedFile -PathType Leaf)) {
               throw "Installer did not install $file"
             }
+          }
+
+          $desktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "CNB Bridge.lnk"
+          if (-not (Test-Path -LiteralPath $desktopShortcut -PathType Leaf)) {
+            throw "Installer did not create the default desktop shortcut"
+          }
+
+          $installedExecutable = Join-Path $installDir "cnb-bridge.exe"
+          $expectedRunValue = "`"$installedExecutable`" --autostart"
+          $migratedRunValue = (Get-ItemProperty -Path $runKey -Name "CNB Bridge")."CNB Bridge"
+          if ($migratedRunValue -ne $expectedRunValue) {
+            throw "Installer did not migrate the autostart command: $migratedRunValue"
+          }
+
+          $migratedApprovedValue = (Get-ItemProperty -Path $startupApprovedKey -Name "CNB Bridge")."CNB Bridge"
+          if (-not [System.Linq.Enumerable]::SequenceEqual(
+            [byte[]]$migratedApprovedValue,
+            $startupApprovedValue
+          )) {
+            throw "Installer changed the Windows Startup Apps enabled state"
+          }
+
+          if (Get-Process -Name "cnb-bridge" -ErrorAction SilentlyContinue) {
+            throw "Silent installation unexpectedly launched cnb-bridge"
           }
 
       - name: Upload installer

@@ -3,7 +3,6 @@ mod commands;
 mod state;
 mod tray;
 
-use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
 
 pub use state::{AppSnapshot, DesktopState};
@@ -15,11 +14,11 @@ pub fn run() {
                 state::exit_with_shutdown(app.clone());
                 return;
             }
-            show_main_window(app);
+            tray::show_main_window(app);
         }))
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
-            None,
+            Some(vec![cnb_bridge::lifecycle::AUTOSTART_ARG]),
         ))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -31,6 +30,9 @@ pub fn run() {
             }
             tray::setup(app)?;
             state::initialize(app, lifecycle_mutex)?;
+            if !cnb_bridge::lifecycle::is_autostart(std::env::args()) {
+                tray::show_main_window(app.handle());
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -61,12 +63,4 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run CNB Bridge");
-}
-
-fn show_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-    }
 }

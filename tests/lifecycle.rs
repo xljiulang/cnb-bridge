@@ -1,4 +1,11 @@
-use cnb_bridge::lifecycle::{is_shutdown_for_update, APP_MUTEX_NAME};
+use cnb_bridge::lifecycle::{is_autostart, is_shutdown_for_update, APP_MUTEX_NAME, AUTOSTART_ARG};
+
+#[test]
+fn recognizes_only_the_autostart_argument() {
+    assert!(is_autostart(["cnb-bridge.exe", AUTOSTART_ARG]));
+    assert!(!is_autostart(["cnb-bridge.exe", "--autostart-extra"]));
+    assert!(!is_autostart(["cnb-bridge.exe"]));
+}
 
 #[test]
 fn recognizes_only_the_installer_shutdown_argument() {
