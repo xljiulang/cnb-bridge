@@ -98,7 +98,7 @@ defineProps<{ app: DesktopApp }>();
         <small>
           {{
             app.accountConnected
-              ? app.snapshot?.account.username || "CNB 已绑定"
+              ? app.snapshot?.account.displayName || "CNB 已绑定"
               : "等待扫码"
           }}
         </small>

@@ -248,7 +248,7 @@ export function useDesktopApp() {
     return [
       {
         label: "CNB 账号",
-        detail: snapshot.value?.account.username || "等待扫码绑定",
+        detail: snapshot.value?.account.displayName || "等待扫码绑定",
         tone: accountDone
           ? "done"
           : accountState.value === "failed"
@@ -370,7 +370,10 @@ export function useDesktopApp() {
 
   async function removeSavedAccount(username: string) {
     if (busy.value) return;
-    if (!window.confirm(`确认从本机移除账号 ${username}？`)) return;
+    const displayName =
+      accounts.value.find((account) => account.username === username)
+        ?.displayName || username;
+    if (!window.confirm(`确认从本机移除账号 ${displayName}？`)) return;
     await run(() => removeAccountApi(username), "账号已移除");
   }
 

@@ -173,6 +173,13 @@ impl Bridge {
                 return Err(BridgeError::Api(error));
             }
         };
+        if let Err(error) = self
+            .account
+            .update_profile_nickname(&user.username, Some(&user.nickname))
+        {
+            self.logger
+                .log("warn", format!("保存 CNB 昵称失败: {error}"));
+        }
         self.runtime.lock().await.username = Some(user.username.clone());
         let organization_result = {
             let _organization_transition = self.organization_transition.lock().await;
@@ -534,6 +541,13 @@ impl Bridge {
         let _organization_transition = self.organization_transition.lock().await;
         let token = self.account.access_token().await?;
         let user = self.api.current_user(&token).await?;
+        if let Err(error) = self
+            .account
+            .update_profile_nickname(&user.username, Some(&user.nickname))
+        {
+            self.logger
+                .log("warn", format!("保存 CNB 昵称失败: {error}"));
+        }
         self.ensure_organization_for(&token, &user.username).await
     }
 
@@ -668,6 +682,7 @@ mod tests {
                 "token",
                 Some("alice".to_string()),
                 None,
+                None,
                 Some(AccountBridgeSettings {
                     repo_namespace: "alice-team".to_string(),
                     repo_name: "alice-bridge".to_string(),
@@ -735,10 +750,10 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/user"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "username": "cnb.new-user" })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "username": "cnb.new-user",
+                "nickname": "新用户"
+            })))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -773,7 +788,7 @@ mod tests {
         let account =
             AccountManager::with_store(AccountStore::new(temp.path().join("account.bin")));
         account
-            .complete_token_login("token", Some("cnb.new-user".to_string()), None, None)
+            .complete_token_login("token", Some("cnb.new-user".to_string()), None, None, None)
             .unwrap();
         account.set_needs_organization(true);
         let mut bridge = Bridge::new(
@@ -790,5 +805,6 @@ mod tests {
         bridge.ensure_account_organization().await.unwrap();
 
         assert!(!account.status().needs_organization);
+        assert_eq!(account.status().display_name.as_deref(), Some("新用户"));
     }
 }

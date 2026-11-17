@@ -23,6 +23,8 @@ export type BridgeState =
 export interface AccountStatus {
   state: AccountState;
   username?: string | null;
+  displayName?: string | null;
+  avatarUrl?: string | null;
   authMethod?: AuthMethod | null;
   error?: string | null;
   errorAction?: AccountAction | null;
@@ -31,6 +33,8 @@ export interface AccountStatus {
 
 export interface SavedAccount {
   username: string;
+  displayName: string;
+  avatarUrl?: string | null;
   lastLoginAt: number;
   active: boolean;
 }

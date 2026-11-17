@@ -20,6 +20,7 @@ import {
   formatInputModalities,
 } from "../format";
 import type { DesktopApp } from "../composables/useDesktopApp";
+import AccountAvatar from "./AccountAvatar.vue";
 import AccountMenu from "./AccountMenu.vue";
 
 defineProps<{ app: DesktopApp }>();
@@ -89,11 +90,14 @@ defineProps<{ app: DesktopApp }>();
           <div class="account-head">
             <div class="account-main">
               <span v-if="app.accountConnected" class="account-avatar">
-                <CircleUserRound :size="23" aria-hidden="true" />
+                <AccountAvatar
+                  :avatar-url="app.snapshot?.account.avatarUrl"
+                  :size="23"
+                />
               </span>
               <div v-if="app.accountConnected">
                 <span class="card-label">CNB 账号</span>
-                <strong>{{ app.snapshot?.account.username }}</strong>
+                <strong>{{ app.snapshot?.account.displayName }}</strong>
               </div>
               <AccountMenu
                 v-else-if="app.accounts.length"
@@ -146,7 +150,7 @@ defineProps<{ app: DesktopApp }>();
           >
             {{
               app.creatingOrganization
-                ? `正在为账号 ${app.snapshot?.account.username || ""} 自动创建 CNB 根组织…`
+                ? `正在为账号 ${app.snapshot?.account.displayName || ""} 自动创建 CNB 根组织…`
                 : "CNB 根组织尚未就绪。系统会自动使用当前账号名创建组织。"
             }}
           </p>

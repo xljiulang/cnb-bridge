@@ -137,7 +137,16 @@ fn ensure_organization_on_startup(bridge: Arc<Bridge>, app: AppHandle) {
         };
         let api = cnb_bridge::api::CnbApi::new();
         match api.current_user(&token).await {
-            Ok(user) if user.username.eq_ignore_ascii_case(&username) => {}
+            Ok(user) if user.username.eq_ignore_ascii_case(&username) => {
+                if let Err(error) = state
+                    .account
+                    .update_profile_nickname(&username, Some(&user.nickname))
+                {
+                    state
+                        .logger
+                        .log("warn", format!("启动时保存 CNB 昵称失败: {error}"));
+                }
+            }
             Ok(_) => {
                 invalidate_restored_account(&app, &username, "保存的账号与凭据不匹配");
                 return;

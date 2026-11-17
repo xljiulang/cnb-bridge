@@ -159,6 +159,7 @@ async fn authorize(
         .list_owned_namespaces(&pat.token)
         .await
         .map_err(|error| format!("PAT 无法检查 CNB Owner 组织，请重新扫码重试: {error}"))?;
+    let nickname = (!user.nickname.trim().is_empty()).then_some(user.nickname);
     let username = (!user.username.trim().is_empty()).then_some(user.username);
     if username.is_none() {
         return Err("PAT 已就绪，但 CNB 未返回账号名，请重新扫码重试"
@@ -197,6 +198,7 @@ async fn authorize(
     Ok(AuthorizationResult {
         pat,
         username,
+        nickname,
         needs_organization,
         reused_pat: reused,
     })
@@ -205,6 +207,7 @@ async fn authorize(
 struct AuthorizationResult {
     pat: CreatedPat,
     username: Option<String>,
+    nickname: Option<String>,
     needs_organization: bool,
     reused_pat: bool,
 }
@@ -271,6 +274,7 @@ async fn complete_authorized_pat(
     account.complete_token_login(
         authorized.pat.token.clone(),
         authorized.username.clone(),
+        authorized.nickname.clone(),
         new_token_id.clone(),
         None,
     )?;
@@ -362,6 +366,7 @@ mod tests {
             .complete_token_login(
                 "saved-token",
                 Some("alice".to_string()),
+                None,
                 Some("existing-id".to_string()),
                 None,
             )
@@ -583,6 +588,7 @@ mod tests {
             .complete_token_login(
                 "expired-token",
                 Some("alice".to_string()),
+                None,
                 Some("existing-id".to_string()),
                 None,
             )
@@ -650,6 +656,7 @@ mod tests {
             .complete_token_login(
                 "old-token",
                 Some("alice".to_string()),
+                None,
                 Some("old-id".to_string()),
                 None,
             )
@@ -665,6 +672,7 @@ mod tests {
                     git_username: "cnb".to_string(),
                 },
                 username: Some("alice".to_string()),
+                nickname: Some("Alice 昵称".to_string()),
                 needs_organization: false,
                 reused_pat: false,
             },
@@ -674,6 +682,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(status.state, AccountState::Connected);
+        assert_eq!(status.display_name.as_deref(), Some("Alice 昵称"));
         let credentials = account.credentials_for("alice").unwrap();
         assert_eq!(credentials.access_token, "new-token");
         assert_eq!(credentials.token_id.as_deref(), Some("new-id"));

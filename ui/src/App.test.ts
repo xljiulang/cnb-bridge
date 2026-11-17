@@ -6,6 +6,8 @@ import App from "./App.vue";
 const account = {
   state: "connected",
   username: "tester",
+  displayName: "Tester 昵称",
+  avatarUrl: "https://cnb.cool/users/tester/avatar/l",
   authMethod: "personalAccessToken",
   error: null,
   needsOrganization: false,
@@ -54,6 +56,8 @@ const signedOutSnapshot = {
     ...account,
     state: "signedOut",
     username: null,
+    displayName: null,
+    avatarUrl: null,
   },
   bridge: {
     ...snapshot.bridge,
@@ -62,17 +66,23 @@ const signedOutSnapshot = {
       ...account,
       state: "signedOut",
       username: null,
+      displayName: null,
+      avatarUrl: null,
     },
     username: null,
   },
   accounts: [
     {
       username: "alice",
+      displayName: "爱丽丝",
+      avatarUrl: "https://cnb.cool/users/alice/avatar/l",
       lastLoginAt: 200,
       active: false,
     },
     {
       username: "bob",
+      displayName: "鲍勃",
+      avatarUrl: null,
       lastLoginAt: 100,
       active: false,
     },
@@ -266,7 +276,8 @@ describe("App shell", () => {
       ...document.body.querySelectorAll<HTMLElement>(".account-menu-row"),
     ];
     expect(accountRows).toHaveLength(2);
-    expect(accountRows[0].textContent).toContain("alice");
+    expect(accountRows[0].textContent).toContain("爱丽丝");
+    expect(accountRows[0].textContent).not.toContain("alice");
 
     (accountRows[0].querySelector(".account-choice") as HTMLElement).click();
     await flushPromises();
@@ -290,6 +301,7 @@ describe("App shell", () => {
     removeButtons[1].click();
     await flushPromises();
     expect(window.confirm).toHaveBeenCalledOnce();
+    expect(window.confirm).toHaveBeenCalledWith("确认从本机移除账号 鲍勃？");
     expect(
       calls.find((call) => call.command === "remove_account")?.args,
     ).toEqual({ username: "bob" });
@@ -301,7 +313,10 @@ describe("App shell", () => {
     mockSnapshotIpc();
     const wrapper = mount(App);
     await flushPromises();
-    expect(wrapper.find(".account-main").text()).toContain("tester");
+    expect(wrapper.find(".account-main").text()).toContain("Tester 昵称");
+    expect(wrapper.find(".account-avatar img").attributes("src")).toBe(
+      "https://cnb.cool/users/tester/avatar/l",
+    );
 
     await wrapper.findAll("nav button")[1].trigger("click");
     await flushPromises();

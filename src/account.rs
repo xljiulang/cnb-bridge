@@ -7,6 +7,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use url::Url;
 
 /// Authentication method persisted with the CNB credential.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -23,6 +24,8 @@ pub enum AuthMethod {
 pub struct Credentials {
     pub access_token: String,
     pub username: Option<String>,
+    #[serde(default)]
+    pub nickname: Option<String>,
     #[serde(default)]
     pub auth_method: AuthMethod,
     #[serde(default)]
@@ -51,6 +54,8 @@ impl Default for AccountBridgeSettings {
 #[serde(rename_all = "camelCase")]
 pub struct SavedAccount {
     pub username: String,
+    pub display_name: String,
+    pub avatar_url: Option<String>,
     pub last_login_at: i64,
     pub active: bool,
 }
@@ -69,6 +74,8 @@ pub struct AccountAction {
 pub struct AccountStatus {
     pub state: AccountState,
     pub username: Option<String>,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
     pub auth_method: Option<AuthMethod>,
     pub error: Option<String>,
     #[serde(default)]
@@ -87,12 +94,37 @@ pub enum AccountState {
     Failed,
 }
 
+fn normalized_nickname(nickname: Option<&str>) -> Option<String> {
+    nickname
+        .map(str::trim)
+        .filter(|nickname| !nickname.is_empty())
+        .map(str::to_string)
+}
+
+fn display_name_for(username: &str, nickname: Option<&str>) -> String {
+    normalized_nickname(nickname).unwrap_or_else(|| username.trim().to_string())
+}
+
+fn avatar_url_for(username: &str) -> Option<String> {
+    let username = username.trim();
+    if username.is_empty() {
+        return None;
+    }
+    let mut url = Url::parse("https://cnb.cool/").ok()?;
+    url.path_segments_mut()
+        .ok()?
+        .extend(["users", username, "avatar", "l"]);
+    Some(url.to_string())
+}
+
 impl AccountStatus {
     /// Signed-out status.
     pub fn signed_out() -> Self {
         Self {
             state: AccountState::SignedOut,
             username: None,
+            display_name: None,
+            avatar_url: None,
             auth_method: None,
             error: None,
             error_action: None,
@@ -102,14 +134,20 @@ impl AccountStatus {
 
     /// WebView authorization in progress.
     pub fn signing_in() -> Self {
-        Self::signing_in_as(None)
+        Self::signing_in_as(None, None)
     }
 
     /// WebView authorization or account restoration in progress.
-    pub fn signing_in_as(username: Option<String>) -> Self {
+    pub fn signing_in_as(username: Option<String>, nickname: Option<String>) -> Self {
+        let display_name = username
+            .as_deref()
+            .map(|username| display_name_for(username, nickname.as_deref()));
+        let avatar_url = username.as_deref().and_then(avatar_url_for);
         Self {
             state: AccountState::SigningIn,
             username,
+            display_name,
+            avatar_url,
             auth_method: None,
             error: None,
             error_action: None,
@@ -119,9 +157,13 @@ impl AccountStatus {
 
     /// Connected status backed by a personal access token.
     pub fn connected(credentials: &Credentials) -> Self {
+        let username = credentials.username.as_deref();
         Self {
             state: AccountState::Connected,
             username: credentials.username.clone(),
+            display_name: username
+                .map(|username| display_name_for(username, credentials.nickname.as_deref())),
+            avatar_url: username.and_then(avatar_url_for),
             auth_method: Some(credentials.auth_method),
             error: None,
             error_action: None,
@@ -131,8 +173,23 @@ impl AccountStatus {
 
     /// Failed login that keeps the selected username visible when available.
     pub fn failed(username: Option<String>, error: impl Into<String>) -> Self {
+        Self::failed_with_nickname(username, None, error)
+    }
+
+    /// Failed login that preserves saved display metadata when available.
+    pub fn failed_with_nickname(
+        username: Option<String>,
+        nickname: Option<String>,
+        error: impl Into<String>,
+    ) -> Self {
+        let display_name = username
+            .as_deref()
+            .map(|username| display_name_for(username, nickname.as_deref()));
+        let avatar_url = username.as_deref().and_then(avatar_url_for);
         Self {
             state: AccountState::Failed,
+            display_name,
+            avatar_url,
             username,
             auth_method: None,
             error: Some(error.into()),
@@ -381,6 +438,11 @@ impl AccountManager {
             .iter()
             .map(|account| SavedAccount {
                 username: account.username.clone(),
+                display_name: display_name_for(
+                    &account.username,
+                    account.credentials.nickname.as_deref(),
+                ),
+                avatar_url: avatar_url_for(&account.username),
                 last_login_at: account.last_login_at,
                 active: book
                     .active_username
@@ -417,8 +479,10 @@ impl AccountManager {
         let account = book
             .account(username)
             .ok_or_else(|| AccountError::Authorization("账号不存在".to_string()))?;
-        *self.status.lock().unwrap_or_else(|e| e.into_inner()) =
-            AccountStatus::signing_in_as(Some(account.username.clone()));
+        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = AccountStatus::signing_in_as(
+            Some(account.username.clone()),
+            account.credentials.nickname.clone(),
+        );
         Ok(())
     }
 
@@ -427,6 +491,7 @@ impl AccountManager {
         &self,
         access_token: impl Into<String>,
         username: Option<String>,
+        nickname: Option<String>,
         token_id: Option<String>,
         bridge_settings: Option<AccountBridgeSettings>,
     ) -> Result<AccountStatus, AccountError> {
@@ -438,6 +503,7 @@ impl AccountManager {
         let mut credentials = Credentials {
             access_token: access_token.into(),
             username: Some(username.to_string()),
+            nickname: normalized_nickname(nickname.as_deref()),
             auth_method: AuthMethod::PersonalAccessToken,
             token_id: token_id
                 .map(|token_id| token_id.trim().to_string())
@@ -491,6 +557,8 @@ impl AccountManager {
         let status = AccountStatus {
             state: AccountState::Failed,
             username: None,
+            display_name: None,
+            avatar_url: None,
             auth_method: None,
             error: Some(error.into()),
             error_action: action.into(),
@@ -502,8 +570,14 @@ impl AccountManager {
 
     /// Marks a saved-account login as failed.
     pub fn fail_account_login(&self, username: &str, error: impl Into<String>) {
+        let nickname = self
+            .book
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .account(username)
+            .and_then(|account| account.credentials.nickname.clone());
         *self.status.lock().unwrap_or_else(|e| e.into_inner()) =
-            AccountStatus::failed(Some(username.to_string()), error);
+            AccountStatus::failed_with_nickname(Some(username.to_string()), nickname, error);
     }
 
     /// Returns the saved PAT.
@@ -579,24 +653,60 @@ impl AccountManager {
     }
 
     /// Activates an existing account and records the successful login time.
-    pub fn activate_account(&self, username: &str) -> Result<AccountStatus, AccountError> {
+    pub fn activate_account(
+        &self,
+        username: &str,
+        nickname: Option<String>,
+    ) -> Result<AccountStatus, AccountError> {
         let mut book = self.book.lock().unwrap_or_else(|e| e.into_inner());
         let account = book
             .account(username)
             .ok_or_else(|| AccountError::Authorization("账号不存在".to_string()))?;
         let username = account.username.clone();
-        let credentials = account.credentials.clone();
+        let mut credentials = account.credentials.clone();
+        credentials.nickname = normalized_nickname(nickname.as_deref());
         let mut next = book.clone();
         let last_login_at = next.next_login_timestamp();
         next.active_username = Some(username.clone());
-        next.account_mut(&username)
-            .expect("account exists")
-            .last_login_at = last_login_at;
+        let account = next.account_mut(&username).expect("account exists");
+        account.credentials = credentials.clone();
+        account.last_login_at = last_login_at;
         self.store.save_book(&next)?;
         let status = AccountStatus::connected(&credentials);
         *book = next;
         *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status.clone();
         Ok(status)
+    }
+
+    /// Refreshes display metadata without replacing the saved access token.
+    pub fn update_profile_nickname(
+        &self,
+        username: &str,
+        nickname: Option<&str>,
+    ) -> Result<AccountStatus, AccountError> {
+        let mut book = self.book.lock().unwrap_or_else(|e| e.into_inner());
+        let account = book
+            .account(username)
+            .ok_or_else(|| AccountError::Authorization("账号不存在".to_string()))?;
+        let canonical = account.username.clone();
+        let normalized = normalized_nickname(nickname);
+        let mut next = book.clone();
+        next.account_mut(&canonical)
+            .expect("account exists")
+            .credentials
+            .nickname = normalized.clone();
+        self.store.save_book(&next)?;
+        *book = next;
+
+        let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        if status
+            .username
+            .as_deref()
+            .is_some_and(|current| current.eq_ignore_ascii_case(&canonical))
+        {
+            status.display_name = Some(display_name_for(&canonical, normalized.as_deref()));
+        }
+        Ok(status.clone())
     }
 
     /// Clears the active account while preserving all saved credentials.
@@ -653,6 +763,194 @@ mod tests {
     use crate::dpapi;
 
     #[test]
+    fn connected_status_prefers_trimmed_nickname_and_derives_avatar_url() {
+        let credentials = Credentials {
+            access_token: "token".to_string(),
+            username: Some("cnb.user/name".to_string()),
+            nickname: Some("  九哥  ".to_string()),
+            auth_method: AuthMethod::PersonalAccessToken,
+            token_id: Some("token-id".to_string()),
+        };
+
+        let status = AccountStatus::connected(&credentials);
+
+        assert_eq!(status.display_name.as_deref(), Some("九哥"));
+        assert_eq!(
+            status.avatar_url.as_deref(),
+            Some("https://cnb.cool/users/cnb.user%2Fname/avatar/l")
+        );
+    }
+
+    #[test]
+    fn saved_account_exposes_the_trimmed_nickname_for_display() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager =
+            AccountManager::with_store(AccountStore::new(dir.path().join("account-auth.bin")));
+        manager
+            .complete_token_login(
+                "token",
+                Some("alice".to_string()),
+                Some("  九哥  ".to_string()),
+                Some("token-id".to_string()),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(manager.accounts()[0].display_name, "九哥");
+    }
+
+    #[test]
+    fn saved_account_falls_back_to_username_when_nickname_is_blank() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager =
+            AccountManager::with_store(AccountStore::new(dir.path().join("account-auth.bin")));
+        manager
+            .complete_token_login(
+                "token",
+                Some("alice".to_string()),
+                Some("   ".to_string()),
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(manager.accounts()[0].display_name, "alice");
+        assert_eq!(manager.status().display_name.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn loads_legacy_credentials_without_a_nickname_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("account-auth.bin");
+        let legacy = serde_json::json!({
+            "version": 3,
+            "activeUsername": "alice",
+            "accounts": [{
+                "username": "alice",
+                "credentials": {
+                    "accessToken": "legacy-token",
+                    "username": "alice",
+                    "authMethod": "personalAccessToken"
+                },
+                "lastLoginAt": 42,
+                "bridgeSettings": {
+                    "repoNamespace": "",
+                    "repoName": "cnb-ai-bridge"
+                }
+            }]
+        });
+        let encrypted = dpapi::protect(serde_json::to_vec(&legacy).unwrap().as_slice()).unwrap();
+        std::fs::write(&path, encrypted).unwrap();
+
+        let manager = AccountManager::with_store(AccountStore::new(path));
+
+        assert_eq!(manager.status().display_name.as_deref(), Some("alice"));
+        assert_eq!(
+            manager.status().avatar_url.as_deref(),
+            Some("https://cnb.cool/users/alice/avatar/l")
+        );
+    }
+
+    #[test]
+    fn activating_an_account_refreshes_its_nickname() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AccountStore::new(dir.path().join("account-auth.bin"));
+        let manager = AccountManager::with_store(store.clone());
+        manager
+            .complete_token_login(
+                "token",
+                Some("alice".to_string()),
+                Some("旧昵称".to_string()),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let status = manager
+            .activate_account("alice", Some("新昵称".to_string()))
+            .unwrap();
+
+        assert_eq!(status.display_name.as_deref(), Some("新昵称"));
+        assert_eq!(
+            AccountManager::with_store(store).accounts()[0].display_name,
+            "新昵称"
+        );
+    }
+
+    #[test]
+    fn refreshing_profile_nickname_persists_without_replacing_the_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AccountStore::new(dir.path().join("account-auth.bin"));
+        let manager = AccountManager::with_store(store.clone());
+        manager
+            .complete_token_login(
+                "token",
+                Some("alice".to_string()),
+                Some("旧昵称".to_string()),
+                Some("token-id".to_string()),
+                None,
+            )
+            .unwrap();
+
+        let status = manager
+            .update_profile_nickname("alice", Some("新昵称"))
+            .unwrap();
+
+        assert_eq!(status.display_name.as_deref(), Some("新昵称"));
+        let reopened = AccountManager::with_store(store);
+        let credentials = reopened.credentials_for("alice").unwrap();
+        assert_eq!(credentials.access_token, "token");
+        assert_eq!(credentials.token_id.as_deref(), Some("token-id"));
+        assert_eq!(credentials.nickname.as_deref(), Some("新昵称"));
+    }
+
+    #[test]
+    fn refreshing_blank_nickname_falls_back_to_username() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager =
+            AccountManager::with_store(AccountStore::new(dir.path().join("account-auth.bin")));
+        manager
+            .complete_token_login(
+                "token",
+                Some("alice".to_string()),
+                Some("旧昵称".to_string()),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let status = manager
+            .update_profile_nickname("alice", Some("   "))
+            .unwrap();
+
+        assert_eq!(status.display_name.as_deref(), Some("alice"));
+        assert_eq!(manager.credentials_for("alice").unwrap().nickname, None);
+    }
+
+    #[test]
+    fn failed_saved_account_login_keeps_the_display_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager =
+            AccountManager::with_store(AccountStore::new(dir.path().join("account-auth.bin")));
+        manager
+            .complete_token_login(
+                "token",
+                Some("alice".to_string()),
+                Some("爱丽丝".to_string()),
+                None,
+                None,
+            )
+            .unwrap();
+        manager.logout().unwrap();
+
+        manager.begin_account_login("alice").unwrap();
+        assert_eq!(manager.status().display_name.as_deref(), Some("爱丽丝"));
+
+        manager.fail_account_login("alice", "offline");
+        assert_eq!(manager.status().display_name.as_deref(), Some("爱丽丝"));
+    }
+
+    #[test]
     fn persists_pat_token_id_across_rescans_and_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let store = AccountStore::new(dir.path().join("account-auth.bin"));
@@ -661,6 +959,7 @@ mod tests {
             .complete_token_login(
                 "first-token",
                 Some("alice".to_string()),
+                None,
                 Some("token-1".to_string()),
                 None,
             )
@@ -669,6 +968,7 @@ mod tests {
             .complete_token_login(
                 "second-token",
                 Some("alice".to_string()),
+                None,
                 Some("token-2".to_string()),
                 None,
             )
@@ -701,6 +1001,7 @@ mod tests {
             .complete_token_login(
                 "saved-token",
                 Some("alice".to_string()),
+                None,
                 Some("token-1".to_string()),
                 None,
             )
@@ -732,6 +1033,7 @@ mod tests {
                 credentials: Credentials {
                     access_token: "legacy-token".to_string(),
                     username: Some("alice".to_string()),
+                    nickname: None,
                     auth_method: AuthMethod::PersonalAccessToken,
                     token_id: None,
                 },
@@ -758,10 +1060,10 @@ mod tests {
         let store = AccountStore::new(dir.path().join("account-auth.bin"));
         let manager = AccountManager::with_store(store.clone());
         manager
-            .complete_token_login("alice-token", Some("alice".to_string()), None, None)
+            .complete_token_login("alice-token", Some("alice".to_string()), None, None, None)
             .unwrap();
         manager
-            .complete_token_login("bob-token", Some("bob".to_string()), None, None)
+            .complete_token_login("bob-token", Some("bob".to_string()), None, None, None)
             .unwrap();
 
         let raw = std::fs::read(store.path()).unwrap();
@@ -793,11 +1095,12 @@ mod tests {
                 "first-token",
                 Some("Alice".to_string()),
                 None,
+                None,
                 Some(settings.clone()),
             )
             .unwrap();
         manager
-            .complete_token_login("second-token", Some("alice".to_string()), None, None)
+            .complete_token_login("second-token", Some("alice".to_string()), None, None, None)
             .unwrap();
 
         let accounts = manager.accounts();
@@ -816,7 +1119,7 @@ mod tests {
         let store = AccountStore::new(dir.path().join("account-auth.bin"));
         let manager = AccountManager::with_store(store.clone());
         manager
-            .complete_token_login("alice-token", Some("alice".to_string()), None, None)
+            .complete_token_login("alice-token", Some("alice".to_string()), None, None, None)
             .unwrap();
 
         let status = manager.logout().unwrap();
@@ -841,6 +1144,7 @@ mod tests {
                 "alice-token",
                 Some("alice".to_string()),
                 None,
+                None,
                 Some(AccountBridgeSettings {
                     repo_namespace: "alice-team".to_string(),
                     repo_name: "alice-bridge".to_string(),
@@ -852,6 +1156,7 @@ mod tests {
                 "bob-token",
                 Some("bob".to_string()),
                 None,
+                None,
                 Some(AccountBridgeSettings {
                     repo_namespace: "bob-team".to_string(),
                     repo_name: "bob-bridge".to_string(),
@@ -860,7 +1165,7 @@ mod tests {
             .unwrap();
 
         manager.logout().unwrap();
-        manager.activate_account("alice").unwrap();
+        manager.activate_account("alice", None).unwrap();
 
         assert_eq!(
             manager.active_bridge_settings(),
@@ -881,7 +1186,7 @@ mod tests {
         let store = AccountStore::new(dir.path().join("account-auth.bin"));
         let manager = AccountManager::with_store(store.clone());
         manager
-            .complete_token_login("alice-token", Some("alice".to_string()), None, None)
+            .complete_token_login("alice-token", Some("alice".to_string()), None, None, None)
             .unwrap();
         let settings = AccountBridgeSettings {
             repo_namespace: "alice-team".to_string(),
@@ -908,6 +1213,7 @@ mod tests {
                 "alice-token",
                 Some("alice".to_string()),
                 None,
+                None,
                 Some(AccountBridgeSettings {
                     repo_namespace: "alice-team".to_string(),
                     repo_name: "alice-bridge".to_string(),
@@ -919,6 +1225,7 @@ mod tests {
                 "bob-token",
                 Some("bob".to_string()),
                 None,
+                None,
                 Some(AccountBridgeSettings {
                     repo_namespace: "bob-team".to_string(),
                     repo_name: "bob-bridge".to_string(),
@@ -927,7 +1234,7 @@ mod tests {
             .unwrap();
         manager.logout().unwrap();
 
-        manager.activate_account("alice").unwrap();
+        manager.activate_account("alice", None).unwrap();
         manager.logout().unwrap();
 
         let accounts = manager.accounts();
@@ -965,7 +1272,7 @@ mod tests {
         let manager =
             AccountManager::with_store(AccountStore::new(dir.path().join("account-auth.bin")));
         manager
-            .complete_token_login("alice-token", Some("alice".to_string()), None, None)
+            .complete_token_login("alice-token", Some("alice".to_string()), None, None, None)
             .unwrap();
 
         assert!(manager.remove_account("alice").is_err());
@@ -1002,6 +1309,7 @@ mod tests {
         let credentials = Credentials {
             access_token: "legacy-token".to_string(),
             username: Some("legacy-user".to_string()),
+            nickname: None,
             auth_method: AuthMethod::PersonalAccessToken,
             token_id: None,
         };
@@ -1041,6 +1349,7 @@ mod tests {
                 Some("new-user".to_string()),
                 None,
                 None,
+                None,
             )
             .unwrap();
         assert!(!status.needs_organization);
@@ -1068,7 +1377,7 @@ mod tests {
         assert_eq!(status.error.as_deref(), Some("请先完成实名认证"));
 
         let status = manager
-            .complete_token_login("token", Some("test-user".to_string()), None, None)
+            .complete_token_login("token", Some("test-user".to_string()), None, None, None)
             .unwrap();
         assert_eq!(status.error_action, None);
     }

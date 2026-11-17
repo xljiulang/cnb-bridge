@@ -14,6 +14,8 @@ function app(overrides: Partial<DesktopApp> = {}): DesktopApp {
       account: {
         state: "connected",
         username: "tester",
+        displayName: "测试用户",
+        avatarUrl: "https://cnb.cool/users/tester/avatar/l",
         needsOrganization: false,
       },
       bridge: { state: "idle", account: { state: "connected", needsOrganization: false } },
@@ -46,6 +48,7 @@ describe("AppSidebar", () => {
 
     expect(wrapper.find(".status-icon .lucide-circle-pause").exists()).toBe(true);
     expect(wrapper.text()).toContain("空闲待命");
+    expect(wrapper.text()).toContain("测试用户");
     expect(wrapper.find("nav button.active").text()).toContain("连接");
     await wrapper.findAll("nav button")[1].trigger("click");
     expect(openSettings).toHaveBeenCalledOnce();

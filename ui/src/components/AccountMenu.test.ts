@@ -3,8 +3,20 @@ import { describe, expect, it } from "vitest";
 import AccountMenu from "./AccountMenu.vue";
 
 const accounts = [
-  { username: "alice", lastLoginAt: Date.now() - 60_000, active: false },
-  { username: "bob", lastLoginAt: 0, active: true },
+  {
+    username: "alice",
+    displayName: "爱丽丝",
+    avatarUrl: "https://cnb.cool/users/alice/avatar/l",
+    lastLoginAt: Date.now() - 60_000,
+    active: false,
+  },
+  {
+    username: "bob",
+    displayName: "bob",
+    avatarUrl: "https://cnb.cool/users/bob/avatar/l",
+    lastLoginAt: 0,
+    active: true,
+  },
 ];
 
 describe("AccountMenu", () => {
@@ -32,6 +44,11 @@ describe("AccountMenu", () => {
     expect(document.body.textContent).not.toContain("个已保存账号");
     expect(document.body.textContent).not.toContain("今天");
     expect(document.body.textContent).not.toContain("旧版账号");
+    expect(rows[0].textContent).toContain("爱丽丝");
+    expect(rows[0].textContent).not.toContain("alice");
+    expect(
+      rows[0].querySelector("img")?.getAttribute("src"),
+    ).toBe("https://cnb.cool/users/alice/avatar/l");
     expect(rows[0].querySelector(".account-choice-copy")).not.toBeNull();
     expect(
       rows[0].lastElementChild?.classList.contains("remove-saved-account"),
@@ -54,7 +71,7 @@ describe("AccountMenu", () => {
     await wrapper.setProps({ busyUsername: null });
     (
       document.body.querySelector(
-        '.remove-saved-account[aria-label="移除账号 alice"]',
+        '.remove-saved-account[aria-label="移除账号 爱丽丝"]',
       ) as HTMLElement
     ).click();
     expect(wrapper.emitted("remove")?.[0]).toEqual(["alice"]);

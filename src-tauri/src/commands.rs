@@ -153,7 +153,7 @@ pub async fn login_with_account(
 
     state
         .account
-        .activate_account(&username)
+        .activate_account(&username, Some(user.nickname))
         .map_err(|error| CommandError::new("account_login_failed", error.to_string()))?;
     state.account.set_needs_organization(namespaces.is_empty());
     state.bridge.account_connected().await;
@@ -390,7 +390,7 @@ mod tests {
         let manager =
             AccountManager::with_store(AccountStore::new(temp.path().join("account-auth.bin")));
         manager
-            .complete_token_login("alice-token", Some("alice".to_string()), None, None)
+            .complete_token_login("alice-token", Some("alice".to_string()), None, None, None)
             .unwrap();
         manager.logout().unwrap();
         (temp, manager)

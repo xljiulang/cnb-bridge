@@ -8,6 +8,7 @@ import {
 } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, ref } from "vue";
 import type { SavedAccount } from "../types";
+import AccountAvatar from "./AccountAvatar.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -174,7 +175,7 @@ onBeforeUnmount(() => {
               type="button"
               class="account-choice"
               :disabled="Boolean(busyUsername)"
-              :aria-label="`使用账号 ${account.username} 登录`"
+              :aria-label="`使用账号 ${account.displayName} 登录`"
               @click="choose(account.username)"
             >
               <span class="account-choice-avatar" aria-hidden="true">
@@ -183,17 +184,21 @@ onBeforeUnmount(() => {
                   class="spin"
                   :size="18"
                 />
-                <CircleUserRound v-else :size="19" />
+                <AccountAvatar
+                  v-else
+                  :avatar-url="account.avatarUrl"
+                  :size="19"
+                />
               </span>
               <span class="account-choice-copy">
-                <strong>{{ account.username }}</strong>
+                <strong>{{ account.displayName }}</strong>
               </span>
             </button>
             <button
               type="button"
               class="remove-saved-account"
               :disabled="Boolean(busyUsername) || account.active"
-              :aria-label="`移除账号 ${account.username}`"
+              :aria-label="`移除账号 ${account.displayName}`"
               :title="account.active ? '请先退出当前账号' : '从本机移除账号'"
               @click="remove(account.username)"
             >
