@@ -64,7 +64,11 @@ defineProps<{ app: DesktopApp }>();
       </button>
     </nav>
 
-    <div class="sidebar-status" :class="{ live: app.ready }">
+    <div
+      v-if="app.accountConnected"
+      class="sidebar-status"
+      :class="{ live: app.ready }"
+    >
       <span
         class="status-icon"
         :class="{ 'status-account-avatar': app.accountConnected }"

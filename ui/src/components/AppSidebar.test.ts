@@ -59,24 +59,39 @@ describe("AppSidebar", () => {
     wrapper.unmount();
   });
 
-  it("shows the scan icon, waiting label and signed-out status when disconnected", () => {
-    const wrapper = mount(AppSidebar, {
-      props: {
-        app: app({
-          accountConnected: false,
-          sidebarStatusIcon: "scan",
-          statusLabel: "未登录",
-        }),
-      },
-    });
+  it.each([
+    { accountState: "signedOut" as const, label: "未登录", icon: "scan" as const },
+    { accountState: "signingIn" as const, label: "等待授权", icon: "busy" as const },
+    { accountState: "failed" as const, label: "登录失败", icon: "error" as const },
+  ])(
+    "hides the entire status card while account state is $accountState",
+    ({ accountState, label, icon }) => {
+      const wrapper = mount(AppSidebar, {
+        props: {
+          app: app({
+            accountConnected: false,
+            sidebarStatusIcon: icon,
+            statusLabel: label,
+            snapshot: {
+              ...app().snapshot!,
+              account: {
+                ...app().snapshot!.account,
+                state: accountState,
+                username: null,
+                displayName: null,
+                avatarUrl: null,
+              },
+            },
+          }),
+        },
+      });
 
-    expect(wrapper.find(".status-icon .lucide-scan-qr-code").exists()).toBe(true);
-    expect(wrapper.text()).toContain("等待扫码");
-    expect(wrapper.get(".sidebar-status-badge").text()).toBe("未登录");
-    expect(wrapper.find(".status-icon img").exists()).toBe(false);
-    expect(wrapper.text()).not.toContain("11233");
-    wrapper.unmount();
-  });
+      expect(wrapper.find(".sidebar-status").exists()).toBe(false);
+      expect(wrapper.text()).not.toContain("等待扫码");
+      expect(wrapper.text()).not.toContain(label);
+      wrapper.unmount();
+    },
+  );
 
   it("falls back to the user icon when the account avatar fails", async () => {
     const wrapper = mount(AppSidebar, {
