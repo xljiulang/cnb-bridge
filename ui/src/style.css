@@ -975,7 +975,19 @@ small {
   max-width: 620px;
   min-width: 0;
   gap: 8px;
-  margin: 0 0 0 53px;
+  margin: 0;
+}
+
+.usage-section {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+
+.usage-section + .usage-section {
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
 }
 
 .usage-summary {
@@ -1031,19 +1043,19 @@ small {
   text-align: right;
 }
 
-.account-usage.is-warning .usage-progress-fill {
+.usage-section.is-warning .usage-progress-fill {
   background: var(--warning);
 }
 
-.account-usage.is-warning .usage-percent {
+.usage-section.is-warning .usage-percent {
   color: var(--warning);
 }
 
-.account-usage.is-danger .usage-progress-fill {
+.usage-section.is-danger .usage-progress-fill {
   background: var(--danger);
 }
 
-.account-usage.is-danger .usage-percent {
+.usage-section.is-danger .usage-percent {
   color: var(--danger);
 }
 
@@ -1978,8 +1990,7 @@ code {
     margin-top: 16px;
   }
 
-  .account-intro,
-  .account-usage {
+  .account-intro {
     margin-left: 0;
   }
 

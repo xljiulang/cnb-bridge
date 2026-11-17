@@ -5,6 +5,7 @@ import {
   creditsUsageTone,
   formatCreditsAmount,
   formatCreditsPercent,
+  formatDevCpuUsage,
   formatError,
   formatContextWindow,
   formatInputModalities,
@@ -108,6 +109,16 @@ describe("format helpers", () => {
     expect(formatCreditsPercent(1_500, 1_000)).toBe("150%");
     expect(formatCreditsAmount(0, 0)).toBe("-- / --");
     expect(formatCreditsPercent(0, 0)).toBe("--");
+  });
+
+  it("formats monthly development CPU usage as core hours", () => {
+    expect(formatDevCpuUsage(1_370_366, 5_760_000)).toBe(
+      "380.66 / 1,600.00 核时",
+    );
+    expect(formatDevCpuUsage(0, 0)).toBe("0.00 / 0.00 核时");
+    expect(formatDevCpuUsage(Number.NaN, 5_760_000)).toBe(
+      "-- / 1,600.00 核时",
+    );
   });
 
   it("clamps progress while preserving the displayed surplus percentage", () => {

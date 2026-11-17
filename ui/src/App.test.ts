@@ -110,6 +110,8 @@ function mockSnapshotIpc() {
           return {
             namespace: "tester",
             month: "2026-11",
+            devCpuUsedSeconds: 1_370_366,
+            devCpuTotalSeconds: 5_760_000,
             creditsUsedMilli: 214_720,
             creditsTotalMilli: 1_166_000,
             fetchedAt: "2026-11-17T00:00:00Z",
@@ -143,6 +145,8 @@ function mockSettingsIpc(namespaces: { name: string; path: string }[]) {
           return {
             namespace: "tester",
             month: "2026-11",
+            devCpuUsedSeconds: 0,
+            devCpuTotalSeconds: 0,
             creditsUsedMilli: 0,
             creditsTotalMilli: 1000,
             fetchedAt: "2026-11-17T00:00:00Z",
@@ -283,6 +287,20 @@ describe("App shell", () => {
     expect(
       (progress.get(".usage-progress-fill").element as HTMLElement).style.width,
     ).toBe("18.4%");
+
+    const cpu = wrapper.get(".usage-section.dev-cpu");
+    expect(cpu.text()).toContain("云原生开发-CPU");
+    expect(cpu.text()).toContain("380.66 / 1,600.00 核时");
+    expect(cpu.get(".usage-percent").text()).toBe("23.8%");
+    const cpuProgress = cpu.get('[role="progressbar"]');
+    expect(cpuProgress.attributes("aria-label")).toBe(
+      "云原生开发-CPU 使用进度",
+    );
+    expect(cpuProgress.attributes("aria-valuenow")).toBe("23.8");
+    expect(
+      (cpuProgress.get(".usage-progress-fill").element as HTMLElement).style
+        .width,
+    ).toBe("23.8%");
     wrapper.unmount();
   });
 

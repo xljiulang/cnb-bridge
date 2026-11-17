@@ -81,6 +81,8 @@ export interface ModelSummary {
 export interface CnbUsageSummary {
   namespace: string;
   month: string;
+  devCpuUsedSeconds: number;
+  devCpuTotalSeconds: number;
   creditsUsedMilli: number;
   creditsTotalMilli: number;
   fetchedAt: string;

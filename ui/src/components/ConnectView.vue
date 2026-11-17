@@ -151,7 +151,6 @@ defineProps<{ app: DesktopApp }>();
             v-else-if="app.organizationReady"
             class="account-usage"
             :class="[
-              `is-${app.creditsUsageTone}`,
               {
                 loading: app.usageLoading && !app.usage,
                 unavailable: !app.usage || app.usageError,
@@ -160,32 +159,69 @@ defineProps<{ app: DesktopApp }>();
             :title="app.usageError ?? undefined"
             aria-live="polite"
           >
-            <div class="usage-summary">
-              <span>AI Credits</span>
-              <strong class="usage-amount">{{ app.creditsUsageAmount }}</strong>
-            </div>
-            <div class="usage-meter-row">
-              <div
-                class="usage-progress-track"
-                role="progressbar"
-                aria-label="AI Credits 使用进度"
-                aria-valuemin="0"
-                aria-valuemax="100"
-                :aria-valuenow="app.creditsUsageProgress ?? undefined"
-                :aria-valuetext="app.creditsUsageAriaText"
-                :aria-busy="app.usageLoading"
-              >
-                <span
-                  v-if="app.usageLoading && !app.usage"
-                  class="usage-progress-loading"
-                />
-                <span
-                  v-else-if="app.creditsUsageProgress !== null"
-                  class="usage-progress-fill"
-                  :style="{ width: `${app.creditsUsageProgress}%` }"
-                />
+            <div
+              class="usage-section credits"
+              :class="`is-${app.creditsUsageTone}`"
+            >
+              <div class="usage-summary">
+                <span>AI Credits</span>
+                <strong class="usage-amount">{{ app.creditsUsageAmount }}</strong>
               </div>
-              <strong class="usage-percent">{{ app.creditsUsagePercent }}</strong>
+              <div class="usage-meter-row">
+                <div
+                  class="usage-progress-track"
+                  role="progressbar"
+                  aria-label="AI Credits 使用进度"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  :aria-valuenow="app.creditsUsageProgress ?? undefined"
+                  :aria-valuetext="app.creditsUsageAriaText"
+                  :aria-busy="app.usageLoading"
+                >
+                  <span
+                    v-if="app.usageLoading && !app.usage"
+                    class="usage-progress-loading"
+                  />
+                  <span
+                    v-else-if="app.creditsUsageProgress !== null"
+                    class="usage-progress-fill"
+                    :style="{ width: `${app.creditsUsageProgress}%` }"
+                  />
+                </div>
+                <strong class="usage-percent">{{ app.creditsUsagePercent }}</strong>
+              </div>
+            </div>
+            <div
+              class="usage-section dev-cpu"
+              :class="`is-${app.devCpuUsageTone}`"
+            >
+              <div class="usage-summary">
+                <span>云原生开发-CPU</span>
+                <strong class="usage-amount">{{ app.devCpuUsageAmount }}</strong>
+              </div>
+              <div class="usage-meter-row">
+                <div
+                  class="usage-progress-track"
+                  role="progressbar"
+                  aria-label="云原生开发-CPU 使用进度"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  :aria-valuenow="app.devCpuUsageProgress ?? undefined"
+                  :aria-valuetext="app.devCpuUsageAriaText"
+                  :aria-busy="app.usageLoading"
+                >
+                  <span
+                    v-if="app.usageLoading && !app.usage"
+                    class="usage-progress-loading"
+                  />
+                  <span
+                    v-else-if="app.devCpuUsageProgress !== null"
+                    class="usage-progress-fill"
+                    :style="{ width: `${app.devCpuUsageProgress}%` }"
+                  />
+                </div>
+                <strong class="usage-percent">{{ app.devCpuUsagePercent }}</strong>
+              </div>
             </div>
           </div>
           <div class="account-actions">

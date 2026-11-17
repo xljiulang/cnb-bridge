@@ -139,6 +139,8 @@ pub struct WorkspaceDetail {
 pub struct CnbUsageSummary {
     pub namespace: String,
     pub month: String,
+    pub dev_cpu_used_seconds: i64,
+    pub dev_cpu_total_seconds: i64,
     pub credits_used_milli: i64,
     pub credits_total_milli: i64,
     pub fetched_at: String,
@@ -154,12 +156,16 @@ struct QuotaItem {
 struct UsageQuota {
     #[serde(default)]
     credit_in_milli: QuotaItem,
+    #[serde(default)]
+    dev_in_sec: QuotaItem,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct UsageVolume {
     #[serde(default)]
     credit_in_milli: i64,
+    #[serde(default)]
+    dev_in_sec: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -269,7 +275,7 @@ impl CnbApi {
         }
     }
 
-    /// Returns the current month total AI Credits quota and usage.
+    /// Returns the current month AI Credits and development CPU quota usage.
     ///
     /// This is a control-plane request and never starts a workspace.
     pub async fn usage_summary(
@@ -300,6 +306,8 @@ impl CnbApi {
         Ok(CnbUsageSummary {
             namespace,
             month: chrono::Local::now().format("%Y-%m").to_string(),
+            dev_cpu_used_seconds: volume.dev_in_sec,
+            dev_cpu_total_seconds: quota.dev_in_sec.total,
             credits_used_milli: volume.credit_in_milli,
             credits_total_milli: quota.credit_in_milli.total,
             fetched_at: chrono::Utc::now().to_rfc3339(),
@@ -720,6 +728,7 @@ mod tests {
             .and(path("/preferred/-/charge/quota"))
             .and(header("authorization", "Bearer token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "dev_in_sec": { "total": 5760000, "free": 4389634 },
                 "credit_in_milli": { "total": 1166000, "free": 500000 }
             })))
             .mount(&server)
@@ -728,6 +737,7 @@ mod tests {
             .and(path("/preferred/-/charge/volume"))
             .and(header("authorization", "Bearer token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "dev_in_sec": 1370366,
                 "credit_in_milli": 22540
             })))
             .mount(&server)
@@ -737,6 +747,8 @@ mod tests {
         let usage = api.usage_summary("token", Some("preferred")).await.unwrap();
 
         assert_eq!(usage.namespace, "preferred");
+        assert_eq!(usage.dev_cpu_used_seconds, 1370366);
+        assert_eq!(usage.dev_cpu_total_seconds, 5760000);
         assert_eq!(usage.credits_used_milli, 22540);
         assert_eq!(usage.credits_total_milli, 1166000);
     }

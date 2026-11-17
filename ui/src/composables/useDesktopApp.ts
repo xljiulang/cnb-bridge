@@ -33,6 +33,7 @@ import {
   creditsUsageTone as calculateCreditsUsageTone,
   formatCreditsAmount,
   formatCreditsPercent,
+  formatDevCpuUsage,
   formatError,
   isBridgeTransitioning,
   settingsEqual,
@@ -225,6 +226,51 @@ export function useDesktopApp() {
     if (usageLoading.value && !usage.value) return "AI Credits 正在获取";
     if (!usage.value || usageError.value) return "AI Credits 用量暂不可用";
     return `AI Credits ${creditsUsageAmount.value}，${creditsUsagePercent.value}`;
+  });
+  const devCpuUsageAmount = computed(() => {
+    if (usage.value) {
+      return formatDevCpuUsage(
+        usage.value.devCpuUsedSeconds,
+        usage.value.devCpuTotalSeconds,
+      );
+    }
+    if (usageError.value) {
+      return "-- / -- 核时";
+    }
+    return usageLoading.value
+      ? "正在获取…"
+      : "-- / -- 核时";
+  });
+  const devCpuUsagePercent = computed(() =>
+    usage.value
+      ? formatCreditsPercent(
+          usage.value.devCpuUsedSeconds,
+          usage.value.devCpuTotalSeconds,
+        )
+      : "--",
+  );
+  const devCpuUsageProgress = computed(() =>
+    usage.value
+      ? calculateCreditsUsageProgress(
+          usage.value.devCpuUsedSeconds,
+          usage.value.devCpuTotalSeconds,
+        )
+      : null,
+  );
+  const devCpuUsageTone = computed(() =>
+    usage.value
+      ? calculateCreditsUsageTone(
+          usage.value.devCpuUsedSeconds,
+          usage.value.devCpuTotalSeconds,
+        )
+      : "unavailable",
+  );
+  const devCpuUsageAriaText = computed(() => {
+    if (usageLoading.value && !usage.value) return "云原生开发-CPU 正在获取";
+    if (!usage.value || usageError.value) {
+      return "云原生开发-CPU 用量暂不可用";
+    }
+    return `${devCpuUsageAmount.value}，${devCpuUsagePercent.value}`;
   });
   const mainActionLabel = computed(() => {
     if (bridgeTransitioning.value) return "正在启动…";
@@ -676,6 +722,11 @@ export function useDesktopApp() {
     creditsUsageProgress,
     creditsUsageTone,
     creditsUsageAriaText,
+    devCpuUsageAmount,
+    devCpuUsagePercent,
+    devCpuUsageProgress,
+    devCpuUsageTone,
+    devCpuUsageAriaText,
     mainActionLabel,
     pipelineSteps,
     login,

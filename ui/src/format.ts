@@ -140,6 +140,25 @@ export function formatCreditsPercent(
     .replace(/\.0$/, "")}%`;
 }
 
+const coreHoursFormatter = new Intl.NumberFormat("zh-CN", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+function formatCoreHours(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "--";
+  return coreHoursFormatter.format(seconds / 3600);
+}
+
+export function formatDevCpuUsage(
+  usedSeconds: number,
+  totalSeconds: number,
+): string {
+  return `${formatCoreHours(usedSeconds)} / ${formatCoreHours(
+    totalSeconds,
+  )} 核时`;
+}
+
 export function creditsUsageProgress(
   usedMilli: number,
   totalMilli: number,
