@@ -101,6 +101,9 @@ export function useDesktopApp() {
     () => snapshot.value?.account.state ?? "signedOut",
   );
   const accountConnected = computed(() => accountState.value === "connected");
+  const accountErrorAction = computed(
+    () => snapshot.value?.account.errorAction ?? null,
+  );
   const accounts = computed(() => snapshot.value?.accounts ?? []);
   const activeAccount = computed(
     () => accounts.value.find((account) => account.active) ?? null,
@@ -503,6 +506,16 @@ export function useDesktopApp() {
     }
   }
 
+  async function openAccountErrorAction() {
+    const action = accountErrorAction.value;
+    if (!action) return;
+    try {
+      await openExternal(action.url);
+    } catch (cause) {
+      error.value = formatError(cause);
+    }
+  }
+
   async function save() {
     const portError = validatePort(Number(settingsDraft.localPort));
     if (portError) {
@@ -630,6 +643,7 @@ export function useDesktopApp() {
     repoCreationNeeded,
     accountState,
     accountConnected,
+    accountErrorAction,
     accounts,
     activeAccount,
     accountLoginUsername,
@@ -666,6 +680,7 @@ export function useDesktopApp() {
     save,
     copyValue,
     openRepoCreation,
+    openAccountErrorAction,
     loadLogs,
     loadHttpTraces,
     openTrace,

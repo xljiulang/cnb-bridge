@@ -1,9 +1,9 @@
 use crate::state::DesktopState;
-use cnb_bridge::account::AccountStatus;
+use cnb_bridge::account::{AccountAction, AccountStatus};
 use cnb_bridge::api::CnbApi;
 use cnb_bridge::paths;
 use cnb_bridge::web_auth::{
-    is_allowed_auth_url, session_from_cookies, CreatedPat, WebAuthClient, WebSession,
+    is_allowed_auth_url, session_from_cookies, CreatedPat, WebAuthClient, WebAuthError, WebSession,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -13,6 +13,10 @@ use url::Url;
 const AUTH_URL: &str = "https://cnb.cool/?s_url=%2Fprofile%2Ftoken";
 const WINDOW_LABEL: &str = "cnb-auth";
 const TOKEN_DESCRIPTION: &str = "CNB Bridge";
+const IDENTITY_VERIFICATION_URL: &str = "https://cnb.cool/profile/auth";
+const IDENTITY_VERIFICATION_MESSAGE: &str =
+    "当前 CNB 账号尚未完成实名认证，无法创建访问令牌。请先完成实名认证，然后重新扫码登录。";
+const IDENTITY_VERIFICATION_LABEL: &str = "实名认证 · 个人设置";
 
 /// Opens the CNB web authorization window.
 pub fn launch(app: tauri::AppHandle) -> Result<AccountStatus, String> {
@@ -103,7 +107,17 @@ pub fn launch(app: tauri::AppHandle) -> Result<AccountStatus, String> {
                     }
                 }
             }
-            Err(error) => {
+            Err(AuthorizationFailure::IdentityVerificationRequired) => {
+                account.fail_token_login_with_action(
+                    IDENTITY_VERIFICATION_MESSAGE,
+                    AccountAction {
+                        label: IDENTITY_VERIFICATION_LABEL.to_string(),
+                        url: IDENTITY_VERIFICATION_URL.to_string(),
+                    },
+                );
+                logger.log("warn", IDENTITY_VERIFICATION_MESSAGE);
+            }
+            Err(AuthorizationFailure::Message(error)) => {
                 account.fail_token_login(error.clone());
                 logger.log("error", format!("CNB 扫码绑定失败: {error}"));
             }
@@ -143,7 +157,7 @@ async fn authorize(
     cancel: Arc<AtomicBool>,
     bridge: Arc<cnb_bridge::bridge::Bridge>,
     logger: Arc<cnb_bridge::logging::Logger>,
-) -> Result<AuthorizationResult, String> {
+) -> Result<AuthorizationResult, AuthorizationFailure> {
     let session = wait_for_session(&app, cancel).await?;
     let client = WebAuthClient::new();
     let namespaces = client
@@ -163,10 +177,18 @@ async fn authorize(
             .unwrap_or_default()
             .as_secs()
     );
-    let pat = client
+    let pat = match client
         .create_pat(&session, &temporary_description, namespace)
         .await
-        .map_err(|error| format!("自动创建访问令牌失败: {error}"))?;
+    {
+        Ok(pat) => pat,
+        Err(WebAuthError::IdentityVerificationRequired) => {
+            return Err(AuthorizationFailure::IdentityVerificationRequired)
+        }
+        Err(error) => {
+            return Err(format!("自动创建访问令牌失败: {error}").into());
+        }
+    };
     let api = CnbApi::new();
     let user = api
         .current_user(&pat.token)
@@ -178,7 +200,7 @@ async fn authorize(
         .map_err(|error| format!("检查 CNB Owner 组织失败: {error}"))?;
     let username = (!user.username.trim().is_empty()).then_some(user.username);
     if username.is_none() {
-        return Err("CNB 未返回账号名，无法保存账号凭据".to_string());
+        return Err("CNB 未返回账号名，无法保存账号凭据".to_string().into());
     }
     let mut needs_organization = owned_namespaces.is_empty();
     if needs_organization {
@@ -222,6 +244,17 @@ struct AuthorizationResult {
     username: Option<String>,
     session: WebSession,
     needs_organization: bool,
+}
+
+enum AuthorizationFailure {
+    Message(String),
+    IdentityVerificationRequired,
+}
+
+impl From<String> for AuthorizationFailure {
+    fn from(value: String) -> Self {
+        Self::Message(value)
+    }
 }
 
 async fn wait_for_session(

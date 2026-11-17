@@ -20,6 +20,15 @@ const app = useDesktopApp();
         <span>{{ app.error }}</span>
         <div class="banner-actions">
           <button
+            v-if="app.accountErrorAction"
+            type="button"
+            class="secondary compact identity-verification-action"
+            @click="app.openAccountErrorAction"
+          >
+            <ExternalLink :size="15" aria-hidden="true" />
+            {{ app.accountErrorAction.label }}
+          </button>
+          <button
             v-if="app.snapshot?.bridge.repoCreationUrl"
             type="button"
             class="secondary compact"

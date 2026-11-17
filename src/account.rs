@@ -53,6 +53,14 @@ pub struct SavedAccount {
     pub active: bool,
 }
 
+/// Optional user action attached to an account error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountAction {
+    pub label: String,
+    pub url: String,
+}
+
 /// Current account state exposed to the desktop UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,6 +69,8 @@ pub struct AccountStatus {
     pub username: Option<String>,
     pub auth_method: Option<AuthMethod>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub error_action: Option<AccountAction>,
     #[serde(default)]
     pub needs_organization: bool,
 }
@@ -83,6 +93,7 @@ impl AccountStatus {
             username: None,
             auth_method: None,
             error: None,
+            error_action: None,
             needs_organization: false,
         }
     }
@@ -99,6 +110,7 @@ impl AccountStatus {
             username,
             auth_method: None,
             error: None,
+            error_action: None,
             needs_organization: false,
         }
     }
@@ -110,6 +122,7 @@ impl AccountStatus {
             username: credentials.username.clone(),
             auth_method: Some(credentials.auth_method),
             error: None,
+            error_action: None,
             needs_organization: false,
         }
     }
@@ -121,6 +134,7 @@ impl AccountStatus {
             username,
             auth_method: None,
             error: Some(error.into()),
+            error_action: None,
             needs_organization: false,
         }
     }
@@ -459,7 +473,25 @@ impl AccountManager {
 
     /// Marks WebView authorization as failed.
     pub fn fail_token_login(&self, error: impl Into<String>) {
-        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = AccountStatus::failed(None, error);
+        let _ = self.fail_token_login_with_action(error, None);
+    }
+
+    /// Marks WebView authorization as failed with an optional user action.
+    pub fn fail_token_login_with_action(
+        &self,
+        error: impl Into<String>,
+        action: impl Into<Option<AccountAction>>,
+    ) -> AccountStatus {
+        let status = AccountStatus {
+            state: AccountState::Failed,
+            username: None,
+            auth_method: None,
+            error: Some(error.into()),
+            error_action: action.into(),
+            needs_organization: false,
+        };
+        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status.clone();
+        status
     }
 
     /// Marks a saved-account login as failed.
@@ -886,5 +918,26 @@ mod tests {
 
         let status = manager.set_needs_organization(false);
         assert!(!status.needs_organization);
+    }
+
+    #[test]
+    fn identity_verification_failure_carries_action_and_is_cleared_on_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager =
+            AccountManager::with_store(AccountStore::new(dir.path().join("account-auth.bin")));
+        let action = AccountAction {
+            label: "实名认证 · 个人设置".to_string(),
+            url: "https://cnb.cool/profile/auth".to_string(),
+        };
+
+        let status = manager.fail_token_login_with_action("请先完成实名认证", action.clone());
+
+        assert_eq!(status.error_action, Some(action.clone()));
+        assert_eq!(status.error.as_deref(), Some("请先完成实名认证"));
+
+        let status = manager
+            .complete_token_login("token", Some("test-user".to_string()), None)
+            .unwrap();
+        assert_eq!(status.error_action, None);
     }
 }

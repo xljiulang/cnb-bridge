@@ -49,6 +49,8 @@ pub enum WebAuthError {
     Remote { status: StatusCode, message: String },
     #[error("CNB 网页接口响应无效: {0}")]
     InvalidResponse(String),
+    #[error("CNB 账号尚未完成实名认证")]
+    IdentityVerificationRequired,
 }
 
 impl From<reqwest::Error> for WebAuthError {
@@ -170,14 +172,22 @@ impl WebAuthClient {
         if let Some(namespace) = namespace {
             body["slug"] = Value::String(namespace.to_string());
         }
-        let value = self
+        let value = match self
             .request(
                 Method::POST,
                 "/user/personal_access_tokens",
                 session,
                 Some(body),
             )
-            .await?;
+            .await
+        {
+            Ok(value) => value,
+            Err(WebAuthError::Remote {
+                status: StatusCode::PRECONDITION_REQUIRED,
+                ..
+            }) => return Err(WebAuthError::IdentityVerificationRequired),
+            Err(error) => return Err(error),
+        };
         let value = unwrap_result(value);
         let token = value
             .get("token")
@@ -489,6 +499,52 @@ mod tests {
         assert_eq!(token.token_id, "token-1");
         assert_eq!(token.token, "pat-value");
         assert_eq!(token.git_username, "cnb");
+    }
+
+    #[tokio::test]
+    async fn maps_428_to_identity_verification_required() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/user/personal_access_tokens"))
+            .respond_with(ResponseTemplate::new(428).set_body_json(json!({
+                "errmsg": "identity verification required"
+            })))
+            .mount(&server)
+            .await;
+        let client = WebAuthClient::with_base_url(server.uri());
+
+        let error = client
+            .create_pat(&session(), "CNB Bridge", Some("xljiulang"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, WebAuthError::IdentityVerificationRequired));
+    }
+
+    #[tokio::test]
+    async fn keeps_other_create_pat_errors_as_remote_failures() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/user/personal_access_tokens"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                "errmsg": "forbidden"
+            })))
+            .mount(&server)
+            .await;
+        let client = WebAuthClient::with_base_url(server.uri());
+
+        let error = client
+            .create_pat(&session(), "CNB Bridge", Some("xljiulang"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            WebAuthError::Remote {
+                status: StatusCode::FORBIDDEN,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

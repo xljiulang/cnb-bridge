@@ -146,6 +146,50 @@ function mockSettingsIpc(namespaces: { name: string; path: string }[]) {
 }
 
 describe("App shell", () => {
+  it("opens the identity verification action from the error banner", async () => {
+    const calls: { command: string; args: unknown }[] = [];
+    const failedSnapshot = {
+      ...snapshot,
+      account: {
+        ...account,
+        state: "failed",
+        error: "当前 CNB 账号尚未完成实名认证",
+        errorAction: {
+          label: "实名认证 · 个人设置",
+          url: "https://cnb.cool/profile/auth",
+        },
+      },
+    };
+    mockWindows("main");
+    mockIPC(
+      (command, args) => {
+        calls.push({ command, args });
+        switch (command) {
+          case "get_snapshot":
+            return failedSnapshot;
+          case "get_logs":
+          case "list_http_traces":
+          case "list_namespaces":
+            return [];
+          default:
+            return null;
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const action = wrapper.find(".identity-verification-action");
+    expect(action.text()).toContain("实名认证 · 个人设置");
+    await action.trigger("click");
+    await flushPromises();
+    expect(
+      calls.find((call) => call.command === "open_external")?.args,
+    ).toEqual({ url: "https://cnb.cool/profile/auth" });
+    wrapper.unmount();
+  });
+
   it("shows AI Credits amount and progress percentage separately", async () => {
     mockSnapshotIpc();
     const wrapper = mount(App);
