@@ -34,7 +34,7 @@ const snapshot = {
     httpLogFilter: "abnormal",
     launchAtLogin: false,
   },
-  version: "0.1.0",
+  version: "1.0.0",
   logsPath: "logs",
   httpLogsPath: "http-logs",
   models: [
@@ -615,6 +615,47 @@ describe("App shell", () => {
     expect(labels).toContain("xliulang");
     expect(labels.some((label) => label.includes("（xliulang）"))).toBe(false);
 
+    wrapper.unmount();
+  });
+
+  it("shows version 1.0.0 and opens the project homepage from About", async () => {
+    const calls: { command: string; args: unknown }[] = [];
+    mockWindows("main");
+    mockIPC(
+      (command, args) => {
+        calls.push({ command, args });
+        switch (command) {
+          case "get_snapshot":
+            return { ...snapshot, version: "1.0.0" };
+          case "get_logs":
+          case "list_http_traces":
+          case "list_namespaces":
+            return [];
+          default:
+            return null;
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const aboutButton = wrapper
+      .findAll("nav button")
+      .find((button) => button.text().includes("关于"));
+    expect(aboutButton).toBeDefined();
+    await aboutButton?.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get(".details-card").text()).toContain("1.0.0");
+    const projectLink = wrapper.get(".project-home-action");
+    expect(projectLink.text()).toContain("项目主页");
+    await projectLink.trigger("click");
+    await flushPromises();
+
+    expect(
+      calls.find((call) => call.command === "open_external")?.args,
+    ).toEqual({ url: "https://github.com/xljiulang/cnb-bridge" });
     wrapper.unmount();
   });
 });

@@ -32,7 +32,7 @@ test("serves only the health endpoint without workspace credentials", async () =
     assert.equal(response.status, 200);
     const payload = await response.json();
     assert.equal(payload.status, "ok");
-    assert.equal(payload.version, "0.1.0");
+    assert.equal(payload.version, "1.0.0");
     assert.equal(typeof payload.uptime, "number");
   } finally {
     await close(server);

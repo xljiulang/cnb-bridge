@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Info } from "@lucide/vue";
+import { ExternalLink, Info } from "@lucide/vue";
 import type { DesktopApp } from "../composables/useDesktopApp";
 
 defineProps<{ app: DesktopApp }>();
@@ -28,10 +28,23 @@ defineProps<{ app: DesktopApp }>();
       <dl>
         <div>
           <dt>版本</dt>
-          <dd><code>{{ app.snapshot?.version || "0.1.0" }}</code></dd>
+          <dd><code>{{ app.snapshot?.version || "1.0.0" }}</code></dd>
         </div>
         <div><dt>运行方式</dt><dd>Tauri 桌面客户端</dd></div>
         <div><dt>本机端点</dt><dd><code>{{ app.baseUrl }}</code></dd></div>
+        <div>
+          <dt>项目主页</dt>
+          <dd>
+            <button
+              type="button"
+              class="inline-link project-home-action"
+              @click="app.openProjectHome"
+            >
+              <ExternalLink :size="14" aria-hidden="true" />
+              项目主页
+            </button>
+          </dd>
+        </div>
         <div><dt>作者</dt><dd>老九</dd></div>
       </dl>
     </article>

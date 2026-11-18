@@ -20,6 +20,7 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             Some(vec![cnb_bridge::lifecycle::AUTOSTART_ARG]),
         ))
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let lifecycle_mutex = cnb_bridge::lifecycle::AppLifecycleMutex::acquire()

@@ -564,6 +564,61 @@ small {
   color: var(--muted);
 }
 
+.app-context-menu {
+  position: fixed;
+  z-index: 1200;
+  display: grid;
+  min-width: 176px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-raised);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(18px);
+}
+
+.app-context-menu button {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+}
+
+.app-context-menu-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+
+.app-context-menu button:hover:not(:disabled),
+.app-context-menu button:focus-visible {
+  outline: none;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.app-context-menu button:disabled {
+  color: var(--muted);
+  opacity: 0.48;
+}
+
+.app-context-menu button[data-action="cut"],
+.app-context-menu button[data-action="paste"] {
+  margin-top: 4px;
+  border-top: 1px solid var(--line-soft);
+  border-radius: 0 0 8px 8px;
+  padding-top: 10px;
+}
+
 .connect-stack {
   display: grid;
   gap: 14px;
@@ -1806,6 +1861,25 @@ select:focus {
   color: var(--muted-strong);
   font-size: 13px;
   overflow-wrap: anywhere;
+}
+
+.inline-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-text);
+  font: inherit;
+  text-decoration: none;
+}
+
+.inline-link:hover,
+.inline-link:focus-visible {
+  outline: none;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 code {

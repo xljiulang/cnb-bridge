@@ -53,7 +53,7 @@ agent 从云会话继承 `CNB_TOKEN`，只监听 loopback。客户端侧传入�
 
 多个匹配 profile 按注册顺序执行；未匹配时不修改品牌或路径文本。`developer` 角色改写保持全局生效。新增品牌门禁时只需注册目标 UA 产品和规则，无需修改 Chat/Responses 调用链。规则幂等，可安全重复执行。
 
-发往上游的 User-Agent 会统一覆盖为 `WorkBuddy/<客户端版本>`，当前版本为 `WorkBuddy/0.1.0`。Authorization、Cookie、会话头和其他客户端头保持不变。
+发往上游的 User-Agent 会统一覆盖为 `WorkBuddy/<客户端版本>`，当前版本为 `WorkBuddy/1.0.0`。Authorization、Cookie、会话头和其他客户端头保持不变。
 
 如果上游仍返回 `11128`，客户端不会自动重试，而是返回稳定的 `prompt_gate_blocked` 错误，并在运行日志记录命中的 profile/rule 和上游 request ID。
 

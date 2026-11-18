@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn allows_any_well_formed_http_or_https_url() {
         assert!(is_allowed_external_url(
-            "https://github.com/xljiulang/cyarp-cnb"
+            "https://github.com/xljiulang/cnb-bridge"
         ));
         assert!(is_allowed_external_url(
             "https://example.com/arbitrary/path?query=1#fragment"

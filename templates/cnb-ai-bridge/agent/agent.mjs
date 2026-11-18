@@ -62,7 +62,7 @@ export function createAgentServer(options = {}) {
       }
       sendJson(res, 200, {
         status: "ok",
-        version: "0.1.0",
+        version: "1.0.0",
         uptime: Math.round(process.uptime()),
       });
       return;

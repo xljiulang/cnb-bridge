@@ -2220,7 +2220,7 @@ mod tests {
         let summary = store.list(1).unwrap().remove(0);
         let (request_path, _) = store.record_paths(&summary.id).unwrap();
         let request = std::fs::read_to_string(request_path).unwrap();
-        assert!(request.contains("user-agent: WorkBuddy/0.1.0"));
+        assert!(request.contains("user-agent: WorkBuddy/1.0.0"));
         let logs = bridge
             .logger_handle()
             .recent(20)

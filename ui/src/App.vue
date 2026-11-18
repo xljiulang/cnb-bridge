@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { AlertTriangle, CheckCircle2, ExternalLink, X } from "@lucide/vue";
 import AppSidebar from "./components/AppSidebar.vue";
+import AppContextMenu from "./components/AppContextMenu.vue";
 import ConnectView from "./components/ConnectView.vue";
 import SettingsView from "./components/SettingsView.vue";
 import LogsView from "./components/LogsView.vue";
@@ -11,6 +12,7 @@ const app = useDesktopApp();
 </script>
 
 <template>
+  <AppContextMenu />
   <div class="shell">
     <AppSidebar :app="app" />
 

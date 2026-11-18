@@ -1,6 +1,6 @@
 [package]
 name = "cnb-bridge-desktop"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "CNB Bridge Windows desktop shell"
 build = "build.rs"
@@ -23,6 +23,7 @@ tauri = { version = "2.12.5", default-features = false, features = [
   "wry",
 ] }
 tauri-plugin-autostart = "2.7.0"
+tauri-plugin-clipboard-manager = "2.5.0"
 tauri-plugin-opener = "2.7.2"
 tauri-plugin-single-instance = "2.5.5"
 tokio = { version = "1", features = ["sync"] }

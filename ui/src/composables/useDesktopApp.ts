@@ -51,6 +51,8 @@ import type {
 export type Tab = "connect" | "settings" | "logs" | "about";
 export type StepTone = "done" | "current" | "pending" | "error";
 
+export const PROJECT_HOME_URL = "https://github.com/xljiulang/cnb-bridge";
+
 export interface ConnectionStep {
   label: string;
   detail: string;
@@ -564,6 +566,14 @@ export function useDesktopApp() {
     }
   }
 
+  async function openProjectHome() {
+    try {
+      await openExternal(PROJECT_HOME_URL);
+    } catch (cause) {
+      error.value = formatError(cause);
+    }
+  }
+
   async function save() {
     const portError = validatePort(Number(settingsDraft.localPort));
     if (portError) {
@@ -732,6 +742,7 @@ export function useDesktopApp() {
     copyValue,
     openRepoCreation,
     openAccountErrorAction,
+    openProjectHome,
     loadLogs,
     loadHttpTraces,
     openTrace,
