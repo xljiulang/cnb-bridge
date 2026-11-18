@@ -393,6 +393,65 @@ describe("App shell", () => {
     wrapper.unmount();
   });
 
+  it("updates startup stages from bridge events while the start command is pending", async () => {
+    let currentSnapshot = snapshot;
+    let resolveStart!: (value: typeof snapshot) => void;
+    const pendingStart = new Promise<typeof snapshot>((resolve) => {
+      resolveStart = resolve;
+    });
+    mockWindows("main");
+    mockIPC(
+      (command) => {
+        switch (command) {
+          case "get_snapshot":
+            return currentSnapshot;
+          case "start_bridge":
+            return pendingStart;
+          case "get_logs":
+          case "list_http_traces":
+          case "list_namespaces":
+            return [];
+          case "get_cnb_usage":
+            return null;
+          default:
+            return null;
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper.get(".head-actions .primary").trigger("click");
+    await flushPromises();
+
+    const publish = async (state: string) => {
+      currentSnapshot = {
+        ...currentSnapshot,
+        bridge: { ...currentSnapshot.bridge, state },
+      };
+      await emit("cnb-bridge://snapshot");
+      await flushPromises();
+    };
+
+    await publish("preparingRepo");
+    expect(wrapper.findAll(".pipeline .step")[1].classes()).toContain("done");
+
+    await publish("startingWorkspace");
+    expect(wrapper.findAll(".pipeline .step")[2].classes()).toContain("current");
+
+    await publish("connecting");
+    expect(wrapper.findAll(".pipeline .step")[3].classes()).toContain("current");
+
+    await publish("ready");
+    expect(wrapper.text()).toContain("在线");
+    expect(wrapper.findAll(".pipeline .step")[3].classes()).toContain("done");
+
+    resolveStart(currentSnapshot);
+    await flushPromises();
+    wrapper.unmount();
+  });
+
   it("keeps a detached cloud workspace marked ready in the pipeline", async () => {
     const detachedSnapshot = {
       ...snapshot,

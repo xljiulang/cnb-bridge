@@ -5,13 +5,10 @@ use cnb_bridge::http_trace::{HttpTraceStore, HttpTraceSummary};
 use cnb_bridge::logging::LogEntry;
 use cnb_bridge::settings::Settings;
 use serde::Serialize;
-use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::auth_webview;
 use crate::state::{self, AppSnapshot, DesktopState};
-
-const SNAPSHOT_PROGRESS_INTERVAL: Duration = Duration::from_millis(350);
 
 /// Serializable command error.
 #[derive(Debug, Clone, Serialize)]
@@ -221,21 +218,7 @@ fn remove_invalid_account(account: &cnb_bridge::account::AccountManager, usernam
 
 #[tauri::command]
 pub async fn start_bridge(state: State<'_, DesktopState>) -> Result<AppSnapshot, CommandError> {
-    let progress_app = state.app.clone();
-    let progress = tauri::async_runtime::spawn(async move {
-        let mut interval = tokio::time::interval(SNAPSHOT_PROGRESS_INTERVAL);
-        loop {
-            interval.tick().await;
-            if let Some(state) = progress_app.try_state::<DesktopState>() {
-                if state.snapshot().await.is_ok() {
-                    let _ = progress_app.emit("cnb-bridge://snapshot", ());
-                }
-            }
-        }
-    });
     let result = state.bridge.start().await;
-    progress.abort();
-    let _ = progress.await;
     let snapshot = state.snapshot().await?;
     let _ = state.app.emit("cnb-bridge://snapshot", ());
     result.map_err(|error| CommandError::new("bridge_start_failed", error.to_string()))?;
@@ -399,17 +382,10 @@ pub fn open_http_trace(id: String) -> Result<(), CommandError> {
 mod tests {
     use super::{
         apply_account_validation_error, is_allowed_external_url, map_organization_create_error,
-        SNAPSHOT_PROGRESS_INTERVAL,
     };
     use cnb_bridge::account::{AccountManager, AccountState, AccountStore};
     use cnb_bridge::api::{ApiError, StatusCode};
     use cnb_bridge::bridge::BridgeError;
-    use std::time::Duration;
-
-    #[test]
-    fn startup_snapshot_progress_is_frequent_enough_for_visual_feedback() {
-        assert_eq!(SNAPSHOT_PROGRESS_INTERVAL, Duration::from_millis(350));
-    }
 
     fn signed_out_manager_with_alice() -> (tempfile::TempDir, std::sync::Arc<AccountManager>) {
         let temp = tempfile::tempdir().unwrap();
