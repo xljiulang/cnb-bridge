@@ -6,6 +6,9 @@ pub struct GatewayConfig {
     pub port: u16,
     pub activation_timeout: Duration,
     pub idle_timeout: Duration,
+    pub upstream_connect_timeout: Duration,
+    pub upstream_read_timeout: Duration,
+    pub non_stream_timeout: Duration,
 }
 
 impl GatewayConfig {
@@ -15,6 +18,9 @@ impl GatewayConfig {
             port,
             activation_timeout: Duration::from_secs(180),
             idle_timeout: Duration::from_secs(5 * 60),
+            upstream_connect_timeout: Duration::from_secs(5),
+            upstream_read_timeout: Duration::from_secs(60),
+            non_stream_timeout: Duration::from_secs(120),
         }
     }
 }
@@ -130,8 +136,11 @@ impl GatewayHandle {
             activity: Arc::clone(&activity),
             models: Arc::new(ModelResponses::from_catalog(model_catalog::catalog()?)),
             activation_timeout: config.activation_timeout,
+            non_stream_timeout: config.non_stream_timeout,
             client: reqwest::Client::builder()
                 .no_proxy()
+                .connect_timeout(config.upstream_connect_timeout)
+                .read_timeout(config.upstream_read_timeout)
                 .build()
                 .map_err(|error| format!("创建本地 HTTP 客户端失败: {error}"))?,
             upstream_override,

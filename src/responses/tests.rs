@@ -1,6 +1,19 @@
 use super::*;
 use serde_json::json;
 
+fn terminal_response(events: &[String], event_name: &str) -> Value {
+    for event in events {
+        if event.starts_with(&format!("event: {event_name}\n")) {
+            let data = event
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap();
+            return serde_json::from_str(data).unwrap();
+        }
+    }
+    panic!("missing terminal event {event_name}");
+}
+
 #[test]
 fn translates_instructions_messages_images_and_tools() {
     let request = json!({
@@ -140,6 +153,35 @@ fn streams_text_and_terminal_events_in_order() {
     );
     assert!(joined.contains("\"input_tokens\":3"));
     assert!(joined.contains("\"output_tokens\":2"));
+}
+
+#[test]
+fn completed_stream_includes_accumulated_output() {
+    let mut stream = ResponsesStream::new("resp_output".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "reasoning_content": "think",
+                "content": "answer",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_1",
+                    "function": { "name": "lookup", "arguments": "{}" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    }));
+    events.extend(stream.finish());
+
+    let terminal = terminal_response(&events, "response.completed");
+    let output = terminal["response"]["output"].as_array().unwrap();
+    assert_eq!(output.len(), 3);
+    assert_eq!(output[0]["type"], "reasoning");
+    assert_eq!(output[1]["type"], "message");
+    assert_eq!(output[1]["content"][0]["text"], "answer");
+    assert_eq!(output[2]["type"], "function_call");
+    assert_eq!(output[2]["call_id"], "call_1");
 }
 
 #[test]

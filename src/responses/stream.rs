@@ -26,6 +26,7 @@ pub struct ResponsesStream {
     reasoning: Option<TextTrack>,
     text: Option<TextTrack>,
     calls: BTreeMap<usize, CallTrack>,
+    output: Vec<Value>,
     finish_reason: Option<String>,
     usage: Option<Value>,
     failure: Option<(String, String)>,
@@ -49,6 +50,7 @@ impl ResponsesStream {
             reasoning: None,
             text: None,
             calls: BTreeMap::new(),
+            output: Vec::new(),
             finish_reason: None,
             usage: None,
             failure: None,
@@ -126,18 +128,19 @@ impl ResponsesStream {
                     "part": { "type": "summary_text", "text": track.text }
                 }),
             ));
-            events.push(sse_event(
-                "response.output_item.done",
+            events.push(sse_event("response.output_item.done", {
+                let item = json!({
+                    "id": track.id,
+                    "type": "reasoning",
+                    "summary": [{ "type": "summary_text", "text": track.text }]
+                });
+                self.output.push(item.clone());
                 json!({
                     "type": "response.output_item.done",
                     "output_index": track.index,
-                    "item": {
-                        "id": track.id,
-                        "type": "reasoning",
-                        "summary": [{ "type": "summary_text", "text": track.text }]
-                    }
-                }),
-            ));
+                    "item": item
+                })
+            }));
         }
         if let Some(track) = self.text.take() {
             events.push(sse_event(
@@ -165,24 +168,25 @@ impl ResponsesStream {
                     }
                 }),
             ));
-            events.push(sse_event(
-                "response.output_item.done",
+            events.push(sse_event("response.output_item.done", {
+                let item = json!({
+                    "id": track.id,
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{
+                        "type": "output_text",
+                        "text": track.text,
+                        "annotations": []
+                    }]
+                });
+                self.output.push(item.clone());
                 json!({
                     "type": "response.output_item.done",
                     "output_index": track.index,
-                    "item": {
-                        "id": track.id,
-                        "type": "message",
-                        "role": "assistant",
-                        "status": "completed",
-                        "content": [{
-                            "type": "output_text",
-                            "text": track.text,
-                            "annotations": []
-                        }]
-                    }
-                }),
-            ));
+                    "item": item
+                })
+            }));
         }
         if self.failure.is_none() {
             for call in self.calls.values() {
@@ -211,21 +215,22 @@ impl ResponsesStream {
                             "input": input
                         }),
                     ));
-                    events.push(sse_event(
-                        "response.output_item.done",
+                    events.push(sse_event("response.output_item.done", {
+                        let item = json!({
+                            "id": call.item_id,
+                            "type": "custom_tool_call",
+                            "status": "completed",
+                            "call_id": call.call_id,
+                            "name": name,
+                            "input": input
+                        });
+                        self.output.push(item.clone());
                         json!({
                             "type": "response.output_item.done",
                             "output_index": call.output_index,
-                            "item": {
-                                "id": call.item_id,
-                                "type": "custom_tool_call",
-                                "status": "completed",
-                                "call_id": call.call_id,
-                                "name": name,
-                                "input": input
-                            }
-                        }),
-                    ));
+                            "item": item
+                        })
+                    }));
                 } else {
                     events.push(sse_event(
                         "response.function_call_arguments.done",
@@ -249,7 +254,10 @@ impl ResponsesStream {
                     }
                     events.push(sse_event(
                         "response.output_item.done",
-                        json!({ "type": "response.output_item.done", "output_index": call.output_index, "item": item }),
+                        {
+                            self.output.push(item.clone());
+                            json!({ "type": "response.output_item.done", "output_index": call.output_index, "item": item })
+                        },
                     ));
                 }
             }
@@ -264,7 +272,7 @@ impl ResponsesStream {
                         "object": "response",
                         "status": "failed",
                         "model": self.model,
-                        "output": [],
+                        "output": self.output,
                         "error": {
                             "code": code,
                             "message": detail,
@@ -284,7 +292,7 @@ impl ResponsesStream {
                         "object": "response",
                         "status": "incomplete",
                         "model": self.model,
-                        "output": [],
+                        "output": self.output,
                         "error": null,
                         "incomplete_details": { "reason": "max_output_tokens" },
                         "usage": usage_to_responses(self.usage.as_ref())
@@ -301,7 +309,7 @@ impl ResponsesStream {
                         "object": "response",
                         "status": "completed",
                         "model": self.model,
-                        "output": [],
+                        "output": self.output,
                         "error": null,
                         "usage": usage_to_responses(self.usage.as_ref())
                     }
@@ -310,6 +318,15 @@ impl ResponsesStream {
         };
         events.push(terminal);
         events
+    }
+
+    /// Marks the stream as failed and emits its terminal event.
+    pub fn fail(&mut self, code: impl Into<String>, message: impl Into<String>) -> Vec<String> {
+        if self.finished {
+            return Vec::new();
+        }
+        self.failure = Some((code.into(), message.into()));
+        self.finish()
     }
 
     fn ensure_created(&mut self) -> Vec<String> {

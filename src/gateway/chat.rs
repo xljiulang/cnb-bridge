@@ -24,9 +24,25 @@ pub(super) async fn handle_chat(
             HeaderValue::from_static("text/event-stream"),
         );
     }
-    let exchange = match send_chat_request(&state, &headers, &uri, prepared.body).await {
-        Ok(exchange) => exchange,
-        Err(response) => return response,
+    let send = send_chat_request(&state, &headers, &uri, prepared.body);
+    let exchange = if prepared.downstream_stream {
+        match send.await {
+            Ok(exchange) => exchange,
+            Err(response) => return response,
+        }
+    } else {
+        match tokio::time::timeout(state.non_stream_timeout, send).await {
+            Ok(Ok(exchange)) => exchange,
+            Ok(Err(response)) => return response,
+            Err(_) => {
+                return error_response_with_id(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "upstream_timeout",
+                    "upstream request timed out",
+                    new_request_id(),
+                )
+            }
+        }
     };
     let trace = begin_upstream_trace(&state, "chat", &exchange);
     let request_id = response_request_id(&trace);
@@ -49,18 +65,19 @@ pub(super) async fn handle_chat(
         .unwrap_or("");
     if !prepared.downstream_stream && content_type.starts_with("text/event-stream") {
         let status = status_from_reqwest(exchange.response.status());
-        return match aggregate_chat_stream(
-            exchange.response,
-            trace,
-            status,
-            &prepared.requested_model,
-        )
-        .await
-        {
-            Ok(chat) => with_request_id(Json(chat).into_response(), &request_id),
-            Err((status, code, message)) => {
+        let aggregate =
+            aggregate_chat_stream(exchange.response, trace, status, &prepared.requested_model);
+        return match tokio::time::timeout(state.non_stream_timeout, aggregate).await {
+            Ok(Ok(chat)) => with_request_id(Json(chat).into_response(), &request_id),
+            Ok(Err((status, code, message))) => {
                 error_response_with_id(status, code, message, request_id)
             }
+            Err(_) => error_response_with_id(
+                StatusCode::GATEWAY_TIMEOUT,
+                "upstream_timeout",
+                "upstream response timed out",
+                request_id,
+            ),
         };
     }
     traced_upstream_response(exchange.response, trace, &request_id)

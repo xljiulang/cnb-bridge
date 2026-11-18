@@ -94,7 +94,7 @@ pub(super) fn forwarded_request_headers(
 ) -> HeaderMap {
     let mut forwarded = HeaderMap::new();
     for (name, value) in headers.iter() {
-        if !is_request_hop_header(name.as_str()) {
+        if name != header::ACCEPT_ENCODING && !is_request_hop_header(name.as_str()) {
             forwarded.append(name, value.clone());
         }
     }
@@ -104,6 +104,10 @@ pub(super) fn forwarded_request_headers(
     if let Ok(value) = HeaderValue::from_str(&format!("127.0.0.1:{port}")) {
         forwarded.insert(header::HOST, value);
     }
+    forwarded.insert(
+        header::ACCEPT_ENCODING,
+        HeaderValue::from_static("identity"),
+    );
     forwarded
 }
 

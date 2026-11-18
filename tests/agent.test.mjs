@@ -10,7 +10,10 @@ function listen(server) {
 }
 
 function close(server) {
-  return new Promise((resolve) => server.close(resolve));
+  return new Promise((resolve) => {
+    server.close(resolve);
+    server.closeAllConnections?.();
+  });
 }
 
 async function startAgent(options = {}) {
@@ -101,9 +104,56 @@ test("passes SSE through without buffering", async () => {
       body: JSON.stringify({ model: "model-a", stream: true }),
     });
     assert.equal(response.status, 200);
-    const text = await response.text();
-    assert.match(text, /chunk/);
-    assert.match(text, /chunk[^]*chunk/);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const first = await reader.read();
+    const firstText = decoder.decode(first.value, { stream: true });
+    assert.match(firstText, /chunk":1/);
+    assert.ok(!firstText.includes('chunk":2'));
+    let rest = "";
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      rest += decoder.decode(next.value, { stream: true });
+    }
+    rest += decoder.decode();
+    assert.match(rest, /chunk":2/);
+  } finally {
+    await close(server);
+    await close(upstream);
+  }
+});
+
+test("survives an upstream response stream error and keeps serving health", async () => {
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write('data: {"chunk":1}\n\n');
+    setTimeout(() => {
+      res.destroy(new Error("upstream response failed"));
+    }, 10);
+  });
+  const upstreamPort = await listen(upstream);
+  const { server, port } = await startAgent({
+    aiBase: `http://127.0.0.1:${upstreamPort}`,
+  });
+  try {
+    const started = Date.now();
+    const response = await fetch(`http://127.0.0.1:${port}/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "model-a", stream: true }),
+      signal: AbortSignal.timeout(2000),
+    });
+    assert.equal(response.status, 200);
+    await assert.rejects(response.text());
+    assert.ok(
+      Date.now() - started < 1000,
+      "downstream connection should close promptly after the upstream response errors",
+    );
+
+    const health = await fetch(`http://127.0.0.1:${port}/healthz`);
+    assert.equal(health.status, 200);
   } finally {
     await close(server);
     await close(upstream);

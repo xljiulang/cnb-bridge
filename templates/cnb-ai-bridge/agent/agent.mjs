@@ -91,6 +91,18 @@ export function createAgentServer(options = {}) {
       if (!headers["content-type"]) headers["content-type"] = "application/json";
 
       const transport = upstreamUrl.protocol === "https:" ? https : http;
+      let failed = false;
+      const fail = (error) => {
+        if (failed) return;
+        failed = true;
+        upstream.destroy();
+        if (res.destroyed || res.writableEnded) return;
+        if (res.headersSent) {
+          res.destroy(error);
+        } else {
+          sendError(res, 502, `upstream error: ${error.message}`, "upstream_error");
+        }
+      };
       const upstream = transport.request(
         upstreamUrl,
         { method: "POST", headers, timeout: 10_000 },
@@ -102,6 +114,10 @@ export function createAgentServer(options = {}) {
           );
           res.flushHeaders?.();
           res.socket?.setNoDelay?.(true);
+          upstreamResponse.on("aborted", () => {
+            fail(new Error("upstream response aborted"));
+          });
+          upstreamResponse.on("error", fail);
           upstreamResponse.pipe(res);
         },
       );
@@ -109,14 +125,12 @@ export function createAgentServer(options = {}) {
       upstream.on("timeout", () => {
         upstream.destroy(new Error("upstream connect timeout"));
       });
-      upstream.on("error", (error) => {
-        if (res.headersSent) {
-          res.destroy();
-        } else {
-          sendError(res, 502, `upstream error: ${error.message}`, "upstream_error");
-        }
+      upstream.on("error", fail);
+      req.on("error", fail);
+      req.on("aborted", () => {
+        failed = true;
+        upstream.destroy();
       });
-      req.on("aborted", () => upstream.destroy());
       res.on("close", () => {
         if (!res.writableEnded) upstream.destroy();
       });

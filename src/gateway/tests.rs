@@ -17,6 +17,23 @@ fn gateway_config_uses_request_driven_defaults() {
     let config = GatewayConfig::new(11233);
     assert_eq!(config.activation_timeout, Duration::from_secs(180));
     assert_eq!(config.idle_timeout, Duration::from_secs(5 * 60));
+    assert_eq!(config.upstream_connect_timeout, Duration::from_secs(5));
+    assert_eq!(config.upstream_read_timeout, Duration::from_secs(60));
+    assert_eq!(config.non_stream_timeout, Duration::from_secs(120));
+}
+
+#[test]
+fn forwarded_headers_force_identity_content_encoding() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::ACCEPT_ENCODING,
+        HeaderValue::from_static("gzip, br"),
+    );
+
+    let forwarded = forwarded_request_headers(&headers, 11233, 42);
+
+    assert_eq!(forwarded.get(header::ACCEPT_ENCODING).unwrap(), "identity");
+    assert_eq!(forwarded.get_all(header::ACCEPT_ENCODING).iter().count(), 1);
 }
 
 #[test]
@@ -77,6 +94,9 @@ async fn test_gateway() -> (tempfile::TempDir, Arc<Bridge>, GatewayHandle) {
             port: 0,
             activation_timeout: Duration::from_secs(1),
             idle_timeout: Duration::from_secs(60),
+            upstream_connect_timeout: Duration::from_secs(5),
+            upstream_read_timeout: Duration::from_secs(60),
+            non_stream_timeout: Duration::from_secs(120),
         },
         None,
         temp.path().join("http-trace"),
@@ -687,6 +707,199 @@ async fn responses_stream_is_translated_and_logged_without_buffering() {
 }
 
 #[tokio::test]
+async fn responses_stream_reports_invalid_upstream_frames_as_failed() {
+    let (_temp, gateway, upstream_task) =
+        gateway_with_static_responses_stream("data: not-json\n\n").await;
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{}/v1/responses", gateway.port()))
+        .json(&json!({
+            "model": "model",
+            "input": "hello",
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let text = response.text().await.unwrap();
+    assert!(text.contains("event: response.failed"));
+    assert!(text.contains("upstream_server_error"));
+    assert!(!text.contains("event: response.completed"));
+    gateway.stop().await;
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn responses_stream_reports_eof_without_done_as_failed() {
+    let (_temp, gateway, upstream_task) = gateway_with_static_responses_stream(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+    )
+    .await;
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{}/v1/responses", gateway.port()))
+        .json(&json!({
+            "model": "model",
+            "input": "hello",
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let text = response.text().await.unwrap();
+    assert!(text.contains("\"delta\":\"partial\""));
+    assert!(text.contains("event: response.failed"));
+    assert!(text.contains("incomplete_stream"));
+    assert!(!text.contains("event: response.completed"));
+    gateway.stop().await;
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn non_stream_chat_returns_timeout_when_aggregation_exceeds_budget() {
+    let upstream = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            let body = Body::from_stream(futures_util::stream::once(async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\"late\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                ))
+            }));
+            let mut response = Response::new(body);
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            response
+        }),
+    );
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let upstream_task = tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+    let (_temp, _bridge, gateway) =
+        test_gateway_with_upstream_timeout(upstream_port, Duration::from_millis(20)).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{}/v1/chat/completions",
+            gateway.port()
+        ))
+        .json(&json!({
+            "model": "model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": false
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::GATEWAY_TIMEOUT);
+    let payload: Value = response.json().await.unwrap();
+    assert_eq!(payload["error"]["code"], "upstream_timeout");
+    gateway.stop().await;
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn non_stream_responses_returns_timeout_when_upstream_headers_are_late() {
+    let upstream = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Json(json!({
+                "id": "chatcmpl-late",
+                "choices": [{
+                    "message": { "role": "assistant", "content": "late" },
+                    "finish_reason": "stop"
+                }]
+            }))
+            .into_response()
+        }),
+    );
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let upstream_task = tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+    let (_temp, _bridge, gateway) =
+        test_gateway_with_upstream_timeout(upstream_port, Duration::from_millis(20)).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{}/v1/responses", gateway.port()))
+        .json(&json!({
+            "model": "model",
+            "input": "hello",
+            "stream": false
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::GATEWAY_TIMEOUT);
+    let payload: Value = response.json().await.unwrap();
+    assert_eq!(payload["error"]["code"], "upstream_timeout");
+    gateway.stop().await;
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn responses_stream_reports_upstream_read_errors_as_failed() {
+    let upstream = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            let body = Body::from_stream(futures_util::stream::iter([
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\"before\"},\"finish_reason\":null}]}\n\n",
+                )),
+                Err(std::io::Error::other("stream exploded")),
+            ]));
+            let mut response = Response::new(body);
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            );
+            response
+        }),
+    );
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let upstream_task = tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+    let (_temp, _bridge, gateway) = test_gateway_with_upstream(upstream_port).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{}/v1/responses", gateway.port()))
+        .json(&json!({
+            "model": "model",
+            "input": "hello",
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    if response.status() == reqwest::StatusCode::OK {
+        let text = response.text().await.unwrap();
+        assert!(text.contains("event: response.failed"));
+        assert!(text.contains("upstream_network_error"));
+        assert!(text.contains("stream exploded"));
+    } else {
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+        let payload: Value = response.json().await.unwrap();
+        assert_eq!(payload["error"]["code"], "upstream_network_error");
+        assert!(payload["error"]["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()));
+    }
+    gateway.stop().await;
+    upstream_task.abort();
+}
+
+#[tokio::test]
 async fn routes_expose_cors_method_errors_and_not_found_contract() {
     let (temp, _bridge, gateway) = test_gateway().await;
     let client = reqwest::Client::new();
@@ -1227,8 +1440,37 @@ async fn pre_upstream_failures_do_not_create_traces() {
         .is_empty());
 }
 
+async fn gateway_with_static_responses_stream(
+    body: &'static str,
+) -> (
+    tempfile::TempDir,
+    GatewayHandle,
+    tokio::task::JoinHandle<()>,
+) {
+    let upstream = Router::new().route(
+        "/chat/completions",
+        post(move || async move {
+            ([(header::CONTENT_TYPE, "text/event-stream")], body).into_response()
+        }),
+    );
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let upstream_task = tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+    let (temp, _bridge, gateway) = test_gateway_with_upstream(port).await;
+    (temp, gateway, upstream_task)
+}
+
 async fn test_gateway_with_upstream(
     upstream_port: u16,
+) -> (tempfile::TempDir, Arc<Bridge>, GatewayHandle) {
+    test_gateway_with_upstream_timeout(upstream_port, Duration::from_secs(120)).await
+}
+
+async fn test_gateway_with_upstream_timeout(
+    upstream_port: u16,
+    non_stream_timeout: Duration,
 ) -> (tempfile::TempDir, Arc<Bridge>, GatewayHandle) {
     let temp = tempfile::tempdir().unwrap();
     let account = crate::account::AccountManager::with_store(AccountStore::new(
@@ -1258,6 +1500,9 @@ async fn test_gateway_with_upstream(
             port: 0,
             activation_timeout: Duration::from_secs(1),
             idle_timeout: Duration::from_secs(60),
+            upstream_connect_timeout: Duration::from_secs(5),
+            upstream_read_timeout: Duration::from_secs(60),
+            non_stream_timeout,
         },
         upstream_port,
         temp.path().join("http-trace"),

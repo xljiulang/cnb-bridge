@@ -56,9 +56,24 @@ pub(super) async fn handle_responses(
                 )
             }
         };
-        let exchange = match send_chat_request(&state, &headers, &uri, encoded).await {
-            Ok(exchange) => exchange,
-            Err(response) => return response,
+        let send = send_chat_request(&state, &headers, &uri, encoded);
+        let exchange = if stream {
+            match send.await {
+                Ok(exchange) => exchange,
+                Err(response) => return response,
+            }
+        } else {
+            match tokio::time::timeout(state.non_stream_timeout, send).await {
+                Ok(Ok(exchange)) => exchange,
+                Ok(Err(response)) => return response,
+                Err(_) => {
+                    return error_response(
+                        StatusCode::GATEWAY_TIMEOUT,
+                        "upstream_timeout",
+                        "upstream request timed out",
+                    )
+                }
+            }
         };
         if exchange.response.status().is_success() {
             break exchange;
@@ -135,28 +150,46 @@ pub(super) async fn handle_responses(
         return responses_stream_response(exchange.response, model, shape, trace, &request_id);
     }
     let chat = if content_type.starts_with("text/event-stream") {
-        match aggregate_chat_stream(exchange.response, trace, status, &model).await {
-            Ok(chat) => chat,
-            Err((status, code, message)) => {
+        let aggregate = aggregate_chat_stream(exchange.response, trace, status, &model);
+        match tokio::time::timeout(state.non_stream_timeout, aggregate).await {
+            Ok(Ok(chat)) => chat,
+            Ok(Err((status, code, message))) => {
                 return error_response_with_id(status, code, message, request_id)
+            }
+            Err(_) => {
+                return error_response_with_id(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "upstream_timeout",
+                    "upstream response timed out",
+                    request_id,
+                )
             }
         }
     } else {
-        let body = match exchange.response.bytes().await {
-            Ok(body) => body,
-            Err(error) => {
-                if let Some(mut trace) = trace.take() {
-                    let elapsed = trace.elapsed();
-                    trace.finish(status.as_u16(), "stream_error", elapsed).ok();
+        let body =
+            match tokio::time::timeout(state.non_stream_timeout, exchange.response.bytes()).await {
+                Ok(Ok(body)) => body,
+                Ok(Err(error)) => {
+                    if let Some(mut trace) = trace.take() {
+                        let elapsed = trace.elapsed();
+                        trace.finish(status.as_u16(), "stream_error", elapsed).ok();
+                    }
+                    return error_response_with_id(
+                        StatusCode::BAD_GATEWAY,
+                        "upstream_network_error",
+                        format!("failed to read upstream response: {error}"),
+                        request_id,
+                    );
                 }
-                return error_response_with_id(
-                    StatusCode::BAD_GATEWAY,
-                    "upstream_network_error",
-                    format!("failed to read upstream response: {error}"),
-                    request_id,
-                );
-            }
-        };
+                Err(_) => {
+                    return error_response_with_id(
+                        StatusCode::GATEWAY_TIMEOUT,
+                        "upstream_timeout",
+                        "upstream response timed out",
+                        request_id,
+                    )
+                }
+            };
         if let Some(mut trace) = trace {
             trace.write_response_chunk(&body).ok();
             let elapsed = trace.elapsed();
@@ -190,6 +223,7 @@ pub(super) struct ResponsesStreamState {
     translator: ResponsesStream,
     buffer: Vec<u8>,
     pending: std::collections::VecDeque<Result<Bytes, std::io::Error>>,
+    saw_done: bool,
     done: bool,
     trace: Option<HttpTraceSession>,
     status: StatusCode,
@@ -224,6 +258,7 @@ pub(super) fn responses_stream_response(
         translator: ResponsesStream::with_shape(response_id, model, shape),
         buffer: Vec::new(),
         pending: std::collections::VecDeque::new(),
+        saw_done: false,
         done: false,
         trace,
         status,
@@ -243,7 +278,7 @@ pub(super) fn responses_stream_response(
                     }
                     state.buffer.extend_from_slice(&chunk);
                     let mut consumed = 0;
-                    while let Some(relative) = state.buffer[consumed..]
+                    'lines: while let Some(relative) = state.buffer[consumed..]
                         .iter()
                         .position(|byte| *byte == b'\n')
                     {
@@ -254,6 +289,7 @@ pub(super) fn responses_stream_response(
                             continue;
                         };
                         if payload.trim() == "[DONE]" {
+                            state.saw_done = true;
                             for event in state.translator.finish() {
                                 state.pending.push_back(Ok(Bytes::from(event)));
                             }
@@ -266,9 +302,25 @@ pub(super) fn responses_stream_response(
                             state.done = true;
                             break;
                         }
-                        if let Ok(chunk) = serde_json::from_str::<Value>(payload.trim()) {
-                            for event in state.translator.push(&chunk) {
-                                state.pending.push_back(Ok(Bytes::from(event)));
+                        match serde_json::from_str::<Value>(payload.trim()) {
+                            Ok(chunk) => {
+                                for event in state.translator.push(&chunk) {
+                                    state.pending.push_back(Ok(Bytes::from(event)));
+                                }
+                            }
+                            Err(error) => {
+                                for event in state.translator.fail(
+                                    "upstream_server_error",
+                                    format!("无效 SSE JSON: {error}"),
+                                ) {
+                                    state.pending.push_back(Ok(Bytes::from(event)));
+                                }
+                                if let Some(mut trace) = state.trace.take() {
+                                    let elapsed = trace.elapsed();
+                                    trace.finish(state.status.as_u16(), "failed", elapsed).ok();
+                                }
+                                state.done = true;
+                                break 'lines;
                             }
                         }
                     }
@@ -277,25 +329,43 @@ pub(super) fn responses_stream_response(
                     }
                 }
                 Some(Err(error)) => {
+                    for event in state
+                        .translator
+                        .fail("upstream_network_error", format!("读取上游流失败: {error}"))
+                    {
+                        state.pending.push_back(Ok(Bytes::from(event)));
+                    }
                     if let Some(mut trace) = state.trace.take() {
                         let elapsed = trace.elapsed();
                         trace
                             .finish(state.status.as_u16(), "stream_error", elapsed)
                             .ok();
                     }
-                    state
-                        .pending
-                        .push_back(Err(std::io::Error::other(error.to_string())));
                     state.done = true;
                 }
                 None => {
-                    for event in state.translator.finish() {
+                    let events = if state.saw_done {
+                        state.translator.finish()
+                    } else {
+                        state
+                            .translator
+                            .fail("incomplete_stream", "上游流在 [DONE] 前结束")
+                    };
+                    for event in events {
                         state.pending.push_back(Ok(Bytes::from(event)));
                     }
                     if let Some(mut trace) = state.trace.take() {
                         let elapsed = trace.elapsed();
                         trace
-                            .finish(state.status.as_u16(), "completed", elapsed)
+                            .finish(
+                                state.status.as_u16(),
+                                if state.saw_done {
+                                    "completed"
+                                } else {
+                                    "incomplete"
+                                },
+                                elapsed,
+                            )
                             .ok();
                     }
                     state.done = true;
