@@ -304,6 +304,45 @@ describe("App shell", () => {
     wrapper.unmount();
   });
 
+  it("orders client authentication before endpoint and model catalog cards", async () => {
+    mockSnapshotIpc();
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const order = wrapper
+      .findAll(".connect-card-grid > .connect-card")
+      .map((card) => {
+        return [
+          "account-card",
+          "api-key-card",
+          "endpoint-card",
+          "model-card",
+        ].find((className) => card.classes().includes(className));
+      });
+
+    expect(order).toEqual([
+      "account-card",
+      "api-key-card",
+      "endpoint-card",
+      "model-card",
+    ]);
+    wrapper.unmount();
+  });
+
+  it("omits model availability and count labels from the model catalog", async () => {
+    mockSnapshotIpc();
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const modelCard = wrapper.get(".model-card");
+    expect(modelCard.get(".model-name-row").text()).not.toContain("可用");
+    expect(modelCard.text()).not.toContain("个模型");
+    expect(modelCard.text()).toContain("deepseek-v4.1-flash");
+    expect(modelCard.text()).toContain("工具调用");
+    expect(modelCard.find(".copy-button").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
   it("shows a centered sign-in guide and no connection cards when no account is saved", async () => {
     const emptySnapshot = { ...signedOutSnapshot, accounts: [] };
     mockWindows("main");
@@ -515,25 +554,25 @@ describe("App shell", () => {
     const wrapper = mount(App);
     await flushPromises();
 
-    const copyButtons = wrapper.findAll(".copy-button");
-    expect(copyButtons).toHaveLength(2);
+    const modelButton = wrapper.get(".model-card .copy-button");
+    const endpointButton = wrapper.get(".endpoint-card .copy-button");
 
-    await copyButtons[0].trigger("click");
+    await modelButton.trigger("click");
     await flushPromises();
     expect(writeText).toHaveBeenCalledWith("deepseek-v4.1-flash");
-    expect(copyButtons[0].text()).toContain("已复制");
+    expect(modelButton.text()).toContain("已复制");
     expect(wrapper.find(".banner.notice").exists()).toBe(false);
 
-    await copyButtons[1].trigger("click");
+    await endpointButton.trigger("click");
     await flushPromises();
     expect(writeText).toHaveBeenCalledWith("http://127.0.0.1:11233/v1");
-    expect(copyButtons[1].text()).toContain("已复制");
-    expect(copyButtons[0].text()).toContain("复制 ID");
+    expect(endpointButton.text()).toContain("已复制");
+    expect(modelButton.text()).toContain("复制 ID");
     expect(wrapper.find(".banner.notice").exists()).toBe(false);
 
     await vi.advanceTimersByTimeAsync(2500);
     await flushPromises();
-    expect(copyButtons[1].text()).toContain("复制地址");
+    expect(endpointButton.text()).toContain("复制地址");
 
     wrapper.unmount();
   });

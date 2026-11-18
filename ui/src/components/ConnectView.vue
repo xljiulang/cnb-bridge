@@ -262,63 +262,20 @@ defineProps<{ app: DesktopApp }>();
         </article>
 
         <template v-if="app.connectionDetailsVisible">
-          <article class="card connect-card model-card">
+          <article class="card connect-card api-key-card">
             <div class="section-head">
               <div>
-                <span class="card-label">模型目录</span>
+                <span class="card-label">客户端鉴权</span>
                 <h2>
-                  <Cpu :size="16" aria-hidden="true" />
-                  可用于 Chat 与 Responses
+                  <KeyRound :size="16" aria-hidden="true" />
+                  API Key 可任意填写
                 </h2>
               </div>
-              <span class="card-meta">
-                {{ app.snapshot?.models.length ?? 0 }} 个模型
-              </span>
             </div>
-            <div class="model-list">
-              <section
-                v-for="model in app.snapshot?.models ?? []"
-                :key="model.id"
-                class="model-item"
-              >
-                <div class="model-item-head">
-                  <div class="model-title">
-                    <div class="model-name-row">
-                      <code>{{ model.id }}</code>
-                      <span class="badge live">可用</span>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    class="secondary compact copy-button"
-                    :aria-label="
-                      app.copiedKey === `model:${model.id}`
-                        ? `${model.id} 已复制`
-                        : `复制模型 ID ${model.id}`
-                    "
-                    @click="app.copyValue(`model:${model.id}`, model.id)"
-                  >
-                    <CheckCircle2
-                      v-if="app.copiedKey === `model:${model.id}`"
-                      :size="15"
-                      aria-hidden="true"
-                    />
-                    <Copy v-else :size="15" aria-hidden="true" />
-                    {{ app.copiedKey === `model:${model.id}` ? "已复制" : "复制 ID" }}
-                  </button>
-                </div>
-                <div class="model-capabilities" aria-label="模型能力">
-                  <span v-if="model.contextWindow">
-                    {{ formatContextWindow(model.contextWindow) }}
-                  </span>
-                  <span v-if="model.inputModalities.length">
-                    {{ formatInputModalities(model.inputModalities) }}
-                  </span>
-                  <span v-if="model.supportsTools">工具调用</span>
-                  <span v-if="model.supportsStreaming">流式输出</span>
-                </div>
-              </section>
-            </div>
+            <p>
+              网关不校验客户端 API Key，可填写 <code>local</code>、任意占位值或留空。
+              真正的 CNB 鉴权来自已登录账号。
+            </p>
           </article>
 
           <article
@@ -358,21 +315,61 @@ defineProps<{ app: DesktopApp }>();
             </div>
           </article>
 
-          <article class="card connect-card api-key-card">
+          <article class="card connect-card model-card">
             <div class="section-head">
               <div>
-                <span class="card-label">客户端鉴权</span>
+                <span class="card-label">模型目录</span>
                 <h2>
-                  <KeyRound :size="16" aria-hidden="true" />
-                  API Key 可任意填写
+                  <Cpu :size="16" aria-hidden="true" />
+                  可用于 Chat 与 Responses
                 </h2>
               </div>
             </div>
-            <p>
-              网关不校验客户端 API Key，可填写 <code>local</code>、任意占位值或留空。
-              真正的 CNB 鉴权来自已登录账号。
-            </p>
+            <div class="model-list">
+              <section
+                v-for="model in app.snapshot?.models ?? []"
+                :key="model.id"
+                class="model-item"
+              >
+                <div class="model-item-head">
+                  <div class="model-title">
+                    <div class="model-name-row">
+                      <code>{{ model.id }}</code>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    class="secondary compact copy-button"
+                    :aria-label="
+                      app.copiedKey === `model:${model.id}`
+                        ? `${model.id} 已复制`
+                        : `复制模型 ID ${model.id}`
+                    "
+                    @click="app.copyValue(`model:${model.id}`, model.id)"
+                  >
+                    <CheckCircle2
+                      v-if="app.copiedKey === `model:${model.id}`"
+                      :size="15"
+                      aria-hidden="true"
+                    />
+                    <Copy v-else :size="15" aria-hidden="true" />
+                    {{ app.copiedKey === `model:${model.id}` ? "已复制" : "复制 ID" }}
+                  </button>
+                </div>
+                <div class="model-capabilities" aria-label="模型能力">
+                  <span v-if="model.contextWindow">
+                    {{ formatContextWindow(model.contextWindow) }}
+                  </span>
+                  <span v-if="model.inputModalities.length">
+                    {{ formatInputModalities(model.inputModalities) }}
+                  </span>
+                  <span v-if="model.supportsTools">工具调用</span>
+                  <span v-if="model.supportsStreaming">流式输出</span>
+                </div>
+              </section>
+            </div>
           </article>
+
         </template>
       </div>
 
