@@ -18,6 +18,7 @@ pub const CNB_HOST_KEY_FINGERPRINT: &str = "SHA256:fnWZvpqd+VAIRJxaZdV1KVMFfDgcC
 pub const DEFAULT_TUNNEL_PORT: u16 = 11233;
 const SSH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const SSH_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(500), Duration::from_millis(1500)];
+const SSH_KEY_AUTH_REJECTED_MESSAGE: &str = "SSH 公钥认证被拒绝：请重新扫码绑定以同步公钥";
 
 fn tunnel_client_config() -> client::Config {
     client::Config {
@@ -28,14 +29,22 @@ fn tunnel_client_config() -> client::Config {
     }
 }
 
-fn is_retryable_connect_error(error: &russh::Error) -> bool {
+fn is_retryable_ssh_error(error: &russh::Error) -> bool {
     matches!(
         error,
         russh::Error::IO(_)
             | russh::Error::HUP
             | russh::Error::ConnectionTimeout
+            | russh::Error::KeepaliveTimeout
+            | russh::Error::InactivityTimeout
             | russh::Error::Disconnect
+            | russh::Error::SendError
     )
+}
+
+/// Returns whether the server explicitly rejected the registered public key.
+pub fn is_ssh_key_authentication_rejection(message: &str) -> bool {
+    message.trim() == SSH_KEY_AUTH_REJECTED_MESSAGE
 }
 
 struct TunnelAttemptError {
@@ -59,6 +68,15 @@ impl TunnelAttemptError {
     }
 }
 
+fn ssh_attempt_error(context: &str, error: &russh::Error) -> TunnelAttemptError {
+    let message = format!("{context}: {}", crate::net::format_error_chain(error));
+    if is_retryable_ssh_error(error) {
+        TunnelAttemptError::retryable(message)
+    } else {
+        TunnelAttemptError::fatal(message)
+    }
+}
+
 async fn connect_with_retry<T, F, Fut>(mut attempt: F, logger: Option<&Logger>) -> Result<T, String>
 where
     F: FnMut() -> Fut,
@@ -79,7 +97,7 @@ where
                     logger.log(
                         "warn",
                         format!(
-                            "SSH 连接尝试 {}/{} 失败，正在重试: {}",
+                            "SSH 连接/认证尝试 {}/{} 失败，正在重试: {}",
                             index + 1,
                             max_attempts,
                             error.message
@@ -222,52 +240,64 @@ pub async fn start_tunnel_with_logger(
     let private_key = PrivateKey::from_openssh(private_key_text)
         .map_err(|error| format!("解析专用 SSH 私钥失败: {error}"))?;
 
-    let mut session = connect_with_retry(
+    let private_key = Arc::new(private_key);
+    let session = connect_with_retry(
         || {
             let config = Arc::new(tunnel_client_config());
             let host = host.as_str();
+            let user = user.as_str();
+            let private_key = Arc::clone(&private_key);
             async move {
-                match timeout(
+                let mut session = match timeout(
                     SSH_HANDSHAKE_TIMEOUT,
                     client::connect(config, (host, port), ClientHandler),
                 )
                 .await
                 {
                     Ok(Ok(session)) => Ok(session),
-                    Ok(Err(error)) if is_retryable_connect_error(&error) => Err(
-                        TunnelAttemptError::retryable(format!("连接 CNB SSH 失败: {error}")),
-                    ),
-                    Ok(Err(error)) => Err(TunnelAttemptError::fatal(format!(
-                        "连接 CNB SSH 失败: {error}"
-                    ))),
+                    Ok(Err(error)) => Err(ssh_attempt_error("连接 CNB SSH 失败", &error)),
                     Err(_) => Err(TunnelAttemptError::retryable("连接 CNB SSH 超时")),
+                }?;
+                let none_auth =
+                    match timeout(SSH_HANDSHAKE_TIMEOUT, session.authenticate_none(user)).await {
+                        Ok(Ok(result)) => result,
+                        Ok(Err(error)) => {
+                            return Err(ssh_attempt_error("SSH 认证连接中断", &error));
+                        }
+                        Err(_) => {
+                            return Err(TunnelAttemptError::retryable("CNB SSH 认证超时"));
+                        }
+                    };
+                if none_auth.success() {
+                    return Ok(session);
+                }
+                let auth = match timeout(
+                    SSH_HANDSHAKE_TIMEOUT,
+                    session.authenticate_publickey(
+                        user,
+                        PrivateKeyWithHashAlg::new(private_key, None),
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(error)) => {
+                        return Err(ssh_attempt_error("SSH 公钥认证连接中断", &error));
+                    }
+                    Err(_) => {
+                        return Err(TunnelAttemptError::retryable("CNB SSH 公钥认证超时"));
+                    }
+                };
+                if auth.success() {
+                    Ok(session)
+                } else {
+                    Err(TunnelAttemptError::fatal(SSH_KEY_AUTH_REJECTED_MESSAGE))
                 }
             }
         },
         logger,
     )
     .await?;
-    let none_auth = timeout(SSH_HANDSHAKE_TIMEOUT, session.authenticate_none(&user))
-        .await
-        .map_err(|_| "CNB SSH 认证超时".to_string())?
-        .map_err(|error| format!("SSH 认证失败: {error}"))?;
-    let auth = if none_auth.success() {
-        none_auth
-    } else {
-        timeout(
-            SSH_HANDSHAKE_TIMEOUT,
-            session.authenticate_publickey(
-                &user,
-                PrivateKeyWithHashAlg::new(Arc::new(private_key), None),
-            ),
-        )
-        .await
-        .map_err(|_| "CNB SSH 认证超时".to_string())?
-        .map_err(|error| format!("SSH 公钥认证失败: {error}"))?
-    };
-    if !auth.success() {
-        return Err("SSH 公钥认证失败：请重新扫码绑定以同步公钥".to_string());
-    }
 
     let session = Arc::new(session);
     let listener = TcpListener::bind(("127.0.0.1", local_port))
@@ -426,8 +456,39 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         let logs = logger.recent(8);
         assert!(logs.iter().any(|entry| entry.level == "warn"
-            && entry.message.contains("SSH 连接尝试 1/3 失败")
+            && entry.message.contains("SSH 连接/认证尝试 1/3 失败")
             && entry.message.contains("connection reset")));
+    }
+
+    #[tokio::test]
+    async fn retries_a_transient_authentication_failure_before_success() {
+        let calls = AtomicUsize::new(0);
+        let logger = Logger::new(8);
+
+        let result = connect_with_retry(
+            || {
+                let attempt = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                async move {
+                    if attempt == 1 {
+                        Err(TunnelAttemptError::retryable(
+                            "SSH 公钥认证连接中断: Channel send error",
+                        ))
+                    } else {
+                        Ok("authenticated")
+                    }
+                }
+            },
+            Some(&logger),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, "authenticated");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let logs = logger.recent(8);
+        assert!(logs.iter().any(|entry| entry.level == "warn"
+            && entry.message.contains("SSH 连接/认证尝试 1/3 失败")
+            && entry.message.contains("Channel send error")));
     }
 
     #[tokio::test]
@@ -482,16 +543,41 @@ mod tests {
             "remote closed",
         ));
 
-        assert!(is_retryable_connect_error(&reset));
-        assert!(!is_retryable_connect_error(&russh::Error::UnknownKey));
-        assert!(!is_retryable_connect_error(&russh::Error::WrongServerSig));
+        assert!(is_retryable_ssh_error(&reset));
+        assert!(!is_retryable_ssh_error(&russh::Error::UnknownKey));
+        assert!(!is_retryable_ssh_error(&russh::Error::WrongServerSig));
+    }
+
+    #[test]
+    fn classifies_authentication_transport_errors_as_retryable() {
+        assert!(is_retryable_ssh_error(&russh::Error::SendError));
+        assert!(is_retryable_ssh_error(&russh::Error::HUP));
+        assert!(is_retryable_ssh_error(&russh::Error::Disconnect));
+        assert!(is_retryable_ssh_error(&russh::Error::ConnectionTimeout));
+        assert!(is_retryable_ssh_error(&russh::Error::KeepaliveTimeout));
+        assert!(is_retryable_ssh_error(&russh::Error::InactivityTimeout));
+        assert!(!is_retryable_ssh_error(&russh::Error::UnknownKey));
+        assert!(!is_retryable_ssh_error(&russh::Error::WrongServerSig));
+    }
+
+    #[test]
+    fn only_an_explicit_public_key_rejection_requires_rekeying() {
+        assert!(is_ssh_key_authentication_rejection(
+            SSH_KEY_AUTH_REJECTED_MESSAGE
+        ));
+        assert!(!is_ssh_key_authentication_rejection(
+            "SSH 公钥认证连接中断: Channel send error"
+        ));
+        assert!(!is_ssh_key_authentication_rejection(
+            "SSH 公钥认证连接中断: Connection closed by the remote side"
+        ));
     }
 
     #[test]
     fn classifies_windows_remote_disconnect_as_retryable() {
         let error = russh::Error::IO(std::io::Error::from_raw_os_error(10054));
 
-        assert!(is_retryable_connect_error(&error));
+        assert!(is_retryable_ssh_error(&error));
     }
 
     #[tokio::test]

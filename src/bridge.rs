@@ -6,7 +6,10 @@ use crate::gateway::{GatewayConfig, GatewayHandle};
 use crate::logging::Logger;
 use crate::settings::{Settings, SettingsStore};
 use crate::ssh_key::SshKeyStore;
-use crate::tunnel::{start_tunnel_with_logger, TunnelHandle, DEFAULT_TUNNEL_PORT};
+use crate::tunnel::{
+    is_ssh_key_authentication_rejection, start_tunnel_with_logger, TunnelHandle,
+    DEFAULT_TUNNEL_PORT,
+};
 use crate::workspace::{RepoProvisionError, RepoProvisioner, WorkspaceManager, WorkspaceSession};
 use serde::Serialize;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -333,16 +336,8 @@ impl Bridge {
             Err(error) => {
                 self.logger
                     .log("error", format!("SSH 隧道建立失败: {error}"));
-                let needs_key = error.contains("公钥")
-                    || error.contains("认证")
-                    || error.to_ascii_lowercase().contains("auth");
                 self.runtime.lock().await.error = Some(error.clone());
-                self.set_state(if needs_key {
-                    BridgeState::NeedsSshKey
-                } else {
-                    BridgeState::Failed
-                })
-                .await;
+                self.set_state(tunnel_failure_state(&error)).await;
                 return Err(BridgeError::Other(error));
             }
         };
@@ -853,6 +848,14 @@ impl Bridge {
     }
 }
 
+fn tunnel_failure_state(error: &str) -> BridgeState {
+    if is_ssh_key_authentication_rejection(error) {
+        BridgeState::NeedsSshKey
+    } else {
+        BridgeState::Failed
+    }
+}
+
 fn log_phase(logger: &Logger, phase: &str, phase_started: &mut Instant) {
     let now = Instant::now();
     logger.log(
@@ -1025,6 +1028,18 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&BridgeState::Idle).unwrap(),
             r#""idle""#
+        );
+    }
+
+    #[test]
+    fn only_explicit_key_rejection_requests_rekeying() {
+        assert_eq!(
+            tunnel_failure_state("SSH 公钥认证连接中断: Channel send error"),
+            BridgeState::Failed
+        );
+        assert_eq!(
+            tunnel_failure_state("SSH 公钥认证被拒绝：请重新扫码绑定以同步公钥"),
+            BridgeState::NeedsSshKey
         );
     }
 
