@@ -8,12 +8,17 @@ pub fn chat_to_responses(chat: &Value, model: &str, shape: &ToolShape) -> Result
         .unwrap_or("chatcmpl-local");
     let response_id = format!("resp_{}", chat_id.trim_start_matches("chatcmpl-"));
     let mut output = Vec::new();
+    let mut finish_reason = None;
     if let Some(choice) = chat
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
     {
         let message = choice.get("message").cloned().unwrap_or_else(|| json!({}));
+        finish_reason = choice
+            .get("finish_reason")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         if let Some(reasoning) = message
             .get("reasoning_content")
             .and_then(Value::as_str)
@@ -48,16 +53,31 @@ pub fn chat_to_responses(chat: &Value, model: &str, shape: &ToolShape) -> Result
             }
         }
     }
-    Ok(json!({
+    let status = if finish_reason.as_deref() == Some("length") {
+        "incomplete"
+    } else {
+        "completed"
+    };
+    let mut response = json!({
         "id": response_id,
         "object": "response",
-        "created_at": unix_now(),
-        "status": "completed",
+        "created_at": chat.get("created").and_then(Value::as_u64).unwrap_or_else(unix_now),
+        "status": status,
         "model": model,
         "output": output,
         "error": null,
         "usage": usage_to_responses(chat.get("usage"))
-    }))
+    });
+    if status == "incomplete" {
+        response["incomplete_details"] = json!({ "reason": "max_output_tokens" });
+    }
+    if let Some(fingerprint) = chat
+        .get("system_fingerprint")
+        .filter(|value| !value.is_null())
+    {
+        response["system_fingerprint"] = fingerprint.clone();
+    }
+    Ok(response)
 }
 
 pub(super) fn translate_tool_call(call: &Value, shape: &ToolShape) -> Result<Value, String> {

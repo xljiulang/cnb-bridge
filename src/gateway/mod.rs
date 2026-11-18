@@ -5,7 +5,9 @@ use crate::http_trace::{HttpTraceSession, HttpTraceStore};
 use crate::logging::Logger;
 use crate::model_catalog;
 use crate::prompt_gate::{apply_headers, detect_gate_block, normalize_chat, GateReport};
-use crate::responses::{chat_to_responses, responses_to_chat, ResponsesStream, ToolShape};
+use crate::responses::{
+    chat_to_responses, responses_to_chat, unsupported_feature_names, ResponsesStream, ToolShape,
+};
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri};
@@ -66,6 +68,14 @@ pub(super) async fn read_body_limited(
         body.extend_from_slice(&chunk);
     }
     Ok(Bytes::from(body))
+}
+
+pub(super) fn is_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"))
 }
 
 mod chat;

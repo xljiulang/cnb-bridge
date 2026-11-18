@@ -37,7 +37,7 @@ mod platform {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
 
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
     use windows_sys::Win32::System::Threading::CreateMutexW;
 
     use super::APP_MUTEX_NAME;
@@ -56,12 +56,16 @@ mod platform {
                 .encode_wide()
                 .chain(Some(0))
                 .collect::<Vec<_>>();
-            let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+            let handle = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) };
             if handle.is_null() {
                 return Err(format!(
                     "创建应用生命周期互斥量失败：{}",
                     std::io::Error::last_os_error()
                 ));
+            }
+            if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                let _ = unsafe { CloseHandle(handle) };
+                return Err(format!("应用生命周期互斥量 {} 已存在", APP_MUTEX_NAME));
             }
             Ok(Self { handle })
         }

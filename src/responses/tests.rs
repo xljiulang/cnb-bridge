@@ -118,6 +118,43 @@ fn restores_namespace_and_custom_tools_in_response() {
 }
 
 #[test]
+fn preserves_completion_metadata_and_incomplete_status() {
+    let chat = json!({
+        "id": "chatcmpl-meta",
+        "created": 42,
+        "system_fingerprint": "fp_1",
+        "choices": [{
+            "message": { "role": "assistant", "content": "partial" },
+            "finish_reason": "length"
+        }]
+    });
+
+    let response = chat_to_responses(&chat, "model", &ToolShape::default()).unwrap();
+
+    assert_eq!(response["created_at"], 42);
+    assert_eq!(response["status"], "incomplete");
+    assert_eq!(
+        response["incomplete_details"]["reason"],
+        "max_output_tokens"
+    );
+    assert_eq!(response["system_fingerprint"], "fp_1");
+}
+
+#[test]
+fn reports_unsupported_responses_features_without_rejecting_them() {
+    let request = json!({
+        "previous_response_id": "resp_old",
+        "text": { "format": { "type": "json_schema" } },
+        "input": [{ "type": "mcp_call" }]
+    });
+
+    assert_eq!(
+        unsupported_feature_names(&request),
+        ["previous_response_id", "text.format", "input.items"]
+    );
+}
+
+#[test]
 fn streams_text_and_terminal_events_in_order() {
     let mut stream = ResponsesStream::new("resp_1".to_string(), "deepseek-v4.1-flash".to_string());
     let mut events = stream.push(&json!({
@@ -210,6 +247,25 @@ fn repairs_missing_tool_outputs_in_history() {
     assert_eq!(chat["messages"][1]["role"], "tool");
     assert_eq!(chat["messages"][1]["tool_call_id"], "call_1");
     assert_eq!(chat["messages"][2]["content"], "continue");
+}
+
+#[test]
+fn removes_orphan_tool_outputs_before_translation() {
+    let request = json!({
+        "model": "model",
+        "input": [
+            { "type": "function_call_output", "call_id": "orphan", "output": "lost" },
+            { "type": "message", "role": "user", "content": "continue" }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+
+    assert!(chat["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|message| message["role"] != "tool"));
 }
 
 #[test]

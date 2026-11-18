@@ -6,10 +6,10 @@ pub(super) struct ModelResponses {
 }
 
 impl ModelResponses {
-    pub(super) fn from_catalog(catalog: &Value) -> Self {
+    pub(super) fn from_catalog(catalog: &Value) -> Result<Self, String> {
         let models = catalog["models"]
             .as_array()
-            .expect("validated model catalog has a models array");
+            .ok_or_else(|| "模型目录缺少 models 数组".to_string())?;
         let list =
             serde_json::to_vec(&json!({ "object": "list", "data": models })).unwrap_or_default();
         let details = models
@@ -20,10 +20,10 @@ impl ModelResponses {
                 Some((id, Bytes::from(body)))
             })
             .collect();
-        Self {
+        Ok(Self {
             list: Bytes::from(list),
             details,
-        }
+        })
     }
 }
 
@@ -52,4 +52,19 @@ pub(super) fn json_bytes_response(body: Bytes) -> Response<Body> {
         HeaderValue::from_static("application/json"),
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_invalid_catalog_without_panicking() {
+        let error = match ModelResponses::from_catalog(&json!({ "models": null })) {
+            Ok(_) => panic!("invalid catalog was accepted"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("models"));
+    }
 }

@@ -33,6 +33,16 @@ pub(super) async fn handle_responses(
             )
         }
     };
+    let unsupported = unsupported_feature_names(&request);
+    if !unsupported.is_empty() {
+        state.logger.log(
+            "warn",
+            format!(
+                "responses.compat.unsupported features={}",
+                unsupported.join(",")
+            ),
+        );
+    }
     let stream = request
         .get("stream")
         .and_then(Value::as_bool)
@@ -147,16 +157,10 @@ pub(super) async fn handle_responses(
     let request_id = response_request_id(&trace);
     log_gate_report(&state, &request_id, &gate_report);
     let status = status_from_reqwest(exchange.response.status());
-    let content_type = exchange
-        .response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    if stream && content_type.starts_with("text/event-stream") {
+    if stream && is_event_stream(exchange.response.headers()) {
         return responses_stream_response(exchange.response, model, shape, trace, &request_id);
     }
-    let chat = if content_type.starts_with("text/event-stream") {
+    let chat = if is_event_stream(exchange.response.headers()) {
         let aggregate = aggregate_chat_stream(exchange.response, trace, status, &model);
         match tokio::time::timeout(state.non_stream_timeout, aggregate).await {
             Ok(Ok(chat)) => chat,
@@ -226,6 +230,15 @@ pub(super) async fn handle_responses(
             }
         }
     };
+    if chat
+        .get("choices")
+        .and_then(Value::as_array)
+        .is_some_and(|choices| choices.len() > 1)
+    {
+        state
+            .logger
+            .log("warn", "responses.compat.multiple_choices kept=first");
+    }
     match chat_to_responses(&chat, &model, &shape) {
         Ok(response) => with_request_id(Json(response).into_response(), &request_id),
         Err(message) => error_response_with_id(

@@ -322,10 +322,8 @@ impl CnbApi {
         file_path: &str,
         reference: &str,
     ) -> Result<bool, ApiError> {
-        let url = format!(
-            "{}/{slug}/-/git/contents/{file_path}?ref={reference}",
-            self.base_url
-        );
+        let url = content_url(&self.base_url, slug, file_path, reference)
+            .map_err(ApiError::InvalidResponse)?;
         let response = net::send_idempotent(|| {
             self.http
                 .get(&url)
@@ -359,10 +357,17 @@ impl CnbApi {
     ) -> Result<String, ApiError> {
         use base64::Engine as _;
 
-        let path = format!("/{slug}/-/git/contents/{file_path}?ref={reference}");
-        let content: FileContent = self
-            .send_json(Method::GET, &path, token, None::<&()>)
-            .await?;
+        let url = content_url(&self.base_url, slug, file_path, reference)
+            .map_err(ApiError::InvalidResponse)?;
+        let response = net::send_idempotent(|| {
+            self.http
+                .get(&url)
+                .bearer_auth(token)
+                .header("Accept", "application/vnd.cnb.api+json")
+                .send()
+        })
+        .await?;
+        let content: FileContent = parse_json_response(response.status, &response.text)?;
         if content.encoding != "base64" {
             return Err(ApiError::InvalidResponse(format!(
                 "文件 {file_path} 未返回 base64 内容"
@@ -495,6 +500,29 @@ impl CnbApi {
     }
 }
 
+fn content_url(
+    base_url: &str,
+    slug: &str,
+    file_path: &str,
+    reference: &str,
+) -> Result<String, String> {
+    let mut url = url::Url::parse(base_url).map_err(|error| error.to_string())?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| "CNB API 地址不能作为路径基准".to_string())?;
+        segments.clear();
+        for segment in slug.split('/').chain(["-", "git", "contents"]) {
+            segments.push(segment);
+        }
+        for segment in file_path.split('/').filter(|segment| !segment.is_empty()) {
+            segments.push(segment);
+        }
+    }
+    url.query_pairs_mut().append_pair("ref", reference);
+    Ok(url.to_string())
+}
+
 fn parse_json_response<T>(status: StatusCode, text: &str) -> Result<T, ApiError>
 where
     T: for<'de> Deserialize<'de>,
@@ -546,6 +574,22 @@ mod tests {
             parse_remote_error(r#"{"errcode":10024,"errmsg":"resource mismatch"}"#);
         assert_eq!(code, Some(10024));
         assert_eq!(message, "resource mismatch");
+    }
+
+    #[test]
+    fn content_url_encodes_paths_and_reference() {
+        let url = content_url(
+            "https://api.cnb.cool",
+            "team/repo",
+            "docs/hello world.md",
+            "feature/test",
+        )
+        .unwrap();
+
+        assert_eq!(
+            url,
+            "https://api.cnb.cool/team/repo/-/git/contents/docs/hello%20world.md?ref=feature%2Ftest"
+        );
     }
 
     #[test]

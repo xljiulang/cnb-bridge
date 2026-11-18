@@ -50,6 +50,10 @@ pub(super) fn with_cors(mut response: Response<Body>) -> Response<Body> {
         header::ACCESS_CONTROL_MAX_AGE,
         HeaderValue::from_static("86400"),
     );
+    headers.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("x-request-id, retry-after"),
+    );
     response
 }
 

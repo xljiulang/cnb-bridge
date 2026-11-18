@@ -13,7 +13,9 @@ pub(super) struct TextTrack {
 pub(super) struct CallTrack {
     item_id: String,
     call_id: String,
-    name: String,
+    display_name: String,
+    namespace: Option<String>,
+    custom: bool,
     arguments: String,
     output_index: usize,
 }
@@ -192,11 +194,10 @@ impl ResponsesStream {
         }
         if self.failure.is_none() {
             for call in self.calls.values() {
-                let (name, _) = self.shape.resolve(&call.name);
-                if !self.shape.is_custom(&name) && normalize_arguments(&call.arguments).1 {
+                if !call.custom && normalize_arguments(&call.arguments).1 {
                     self.failure = Some((
                         "malformed_tool_call_arguments".to_string(),
-                        format!("tool call arguments for {name} are invalid"),
+                        format!("tool call arguments for {} are invalid", call.display_name),
                     ));
                     break;
                 }
@@ -204,9 +205,7 @@ impl ResponsesStream {
         }
         if self.failure.is_none() {
             for (_, call) in std::mem::take(&mut self.calls) {
-                let (name, namespace) = self.shape.resolve(&call.name);
-                let custom = self.shape.is_custom(&name);
-                if custom {
+                if call.custom {
                     let input = custom_tool_input(&call.arguments);
                     events.push(sse_event(
                         "response.custom_tool_call_input.done",
@@ -223,7 +222,7 @@ impl ResponsesStream {
                             "type": "custom_tool_call",
                             "status": "completed",
                             "call_id": call.call_id,
-                            "name": name,
+                                "name": call.display_name,
                             "input": input
                         });
                         self.output.push(item.clone());
@@ -248,10 +247,10 @@ impl ResponsesStream {
                         "type": "function_call",
                         "status": "completed",
                         "call_id": call.call_id,
-                        "name": name,
+                        "name": call.display_name,
                         "arguments": call.arguments
                     });
-                    if let Some(namespace) = namespace {
+                    if let Some(namespace) = call.namespace {
                         item["namespace"] = json!(namespace);
                     }
                     events.push(sse_event(
@@ -467,7 +466,8 @@ impl ResponsesStream {
                 .unwrap_or("")
                 .to_string();
             let (display_name, namespace) = self.shape.resolve(&name);
-            let item = if self.shape.is_custom(&display_name) {
+            let custom = self.shape.is_custom(&display_name);
+            let item = if custom {
                 json!({
                     "id": item_id,
                     "type": "custom_tool_call",
@@ -485,7 +485,7 @@ impl ResponsesStream {
                     "name": display_name,
                     "arguments": ""
                 });
-                if let Some(namespace) = namespace {
+                if let Some(namespace) = namespace.clone() {
                     item["namespace"] = json!(namespace);
                 }
                 item
@@ -495,7 +495,9 @@ impl ResponsesStream {
                 CallTrack {
                     item_id: item_id.clone(),
                     call_id,
-                    name,
+                    display_name,
+                    namespace,
+                    custom,
                     arguments: String::new(),
                     output_index,
                 },
@@ -513,8 +515,7 @@ impl ResponsesStream {
             if !arguments.is_empty() {
                 if let Some(track) = self.calls.get_mut(&tool_index) {
                     track.arguments.push_str(arguments);
-                    let custom = self.shape.is_custom(&track.name);
-                    let event = if custom {
+                    let event = if track.custom {
                         "response.custom_tool_call_input.delta"
                     } else {
                         "response.function_call_arguments.delta"

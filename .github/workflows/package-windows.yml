@@ -157,6 +157,19 @@ jobs:
       - name: Test Rust workspace
         run: cargo test --workspace
 
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run strict clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test agent template
+        run: node --test tests/agent.test.mjs
+
+      - name: Verify application versions
+        shell: pwsh
+        run: pwsh -File scripts/check-version.ps1
+
       - name: Build frontend
         run: npm --prefix ui run build
 
@@ -210,6 +223,10 @@ jobs:
       - name: Compile installer
         shell: pwsh
         run: |
+          if (Test-Path -LiteralPath "installer/output") {
+            Remove-Item -LiteralPath "installer/output" -Recurse -Force
+          }
+
           if (-not (Test-Path -LiteralPath $env:INNO_SETUP_ISCC -PathType Leaf)) {
             throw "INNO_SETUP_ISCC is missing or invalid"
           }

@@ -683,6 +683,22 @@ fn responses_stream_buffer_enforces_the_size_limit() {
 }
 
 #[test]
+fn event_stream_content_type_is_case_insensitive_and_parameterized() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("Text/Event-Stream; charset=utf-8"),
+    );
+    assert!(is_event_stream(&headers));
+
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    assert!(!is_event_stream(&headers));
+}
+
+#[test]
 fn chat_completion_aggregation_rejects_in_stream_errors() {
     let mut accumulator = ChatCompletionAccumulator::default();
     let error = accumulator
@@ -983,6 +999,13 @@ async fn routes_expose_cors_method_errors_and_not_found_contract() {
             .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
             .unwrap(),
         "*"
+    );
+    assert_eq!(
+        options
+            .headers()
+            .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+            .unwrap(),
+        "x-request-id, retry-after"
     );
 
     let wrong_method = client

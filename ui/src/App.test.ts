@@ -470,7 +470,6 @@ describe("App shell", () => {
 
   it("logs in with a selected saved account and confirms removal", async () => {
     const calls: { command: string; args: unknown }[] = [];
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     mockWindows("main");
     mockIPC(
       (command, args) => {
@@ -522,8 +521,13 @@ describe("App shell", () => {
     ];
     removeButtons[1].click();
     await flushPromises();
-    expect(window.confirm).toHaveBeenCalledOnce();
-    expect(window.confirm).toHaveBeenCalledWith("确认从本机移除账号 鲍勃？");
+    expect(document.body.querySelector(".confirm-dialog")?.textContent).toContain(
+      "从本机移除 鲍勃",
+    );
+    (
+      document.body.querySelector(".confirm-dialog .danger") as HTMLElement
+    ).click();
+    await flushPromises();
     expect(
       calls.find((call) => call.command === "remove_account")?.args,
     ).toEqual({ username: "bob" });

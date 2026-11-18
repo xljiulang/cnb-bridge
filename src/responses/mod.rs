@@ -13,7 +13,7 @@ mod response;
 mod stream;
 mod tools;
 
-pub use request::responses_to_chat;
+pub use request::{responses_to_chat, unsupported_feature_names};
 pub use response::{chat_to_responses, usage_to_responses};
 pub use stream::ResponsesStream;
 pub use tools::ToolShape;

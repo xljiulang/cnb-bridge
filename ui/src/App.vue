@@ -68,4 +68,42 @@ const app = useDesktopApp();
       <AboutView v-else :app="app" />
     </main>
   </div>
+  <Teleport to="body">
+    <div
+      v-if="app.pendingAccountRemoval"
+      class="confirm-backdrop"
+      @click.self="app.cancelRemoveSavedAccount"
+    >
+      <section
+        class="confirm-dialog"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="remove-account-title"
+      >
+        <span class="card-label">移除账号</span>
+        <h2 id="remove-account-title">
+          从本机移除 {{ app.pendingAccountRemoval.displayName }}？
+        </h2>
+        <p>账号凭据会从本机删除，之后需要重新扫码或登录才能恢复。</p>
+        <div class="confirm-actions">
+          <button
+            type="button"
+            class="secondary"
+            :disabled="app.busy"
+            @click="app.cancelRemoveSavedAccount"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            class="danger"
+            :disabled="app.busy"
+            @click="app.confirmRemoveSavedAccount"
+          >
+            移除账号
+          </button>
+        </div>
+      </section>
+    </div>
+  </Teleport>
 </template>

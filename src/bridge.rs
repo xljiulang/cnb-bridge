@@ -4,13 +4,14 @@ use crate::account::{AccountError, AccountManager, AccountStatus};
 use crate::api::{ApiError, CnbApi, Namespace, WorkspaceDetail};
 use crate::gateway::{GatewayConfig, GatewayHandle};
 use crate::logging::Logger;
-use crate::settings::SettingsStore;
+use crate::settings::{Settings, SettingsStore};
 use crate::ssh_key::SshKeyStore;
 use crate::tunnel::{start_tunnel_with_logger, TunnelHandle, DEFAULT_TUNNEL_PORT};
 use crate::workspace::{RepoProvisionError, RepoProvisioner, WorkspaceManager};
 use serde::Serialize;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio::sync::Mutex;
 
 /// High-level bridge state.
@@ -70,6 +71,7 @@ pub struct Bridge {
     logger: Arc<Logger>,
     health_client: reqwest::Client,
     http_log_filter: AtomicU8,
+    settings_cache: StdMutex<Settings>,
     runtime: Mutex<Runtime>,
     transition: Mutex<()>,
     organization_transition: Mutex<()>,
@@ -87,6 +89,7 @@ struct Runtime {
     error: Option<String>,
     ssh_public_key: Option<String>,
     repo_creation_url: Option<String>,
+    manual_creation_pending: bool,
     gateway_port: Option<u16>,
 }
 
@@ -98,10 +101,8 @@ impl Bridge {
         keys: SshKeyStore,
         logger: Arc<Logger>,
     ) -> Self {
-        let http_log_filter = settings
-            .load()
-            .map(|settings| settings.http_log_filter)
-            .unwrap_or_default();
+        let initial_settings = settings.load().unwrap_or_default();
+        let http_log_filter = initial_settings.http_log_filter;
         Self {
             api: CnbApi::new(),
             account,
@@ -114,6 +115,7 @@ impl Bridge {
                 .build()
                 .expect("static health-check client configuration is valid"),
             http_log_filter: AtomicU8::new(encode_http_log_filter(http_log_filter)),
+            settings_cache: StdMutex::new(initial_settings),
             runtime: Mutex::new(Runtime::default()),
             transition: Mutex::new(()),
             organization_transition: Mutex::new(()),
@@ -161,14 +163,12 @@ impl Bridge {
     }
 
     async fn start_locked(&self) -> Result<BridgeSnapshot, BridgeError> {
-        let settings = match self.load_settings() {
-            Ok(settings) => settings,
-            Err(error) => {
-                self.set_error(BridgeState::Failed, error.clone()).await;
-                return Err(BridgeError::Other(error));
-            }
-        };
-        let manual_creation_pending = self.runtime.lock().await.repo_creation_url.is_some();
+        let (settings, settings_warning) = self.load_settings_with_fallback();
+        if let Some(error) = settings_warning {
+            self.logger
+                .log("warn", format!("设置文件不可用，使用缓存: {error}"));
+        }
+        let manual_creation_pending = self.runtime.lock().await.manual_creation_pending;
 
         let token = match self.account.access_token().await {
             Ok(token) => token,
@@ -234,6 +234,7 @@ impl Bridge {
                     let mut runtime = self.runtime.lock().await;
                     runtime.repo_slug = Some(slug.clone());
                     runtime.repo_creation_url = Some(url);
+                    runtime.manual_creation_pending = true;
                     runtime.error = Some(if manual_creation_pending {
                         format!(
                             "尚未检测到仓库 {slug}。请确认已在 CNB 创建该私有空仓库，然后再次点击“重新检查仓库”。"
@@ -257,6 +258,7 @@ impl Bridge {
             let mut runtime = self.runtime.lock().await;
             runtime.repo_slug = Some(repo.slug.clone());
             runtime.repo_creation_url = None;
+            runtime.manual_creation_pending = false;
             runtime.error = None;
         }
         self.logger.log(
@@ -358,16 +360,22 @@ impl Bridge {
             });
             runtime.workspace_sn = None;
             runtime.repo_creation_url = None;
+            runtime.manual_creation_pending = false;
         }
         self.snapshot().await
     }
 
     /// Starts the persistent local gateway.
     pub async fn start_gateway(self: &Arc<Self>, port: u16) -> Result<(), BridgeError> {
+        let previous = self.gateway.lock().await.take();
+        if let Some(previous) = previous {
+            previous.stop().await;
+        }
         let gateway = match GatewayHandle::start(Arc::clone(self), GatewayConfig::new(port)).await {
             Ok(gateway) => gateway,
             Err(error) => {
-                self.set_error(BridgeState::Failed, error.clone()).await;
+                self.logger
+                    .log("error", format!("绑定本地网关失败: {error}"));
                 return Err(BridgeError::Other(error));
             }
         };
@@ -389,16 +397,38 @@ impl Bridge {
     /// Rebinds the local gateway when no requests are active.
     pub async fn rebind_gateway(self: &Arc<Self>, port: u16) -> Result<(), BridgeError> {
         let current = self.gateway.lock().await.take();
-        if let Some(gateway) = current {
+        let previous_port = if let Some(gateway) = current {
             if gateway.active_connections() != 0 {
                 *self.gateway.lock().await = Some(gateway);
                 return Err(BridgeError::Other(
                     "本地端点仍有活跃请求，请等待请求结束后再修改端口".to_string(),
                 ));
             }
+            let previous_port = gateway.port();
             gateway.stop().await;
+            previous_port
+        } else {
+            self.runtime
+                .lock()
+                .await
+                .gateway_port
+                .unwrap_or(crate::settings::DEFAULT_LOCAL_PORT)
+        };
+        match self.start_gateway(port).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if let Err(rollback) = self.start_gateway(previous_port).await {
+                    self.set_error(
+                        BridgeState::Failed,
+                        format!(
+                            "切换本地端口失败: {error}; 回滚端口 {previous_port} 失败: {rollback}"
+                        ),
+                    )
+                    .await;
+                }
+                Err(error)
+            }
         }
-        self.start_gateway(port).await
     }
 
     /// Closes only local resources; the remote workspace is reclaimed by CNB.
@@ -488,12 +518,17 @@ impl Bridge {
         runtime.repo_slug = None;
         runtime.workspace_sn = None;
         runtime.error = None;
+        runtime.repo_creation_url = None;
+        runtime.manual_creation_pending = false;
     }
 
     /// Returns the current UI snapshot.
     pub async fn snapshot(&self) -> BridgeSnapshot {
-        let settings = self.load_settings().unwrap_or_default();
-        let runtime = self.runtime.lock().await;
+        let (settings, settings_warning) = self.load_settings_with_fallback();
+        let mut runtime = self.runtime.lock().await;
+        if runtime.error.is_none() {
+            runtime.error = settings_warning;
+        }
         let state = runtime.state.unwrap_or(BridgeState::SignedOut);
         BridgeSnapshot {
             state,
@@ -525,13 +560,37 @@ impl Bridge {
         Arc::clone(&self.logger)
     }
 
+    #[cfg(test)]
     fn load_settings(&self) -> Result<crate::settings::Settings, String> {
-        let mut settings = self.settings.load()?;
+        let (settings, warning) = self.load_settings_with_fallback();
+        match warning {
+            Some(error) => Err(error),
+            None => Ok(settings),
+        }
+    }
+
+    fn load_settings_with_fallback(&self) -> (Settings, Option<String>) {
+        let (mut settings, warning) = match self.settings.load() {
+            Ok(settings) => {
+                *self
+                    .settings_cache
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = settings.clone();
+                (settings, None)
+            }
+            Err(error) => (
+                self.settings_cache
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone(),
+                Some(error),
+            ),
+        };
         if let Some(account_settings) = self.account.active_bridge_settings() {
             settings.repo_namespace = account_settings.repo_namespace;
             settings.repo_name = account_settings.repo_name;
         }
-        Ok(settings)
+        (settings, warning)
     }
 
     pub(crate) fn http_log_filter(&self) -> crate::settings::HttpLogFilter {
@@ -616,7 +675,6 @@ impl Bridge {
         let mut runtime = self.runtime.lock().await;
         runtime.state = Some(state);
         runtime.error = Some(error);
-        runtime.repo_creation_url = None;
     }
 
     async fn fail_tunnel_health(&self, error: String) -> String {
@@ -826,6 +884,58 @@ mod tests {
         assert!(runtime.tunnel.is_none());
         assert_eq!(runtime.state, Some(BridgeState::Failed));
         assert_eq!(runtime.error.as_deref(), Some("health check failed"));
+    }
+
+    #[tokio::test]
+    async fn corrupt_settings_fall_back_to_last_known_values_and_report_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(temp.path().join("settings.json"));
+        store
+            .save(&crate::settings::Settings {
+                local_port: 12000,
+                ..crate::settings::Settings::default()
+            })
+            .unwrap();
+        let bridge = Bridge::new(
+            AccountManager::with_store(AccountStore::new(temp.path().join("account.bin"))),
+            store.clone(),
+            SshKeyStore::new(
+                temp.path().join("id_ed25519"),
+                temp.path().join("id_ed25519.pub"),
+            ),
+            Arc::new(Logger::new(32)),
+        );
+        std::fs::write(store.path(), b"{broken").unwrap();
+
+        let snapshot = bridge.snapshot().await;
+
+        assert_eq!(snapshot.local_port, 12000);
+        assert!(snapshot
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("解析设置")));
+    }
+
+    #[tokio::test]
+    async fn later_errors_preserve_pending_manual_repository_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&temp);
+        {
+            let mut runtime = bridge.runtime.lock().await;
+            runtime.manual_creation_pending = true;
+            runtime.repo_creation_url = Some("https://cnb.cool/new/repos".to_string());
+        }
+
+        bridge
+            .set_error(BridgeState::Failed, "later failure".to_string())
+            .await;
+
+        let snapshot = bridge.snapshot().await;
+        assert_eq!(
+            snapshot.repo_creation_url.as_deref(),
+            Some("https://cnb.cool/new/repos")
+        );
+        assert!(bridge.runtime.lock().await.manual_creation_pending);
     }
 
     #[test]

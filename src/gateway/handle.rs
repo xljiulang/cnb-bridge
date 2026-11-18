@@ -135,7 +135,7 @@ impl GatewayHandle {
         let state = GatewayState {
             bridge: Arc::clone(&bridge),
             activity: Arc::clone(&activity),
-            models: Arc::new(ModelResponses::from_catalog(model_catalog::catalog()?)),
+            models: Arc::new(ModelResponses::from_catalog(model_catalog::catalog()?)?),
             activation_timeout: config.activation_timeout,
             non_stream_timeout: config.non_stream_timeout,
             client: reqwest::Client::builder()

@@ -15,7 +15,7 @@ pub const AUTH_SCOPES: &str = "account-profile:r,account-engage:rw,group-manage:
 /// Builds the stable PAT name for one SSH public key and the current scopes.
 pub fn pat_resource_name(public_key: &str) -> Result<String, String> {
     let hash = public_key_hash(public_key)? ^ xxh3_64(AUTH_SCOPES.as_bytes());
-    Ok(format!("cnb-bridge-{hash}"))
+    Ok(crate::ssh_key::resource_name(hash))
 }
 
 /// Cookies and CSRF token extracted from the authenticated CNB WebView.

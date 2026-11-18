@@ -35,10 +35,11 @@ pub fn public_key_hash(public_key: &str) -> Result<u64, String> {
 
 /// Returns the stable CNB resource name for an OpenSSH public key.
 pub fn public_key_resource_name(public_key: &str) -> Result<String, String> {
-    Ok(format!(
-        "{RESOURCE_NAME_PREFIX}{}",
-        public_key_hash(public_key)?
-    ))
+    Ok(resource_name(public_key_hash(public_key)?))
+}
+
+pub(crate) fn resource_name(hash: u64) -> String {
+    format!("{RESOURCE_NAME_PREFIX}{hash}")
 }
 
 impl SshKeyStore {
@@ -68,7 +69,16 @@ impl SshKeyStore {
     /// Ensures a dedicated key exists and returns its OpenSSH public key text.
     pub fn ensure(&self) -> Result<String, String> {
         if self.private_path.exists() && self.public_path.exists() {
-            return self.public_key();
+            if let (Ok(private), Ok(public)) = (self.private_key_text(), self.public_key()) {
+                if let (Ok(private), Ok(public_key)) = (
+                    PrivateKey::from_openssh(&private),
+                    ssh_key::PublicKey::from_openssh(&public),
+                ) {
+                    if private.public_key() == &public_key {
+                        return Ok(public);
+                    }
+                }
+            }
         }
         self.regenerate()
     }
@@ -90,8 +100,12 @@ impl SshKeyStore {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("创建公钥目录失败: {error}"))?;
         }
-        std::fs::write(&self.public_path, public_text.as_bytes())
-            .map_err(|error| format!("写入 SSH 公钥失败: {error}"))?;
+        let temp = self.public_path.with_extension("pub.tmp");
+        std::fs::write(&temp, public_text.as_bytes())
+            .map_err(|error| format!("写入临时 SSH 公钥失败: {error}"))?;
+        let _ = std::fs::remove_file(&self.public_path);
+        std::fs::rename(&temp, &self.public_path)
+            .map_err(|error| format!("替换 SSH 公钥失败: {error}"))?;
         Ok(public_text)
     }
 
@@ -201,5 +215,23 @@ mod tests {
         assert!(!text.contains("BEGIN OPENSSH PRIVATE KEY"));
         let private = store.private_key_text().unwrap();
         assert!(private.contains("BEGIN OPENSSH PRIVATE KEY"));
+    }
+
+    #[test]
+    fn recreates_a_key_pair_when_the_public_key_does_not_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SshKeyStore::new(
+            dir.path().join("ssh-key.bin"),
+            dir.path().join("ssh-key.pub"),
+        );
+        let original = store.ensure().unwrap();
+        std::fs::write(store.public_path(), b"ssh-ed25519 invalid").unwrap();
+
+        let repaired = store.ensure().unwrap();
+
+        assert_ne!(repaired, "ssh-ed25519 invalid");
+        assert_ne!(repaired, original);
+        let private = PrivateKey::from_openssh(store.private_key_text().unwrap()).unwrap();
+        assert_eq!(private.public_key().to_openssh().unwrap(), repaired.trim());
     }
 }

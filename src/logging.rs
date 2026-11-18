@@ -5,8 +5,10 @@ use serde::Serialize;
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+const DEFAULT_LOG_LIMIT_BYTES: u64 = 10 * 1024 * 1024;
 
 /// One log entry shown by the UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -22,6 +24,8 @@ pub struct Logger {
     capacity: usize,
     entries: Mutex<VecDeque<LogEntry>>,
     file: Mutex<Option<File>>,
+    path: Option<PathBuf>,
+    max_file_bytes: u64,
 }
 
 impl Logger {
@@ -31,6 +35,8 @@ impl Logger {
             capacity: capacity.max(1),
             entries: Mutex::new(VecDeque::with_capacity(capacity.max(1))),
             file: Mutex::new(None),
+            path: None,
+            max_file_bytes: DEFAULT_LOG_LIMIT_BYTES,
         }
     }
 
@@ -38,6 +44,7 @@ impl Logger {
     pub fn with_file(capacity: usize, dir: impl AsRef<Path>) -> Self {
         let mut logger = Self::new(capacity);
         let path = dir.as_ref().join("cnb-bridge.log");
+        logger.path = Some(path.clone());
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -49,6 +56,13 @@ impl Logger {
         logger
     }
 
+    #[cfg(test)]
+    fn with_file_limit(capacity: usize, dir: impl AsRef<Path>, max_file_bytes: u64) -> Self {
+        let mut logger = Self::with_file(capacity, dir);
+        logger.max_file_bytes = max_file_bytes.max(1);
+        logger
+    }
+
     /// Appends one sanitized entry.
     pub fn log(&self, level: &str, message: impl Into<String>) {
         let entry = LogEntry {
@@ -57,11 +71,10 @@ impl Logger {
             message: redact_secrets(&message.into()),
         };
 
-        if let Ok(mut file) = self.file.lock() {
-            if let Some(file) = file.as_mut() {
-                let _ = writeln!(file, "{} [{}] {}", entry.time, entry.level, entry.message);
-            }
-        }
+        self.write_file_entry(&format!(
+            "{} [{}] {}",
+            entry.time, entry.level, entry.message
+        ));
 
         if let Ok(mut entries) = self.entries.lock() {
             if entries.len() == self.capacity {
@@ -78,6 +91,30 @@ impl Logger {
         };
         let skip = entries.len().saturating_sub(limit);
         entries.iter().skip(skip).cloned().collect()
+    }
+
+    fn write_file_entry(&self, line: &str) {
+        let Some(path) = self.path.as_ref() else {
+            return;
+        };
+        let Ok(mut file) = self.file.lock() else {
+            return;
+        };
+        let current_size = file
+            .as_ref()
+            .and_then(|file| file.metadata().ok())
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if current_size.saturating_add(line.len() as u64 + 1) > self.max_file_bytes {
+            *file = None;
+            let rotated = path.with_extension("log.1");
+            let _ = std::fs::remove_file(&rotated);
+            let _ = std::fs::rename(path, &rotated);
+            *file = OpenOptions::new().create(true).append(true).open(path).ok();
+        }
+        if let Some(file) = file.as_mut() {
+            let _ = writeln!(file, "{line}");
+        }
     }
 }
 
@@ -148,5 +185,20 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join("cnb-bridge.log")).unwrap();
         assert!(text.contains("[info] one"));
         assert!(text.contains("[warn] two"));
+    }
+
+    #[test]
+    fn file_sink_rotates_when_the_size_limit_is_reached() {
+        let dir = tempfile::tempdir().unwrap();
+        let logger = Logger::with_file_limit(8, dir.path(), 80);
+
+        logger.log("info", "first message that is reasonably long");
+        logger.log("info", "second message that forces rotation");
+
+        assert!(dir.path().join("cnb-bridge.log").is_file());
+        assert!(dir.path().join("cnb-bridge.log.1").is_file());
+        assert!(std::fs::read_to_string(dir.path().join("cnb-bridge.log.1"))
+            .unwrap()
+            .contains("first message"));
     }
 }

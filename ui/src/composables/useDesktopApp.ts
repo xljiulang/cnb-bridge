@@ -76,6 +76,10 @@ export function useDesktopApp() {
   const usageError = ref<string | null>(null);
   const creatingOrganization = ref(false);
   const accountLoginUsername = ref<string | null>(null);
+  const pendingAccountRemoval = ref<{
+    username: string;
+    displayName: string;
+  } | null>(null);
   const settingsDraft = reactive<Settings>({
     repoNamespace: "",
     repoName: "cnb-ai-bridge",
@@ -428,8 +432,18 @@ export function useDesktopApp() {
     const displayName =
       accounts.value.find((account) => account.username === username)
         ?.displayName || username;
-    if (!window.confirm(`确认从本机移除账号 ${displayName}？`)) return;
-    await run(() => removeAccountApi(username), "账号已移除");
+    pendingAccountRemoval.value = { username, displayName };
+  }
+
+  function cancelRemoveSavedAccount() {
+    pendingAccountRemoval.value = null;
+  }
+
+  async function confirmRemoveSavedAccount() {
+    const pending = pendingAccountRemoval.value;
+    if (!pending || busy.value) return;
+    pendingAccountRemoval.value = null;
+    await run(() => removeAccountApi(pending.username), "账号已移除");
   }
 
   async function logout() {
@@ -709,6 +723,7 @@ export function useDesktopApp() {
     accounts,
     activeAccount,
     accountLoginUsername,
+    pendingAccountRemoval,
     organizationRequired,
     organizationReady,
     settingsDirty,
@@ -735,6 +750,8 @@ export function useDesktopApp() {
     login,
     loginSavedAccount,
     removeSavedAccount,
+    cancelRemoveSavedAccount,
+    confirmRemoveSavedAccount,
     logout,
     startBridge,
     stopBridge,

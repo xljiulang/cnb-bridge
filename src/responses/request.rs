@@ -62,6 +62,39 @@ pub fn responses_to_chat(request: &Value, want_stream: bool) -> Result<Value, St
     Ok(chat)
 }
 
+/// Lists accepted-but-unsupported Responses features for compatibility logging.
+pub fn unsupported_feature_names(request: &Value) -> Vec<&'static str> {
+    let mut features = Vec::new();
+    if request.get("previous_response_id").is_some() {
+        features.push("previous_response_id");
+    }
+    if request.pointer("/text/format").is_some() {
+        features.push("text.format");
+    }
+    if request
+        .get("input")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                matches!(
+                    item.get("type").and_then(Value::as_str),
+                    Some(
+                        "local_shell_call"
+                            | "local_shell_call_output"
+                            | "computer_call"
+                            | "computer_call_output"
+                            | "mcp_call"
+                            | "mcp_list_tools"
+                    )
+                )
+            })
+        })
+    {
+        features.push("input.items");
+    }
+    features
+}
+
 pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) {
     let mut pending: Option<Value> = None;
     let mut reasoning: Option<String> = None;
@@ -209,6 +242,25 @@ pub(super) fn repair_tool_pairing(messages: &mut Vec<Value>) {
         }
         index = next + missing.len();
     }
+    let mut known_calls = HashSet::new();
+    messages.retain(|message| {
+        if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+            for id in calls
+                .iter()
+                .filter_map(|call| call.get("id").and_then(Value::as_str))
+            {
+                known_calls.insert(id.to_string());
+            }
+        }
+        if message.get("role").and_then(Value::as_str) == Some("tool") {
+            message
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| known_calls.contains(id))
+        } else {
+            true
+        }
+    });
 }
 
 pub(super) fn message_content(item: &Value) -> Value {

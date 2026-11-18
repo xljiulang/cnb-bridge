@@ -64,13 +64,7 @@ pub(super) async fn handle_chat(
         )
         .await;
     }
-    let content_type = exchange
-        .response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    if !prepared.downstream_stream && content_type.starts_with("text/event-stream") {
+    if !prepared.downstream_stream && is_event_stream(exchange.response.headers()) {
         let status = status_from_reqwest(exchange.response.status());
         let aggregate =
             aggregate_chat_stream(exchange.response, trace, status, &prepared.requested_model);

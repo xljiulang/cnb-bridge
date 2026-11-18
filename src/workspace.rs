@@ -173,8 +173,10 @@ impl<'a> RepoProvisioner<'a> {
         namespace_hint: &str,
         allow_create: bool,
     ) -> Result<RepoInfo, RepoProvisionError> {
-        let repos = self.api.list_repos(token).await?;
-        let namespaces = self.api.list_owned_namespaces(token).await?;
+        let (repos, namespaces) = tokio::try_join!(
+            self.api.list_repos(token),
+            self.api.list_owned_namespaces(token)
+        )?;
         let target = resolve_repo_target(repo_name, namespace_hint, &repos, &namespaces)
             .map_err(RepoProvisionError::Message)?;
         match target {
@@ -291,9 +293,23 @@ impl<'a> WorkspaceManager<'a> {
     ) -> Result<WorkspaceSession, ApiError> {
         let mut sn = running_sn(self.api, token, slug).await?;
         if sn.is_none() {
-            self.api.start_workspace(token, slug, branch).await?;
+            let started = self.api.start_workspace(token, slug, branch).await?;
+            let started_sn = started
+                .get("sn")
+                .or_else(|| started.pointer("/result/sn"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|sn| !sn.is_empty())
+                .map(str::to_string);
             for _ in 0..60 {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                if let Some(candidate) = started_sn.as_deref() {
+                    if let Ok(detail) = self.api.workspace_detail(token, slug, candidate).await {
+                        return Ok(WorkspaceSession {
+                            sn: candidate.to_string(),
+                            detail,
+                        });
+                    }
+                }
                 sn = running_sn(self.api, token, slug).await?;
                 if sn.is_some() {
                     break;
@@ -412,7 +428,18 @@ fn sync_template_to_existing(
         .map_err(|error| format!("设置现有仓库分支 {branch} 失败: {error}"))?;
     repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
         .map_err(|error| format!("检出现有仓库分支 {branch} 失败: {error}"))?;
+    let preserved_root_files = [".cnb.yml", "README.md"]
+        .into_iter()
+        .filter_map(|path| {
+            let full = dir.path().join(path);
+            std::fs::read(&full).ok().map(|contents| (path, contents))
+        })
+        .collect::<Vec<_>>();
     write_template(dir.path())?;
+    for (path, contents) in preserved_root_files {
+        std::fs::write(dir.path().join(path), contents)
+            .map_err(|error| format!("恢复用户管理的仓库文件 {path} 失败: {error}"))?;
+    }
     let obsolete_models = dir.path().join("agent/models.json");
     if obsolete_models.is_file() {
         std::fs::remove_file(&obsolete_models).map_err(|error| {
@@ -1346,6 +1373,6 @@ mod tests {
         let cnb_yml = tree.get_path(Path::new(".cnb.yml")).unwrap();
         let cnb_yml_blob = remote.find_blob(cnb_yml.id()).unwrap();
         let yml_text = std::str::from_utf8(cnb_yml_blob.content()).unwrap();
-        assert!(!yml_text.contains("keepAliveTimeout"));
+        assert!(yml_text.contains("keepAliveTimeout"));
     }
 }
