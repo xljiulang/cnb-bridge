@@ -89,7 +89,7 @@ export function useDesktopApp() {
     httpLogFilter: "abnormal",
     launchAtLogin: false,
   });
-  let timer: number | undefined;
+  let logTimer: number | undefined;
   let noticeTimer: number | undefined;
   let copyTimer: number | undefined;
   let usageTimer: number | undefined;
@@ -544,8 +544,11 @@ export function useDesktopApp() {
   }
 
   function handleVisibilityChange() {
-    if (document.visibilityState === "visible" && organizationReady.value) {
-      void loadUsage();
+    if (document.visibilityState === "visible") {
+      void refresh();
+      if (organizationReady.value) {
+        void loadUsage();
+      }
     }
   }
 
@@ -682,9 +685,8 @@ export function useDesktopApp() {
     await refresh();
     if (organizationReady.value) void loadUsage();
     await Promise.all([loadLogs(), loadHttpTraces()]);
-    timer = window.setInterval(() => {
+    logTimer = window.setInterval(() => {
       if (document.visibilityState !== "visible") return;
-      void refresh();
       if (tab.value === "logs") {
         if (logMode.value === "runtime") void loadLogs();
         else void loadHttpTraces();
@@ -700,7 +702,7 @@ export function useDesktopApp() {
   });
 
   onBeforeUnmount(() => {
-    if (timer) window.clearInterval(timer);
+    if (logTimer) window.clearInterval(logTimer);
     if (startingTimer) window.clearInterval(startingTimer);
     if (usageTimer) window.clearInterval(usageTimer);
     document.removeEventListener("visibilitychange", handleVisibilityChange);

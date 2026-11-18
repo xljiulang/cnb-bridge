@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 
 /// High-level bridge state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
@@ -74,6 +74,7 @@ pub struct Bridge {
     http_log_filter: AtomicU8,
     settings_cache: StdMutex<Settings>,
     runtime: Mutex<Runtime>,
+    runtime_changes: watch::Sender<()>,
     transition: Mutex<()>,
     organization_transition: Mutex<()>,
     gateway: Mutex<Option<GatewayHandle>>,
@@ -104,6 +105,7 @@ impl Bridge {
     ) -> Self {
         let initial_settings = settings.load().unwrap_or_default();
         let http_log_filter = initial_settings.http_log_filter;
+        let (runtime_changes, _) = watch::channel(());
         Self {
             api: CnbApi::new(),
             account,
@@ -118,6 +120,7 @@ impl Bridge {
             http_log_filter: AtomicU8::new(encode_http_log_filter(http_log_filter)),
             settings_cache: StdMutex::new(initial_settings),
             runtime: Mutex::new(Runtime::default()),
+            runtime_changes,
             transition: Mutex::new(()),
             organization_transition: Mutex::new(()),
             gateway: Mutex::new(None),
@@ -128,6 +131,11 @@ impl Bridge {
     pub async fn start(&self) -> Result<BridgeSnapshot, BridgeError> {
         self.ensure_active().await?;
         Ok(self.snapshot().await)
+    }
+
+    /// Subscribes to changes that may alter the UI bridge snapshot.
+    pub fn subscribe_runtime_changes(&self) -> watch::Receiver<()> {
+        self.runtime_changes.subscribe()
     }
 
     /// Ensures a CNB workspace and tunnel are active, coalescing concurrent callers.
@@ -153,6 +161,7 @@ impl Bridge {
             runtime.state = Some(BridgeState::PreparingKey);
             runtime.error = None;
         }
+        self.notify_runtime_changed();
         self.start_locked().await?;
         self.runtime
             .lock()
@@ -390,13 +399,16 @@ impl Bridge {
         let api = self.api.clone();
         let account = Arc::clone(&self.account);
         let logger = Arc::clone(&self.logger);
+        let runtime_changes = self.runtime_changes.clone();
         tokio::spawn(async move {
+            let mut changed = false;
             match api.current_user(&token).await {
                 Ok(user) => {
-                    if let Err(error) =
-                        account.update_profile_nickname(&user.username, Some(&user.nickname))
-                    {
-                        logger.log("warn", format!("后台刷新 CNB 昵称失败: {error}"));
+                    match account.update_profile_nickname(&user.username, Some(&user.nickname)) {
+                        Ok(_) => changed = true,
+                        Err(error) => {
+                            logger.log("warn", format!("后台刷新 CNB 昵称失败: {error}"));
+                        }
                     }
                 }
                 Err(error) => {
@@ -406,10 +418,14 @@ impl Bridge {
             match api.list_owned_namespaces(&token).await {
                 Ok(namespaces) => {
                     account.set_needs_organization(namespaces.is_empty());
+                    changed = true;
                 }
                 Err(error) => {
                     logger.log("warn", format!("后台刷新 CNB 组织状态失败: {error}"));
                 }
+            }
+            if changed {
+                runtime_changes.send_replace(());
             }
         });
     }
@@ -431,6 +447,7 @@ impl Bridge {
             });
             runtime.error = None;
         }
+        self.notify_runtime_changed();
         self.snapshot().await
     }
 
@@ -482,6 +499,7 @@ impl Bridge {
             runtime.repo_creation_url = None;
             runtime.manual_creation_pending = false;
         }
+        self.notify_runtime_changed();
         self.snapshot().await
     }
 
@@ -511,6 +529,8 @@ impl Bridge {
             BridgeState::SignedOut
         });
         runtime.error = None;
+        drop(runtime);
+        self.notify_runtime_changed();
         Ok(())
     }
 
@@ -581,6 +601,7 @@ impl Bridge {
             runtime.state = Some(BridgeState::Idle);
             runtime.error = None;
         }
+        self.notify_runtime_changed();
         self.logger
             .log("info", "SSH 隧道空闲 5 分钟，已关闭并等待 CNB 自然回收");
         true
@@ -610,6 +631,7 @@ impl Bridge {
             runtime.state = Some(BridgeState::Idle);
             runtime.error = Some(reason.clone());
         }
+        self.notify_runtime_changed();
         self.logger.log(
             "warn",
             format!("CNB 隧道已失效，下一次请求将重新连接: {reason}"),
@@ -623,11 +645,14 @@ impl Bridge {
             runtime.state = Some(BridgeState::Idle);
         }
         runtime.error = None;
+        drop(runtime);
+        self.notify_runtime_changed();
     }
 
     /// Clears the current bridge error without changing its lifecycle state.
     pub async fn dismiss_error(&self) {
         self.runtime.lock().await.error = None;
+        self.notify_runtime_changed();
     }
 
     /// Refreshes the UI state after credentials are removed.
@@ -640,6 +665,8 @@ impl Bridge {
         runtime.error = None;
         runtime.repo_creation_url = None;
         runtime.manual_creation_pending = false;
+        drop(runtime);
+        self.notify_runtime_changed();
     }
 
     /// Returns the current UI snapshot.
@@ -787,14 +814,24 @@ impl Bridge {
     }
 
     async fn set_state(&self, state: BridgeState) {
-        let mut runtime = self.runtime.lock().await;
-        runtime.state = Some(state);
+        {
+            let mut runtime = self.runtime.lock().await;
+            runtime.state = Some(state);
+        }
+        self.notify_runtime_changed();
     }
 
     async fn set_error(&self, state: BridgeState, error: String) {
-        let mut runtime = self.runtime.lock().await;
-        runtime.state = Some(state);
-        runtime.error = Some(error);
+        {
+            let mut runtime = self.runtime.lock().await;
+            runtime.state = Some(state);
+            runtime.error = Some(error);
+        }
+        self.notify_runtime_changed();
+    }
+
+    fn notify_runtime_changed(&self) {
+        self.runtime_changes.send_replace(());
     }
 
     async fn fail_tunnel_health(&self, error: String) -> String {
@@ -897,6 +934,74 @@ mod tests {
             ),
             Arc::new(Logger::new(32)),
         )
+    }
+
+    #[tokio::test]
+    async fn runtime_changes_notify_subscribers_without_blocking() {
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&temp);
+        let mut changes = bridge.subscribe_runtime_changes();
+
+        bridge
+            .set_error(BridgeState::Failed, "状态同步测试".to_string())
+            .await;
+        tokio::time::timeout(std::time::Duration::from_millis(100), changes.changed())
+            .await
+            .expect("state change notification timed out")
+            .expect("runtime change channel closed");
+        assert_eq!(bridge.snapshot().await.state, BridgeState::Failed);
+
+        bridge.dismiss_error().await;
+        tokio::time::timeout(std::time::Duration::from_millis(100), changes.changed())
+            .await
+            .expect("error change notification timed out")
+            .expect("runtime change channel closed");
+        assert_eq!(bridge.snapshot().await.error, None);
+    }
+
+    #[tokio::test]
+    async fn warm_profile_refresh_notifies_runtime_subscribers() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "username": "alice",
+                "nickname": "新昵称"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user/groups"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let account =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account.bin")));
+        account
+            .complete_token_login("token", Some("alice".to_string()), None, None, None)
+            .unwrap();
+        let mut bridge = Bridge::new(
+            account,
+            SettingsStore::new(temp.path().join("settings.json")),
+            SshKeyStore::new(
+                temp.path().join("id_ed25519"),
+                temp.path().join("id_ed25519.pub"),
+            ),
+            Arc::new(Logger::new(32)),
+        );
+        bridge.api = CnbApi::with_base_url(server.uri());
+        let mut changes = bridge.subscribe_runtime_changes();
+
+        bridge.spawn_warm_profile_refresh("token".to_string());
+        tokio::time::timeout(std::time::Duration::from_millis(500), changes.changed())
+            .await
+            .expect("profile refresh notification timed out")
+            .expect("runtime change channel closed");
+
+        let account = bridge.snapshot().await.account;
+        assert_eq!(account.display_name.as_deref(), Some("新昵称"));
+        assert!(account.needs_organization);
     }
 
     #[tokio::test]

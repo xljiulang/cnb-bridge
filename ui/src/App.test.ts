@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { clearMocks, mockIPC, mockWindows } from "@tauri-apps/api/mocks";
+import { emit } from "@tauri-apps/api/event";
 import App from "./App.vue";
 
 const account = {
@@ -266,14 +267,15 @@ describe("App shell", () => {
     expect(wrapper.text()).not.toContain("扫码窗口已关闭");
 
     nextError = "新的扫码错误";
-    await vi.advanceTimersByTimeAsync(30_000);
+    await emit("cnb-bridge://snapshot");
     await flushPromises();
     expect(wrapper.text()).toContain("新的扫码错误");
     wrapper.unmount();
   });
 
-  it("polls snapshots slowly and pauses while the window is hidden", async () => {
+  it("refreshes logs without polling snapshots and refreshes snapshots when visible", async () => {
     let snapshotCalls = 0;
+    let logCalls = 0;
     vi.useFakeTimers();
     mockWindows("main");
     mockIPC(
@@ -283,6 +285,8 @@ describe("App shell", () => {
             snapshotCalls += 1;
             return snapshot;
           case "get_logs":
+            logCalls += 1;
+            return [];
           case "list_http_traces":
           case "list_namespaces":
             return [];
@@ -302,23 +306,39 @@ describe("App shell", () => {
     await flushPromises();
     expect(snapshotCalls).toBe(initialCalls);
 
+    const logsButton = wrapper
+      .findAll("button")
+      .find((button) => button.text().trim() === "日志");
+    expect(logsButton).toBeDefined();
+    await logsButton!.trigger("click");
+    await flushPromises();
+    const snapshotCallsBeforeTimer = snapshotCalls;
+    const logCallsBeforeTimer = logCalls;
+
     await vi.advanceTimersByTimeAsync(30_000);
     await flushPromises();
-    expect(snapshotCalls).toBeGreaterThan(initialCalls);
+    expect(snapshotCalls).toBe(snapshotCallsBeforeTimer);
+    expect(logCalls).toBeGreaterThan(logCallsBeforeTimer);
 
-    const visibleCalls = snapshotCalls;
+    const hiddenSnapshotCalls = snapshotCalls;
+    const hiddenLogCalls = logCalls;
     Object.defineProperty(document, "visibilityState", {
       configurable: true,
       value: "hidden",
     });
     await vi.advanceTimersByTimeAsync(30_000);
     await flushPromises();
-    expect(snapshotCalls).toBe(visibleCalls);
+    expect(snapshotCalls).toBe(hiddenSnapshotCalls);
+    expect(logCalls).toBe(hiddenLogCalls);
 
     Object.defineProperty(document, "visibilityState", {
       configurable: true,
       value: "visible",
     });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flushPromises();
+    expect(snapshotCalls).toBeGreaterThan(hiddenSnapshotCalls);
+    expect(logCalls).toBe(hiddenLogCalls);
     wrapper.unmount();
   });
 

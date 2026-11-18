@@ -100,6 +100,12 @@ pub fn initialize(
     });
 
     let handle = app.handle().clone();
+    let runtime_changes_bridge = Arc::clone(&bridge);
+    let runtime_changes_app = handle.clone();
+    let runtime_changes = runtime_changes_bridge.subscribe_runtime_changes();
+    tauri::async_runtime::spawn(forward_runtime_changes(runtime_changes, move || {
+        let _ = runtime_changes_app.emit("cnb-bridge://snapshot", ());
+    }));
     ensure_organization_on_startup(Arc::clone(&bridge), handle.clone());
     let gateway_bridge = Arc::clone(&bridge);
     let gateway_port = settings_store_for_gateway(&handle);
@@ -115,6 +121,12 @@ pub fn initialize(
     });
 
     Ok(())
+}
+
+async fn forward_runtime_changes(mut changes: tokio::sync::watch::Receiver<()>, notify: impl Fn()) {
+    while changes.changed().await.is_ok() {
+        notify();
+    }
 }
 
 fn ensure_organization_on_startup(bridge: Arc<Bridge>, app: AppHandle) {
@@ -248,4 +260,44 @@ pub fn exit_with_shutdown(app: AppHandle) {
         }
         tray::exit_now(&app);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn forwards_bridge_runtime_changes_to_the_ui_notifier() {
+        let temp = tempfile::tempdir().unwrap();
+        let account = AccountManager::with_store(cnb_bridge::account::AccountStore::new(
+            temp.path().join("account.bin"),
+        ));
+        let bridge = Arc::new(Bridge::new(
+            account,
+            SettingsStore::new(temp.path().join("settings.json")),
+            SshKeyStore::new(
+                temp.path().join("id_ed25519"),
+                temp.path().join("id_ed25519.pub"),
+            ),
+            Arc::new(Logger::new(32)),
+        ));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_notifier = Arc::clone(&calls);
+        let changes = bridge.subscribe_runtime_changes();
+        let task = tokio::spawn(forward_runtime_changes(changes, move || {
+            calls_for_notifier.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        bridge.account_signed_out().await;
+        tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            while calls.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("runtime change was not forwarded");
+
+        task.abort();
+    }
 }
