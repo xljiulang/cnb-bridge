@@ -1,0 +1,156 @@
+use super::*;
+
+/// Translates a non-streaming Chat completion into a Responses object.
+pub fn chat_to_responses(chat: &Value, model: &str, shape: &ToolShape) -> Result<Value, String> {
+    let chat_id = chat
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("chatcmpl-local");
+    let response_id = format!("resp_{}", chat_id.trim_start_matches("chatcmpl-"));
+    let mut output = Vec::new();
+    if let Some(choice) = chat
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+    {
+        let message = choice.get("message").cloned().unwrap_or_else(|| json!({}));
+        if let Some(reasoning) = message
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+        {
+            output.push(json!({
+                "id": gen_id("rs"),
+                "type": "reasoning",
+                "summary": [{ "type": "summary_text", "text": reasoning }]
+            }));
+        }
+        let content = message.get("content").and_then(Value::as_str).unwrap_or("");
+        if !content.is_empty() {
+            output.push(json!({
+                "id": gen_id("msg"),
+                "type": "message",
+                "role": message
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("assistant"),
+                "status": "completed",
+                "content": [{
+                    "type": "output_text",
+                    "text": content,
+                    "annotations": []
+                }]
+            }));
+        }
+        if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+            for call in calls {
+                output.push(translate_tool_call(call, shape)?);
+            }
+        }
+    }
+    Ok(json!({
+        "id": response_id,
+        "object": "response",
+        "created_at": unix_now(),
+        "status": "completed",
+        "model": model,
+        "output": output,
+        "error": null,
+        "usage": usage_to_responses(chat.get("usage"))
+    }))
+}
+
+pub(super) fn translate_tool_call(call: &Value, shape: &ToolShape) -> Result<Value, String> {
+    let call_id = call
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let name = call
+        .pointer("/function/name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let arguments = call
+        .pointer("/function/arguments")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let (name, namespace) = shape.resolve(name);
+    if shape.is_custom(&name) || shape.custom.contains(&name) {
+        return Ok(json!({
+            "id": gen_id("ctc"),
+            "type": "custom_tool_call",
+            "status": "completed",
+            "call_id": call_id,
+            "name": name,
+            "input": custom_tool_input(arguments)
+        }));
+    }
+    let (arguments, repaired) = normalize_arguments(arguments);
+    if repaired {
+        return Err(format!(
+            "tool call arguments for {name} are not a JSON object"
+        ));
+    }
+    let mut item = json!({
+        "id": gen_id("fc"),
+        "type": "function_call",
+        "status": "completed",
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments
+    });
+    if let Some(namespace) = namespace {
+        item["namespace"] = json!(namespace);
+    }
+    Ok(item)
+}
+
+pub(super) fn custom_tool_input(arguments: &str) -> String {
+    serde_json::from_str::<Value>(arguments.trim())
+        .ok()
+        .and_then(|value| {
+            value
+                .get("input")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| arguments.to_string())
+}
+
+/// Maps Chat token usage fields to Responses usage fields.
+pub fn usage_to_responses(usage: Option<&Value>) -> Value {
+    let Some(usage) = usage else {
+        return json!({});
+    };
+    let mut output = json!({});
+    for (destination, source) in [
+        ("input_tokens", "prompt_tokens"),
+        ("output_tokens", "completion_tokens"),
+        ("total_tokens", "total_tokens"),
+    ] {
+        if let Some(value) = usage.get(source) {
+            output[destination] = value.clone();
+        }
+    }
+    let mut input_details = json!({});
+    if let Some(value) = usage.pointer("/prompt_tokens_details/cached_tokens") {
+        input_details["cached_tokens"] = value.clone();
+    }
+    if input_details
+        .as_object()
+        .is_some_and(|details| !details.is_empty())
+    {
+        output["input_tokens_details"] = input_details;
+    }
+    let mut output_details = json!({});
+    if let Some(value) = usage.pointer("/completion_tokens_details/reasoning_tokens") {
+        output_details["reasoning_tokens"] = value.clone();
+    }
+    if output_details
+        .as_object()
+        .is_some_and(|details| !details.is_empty())
+    {
+        output["output_tokens_details"] = output_details;
+    }
+    output
+}

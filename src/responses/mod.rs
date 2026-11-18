@@ -1,0 +1,26 @@
+//! Responses API to Chat Completions compatibility translation.
+
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const MISSING_TOOL_OUTPUT: &str =
+    "Tool output was missing from conversation history and has been replaced by the proxy.";
+
+mod request;
+mod response;
+mod stream;
+mod tools;
+
+pub use request::responses_to_chat;
+pub use response::{chat_to_responses, usage_to_responses};
+pub use stream::ResponsesStream;
+pub use tools::ToolShape;
+
+use response::*;
+use stream::*;
+use tools::*;
+
+#[cfg(test)]
+mod tests;
