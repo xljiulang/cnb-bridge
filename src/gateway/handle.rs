@@ -35,7 +35,7 @@ pub(super) fn gateway_upstream_client(config: &GatewayConfig) -> Result<reqwest:
         .map_err(|error| format!("创建本地 HTTP 客户端失败: {error}"))
 }
 
-pub(super) fn should_close_idle_tunnel(
+pub(super) fn should_stop_idle_workspace(
     active_connections: usize,
     idle_for: Duration,
     idle_timeout: Duration,
@@ -182,7 +182,7 @@ impl GatewayHandle {
                         }
                     }
                     _ = interval.tick() => {
-                        if !should_close_idle_tunnel(
+                        if !should_stop_idle_workspace(
                             idle_activity.active_connections(),
                             idle_activity.idle_for(),
                             idle_timeout,
@@ -192,7 +192,7 @@ impl GatewayHandle {
                         let Some(bridge) = idle_bridge.upgrade() else {
                             break;
                         };
-                        if bridge.sleep_tunnel().await {
+                        if bridge.stop_idle_workspace().await {
                             idle_activity.touch();
                         }
                     }

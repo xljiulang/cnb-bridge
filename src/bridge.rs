@@ -425,27 +425,6 @@ impl Bridge {
         });
     }
 
-    /// Stops the local tunnel while keeping the cloud workspace available.
-    pub async fn detach_local(&self) -> BridgeSnapshot {
-        let _transition = self.transition.lock().await;
-        let tunnel = self.runtime.lock().await.tunnel.take();
-        if let Some(tunnel) = tunnel {
-            tunnel.stop().await;
-        }
-        let connected = self.is_account_connected();
-        {
-            let mut runtime = self.runtime.lock().await;
-            runtime.state = Some(if connected {
-                BridgeState::Idle
-            } else {
-                BridgeState::SignedOut
-            });
-            runtime.error = None;
-        }
-        self.notify_runtime_changed();
-        self.snapshot().await
-    }
-
     /// Stops the tunnel and the cloud workspace.
     pub async fn stop_all(&self) -> BridgeSnapshot {
         let _transition = self.transition.lock().await;
@@ -578,27 +557,17 @@ impl Bridge {
         }
     }
 
-    /// Closes an idle tunnel while keeping the workspace alive.
-    pub async fn sleep_tunnel(&self) -> bool {
+    /// Stops an idle tunnel and its cloud workspace.
+    pub async fn stop_idle_workspace(&self) -> bool {
         let Ok(_transition) = self.transition.try_lock() else {
             return false;
         };
         if self.current_state().await != BridgeState::Ready {
             return false;
         }
-        let tunnel = self.runtime.lock().await.tunnel.take();
-        let Some(tunnel) = tunnel else {
-            return false;
-        };
-        tunnel.stop().await;
-        {
-            let mut runtime = self.runtime.lock().await;
-            runtime.state = Some(BridgeState::Idle);
-            runtime.error = None;
-        }
-        self.notify_runtime_changed();
         self.logger
-            .log("info", "SSH 隧道空闲 5 分钟，已关闭并等待 CNB 自然回收");
+            .log("info", "工作空间空闲 5 分钟，正在停止云主机");
+        self.stop_locked().await;
         true
     }
 
@@ -1085,22 +1054,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_tunnel_sleep_is_a_noop_outside_ready_state() {
+    async fn idle_workspace_stop_is_a_noop_outside_ready_state() {
         let temp = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&temp);
         bridge.runtime.lock().await.state = Some(BridgeState::Idle);
 
-        assert!(!bridge.sleep_tunnel().await);
+        assert!(!bridge.stop_idle_workspace().await);
     }
 
     #[tokio::test]
-    async fn detach_local_keeps_workspace_for_warm_restart() {
+    async fn idle_workspace_stop_stops_cloud_workspace_and_clears_its_sn() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/team/repo/-/workspace/detail/ws-kept"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "remoteSsh": "cnb@example.test"
-            })))
+        Mock::given(method("POST"))
+            .and(path("/workspace/stop"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let account =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account.bin")));
+        account
+            .complete_token_login("token", Some("alice".to_string()), None, None, None)
+            .unwrap();
+        let mut bridge = Bridge::new(
+            account,
+            SettingsStore::new(temp.path().join("settings.json")),
+            SshKeyStore::new(
+                temp.path().join("id_ed25519"),
+                temp.path().join("id_ed25519.pub"),
+            ),
+            Arc::new(Logger::new(32)),
+        );
+        bridge.api = CnbApi::with_base_url(server.uri());
+        {
+            let mut runtime = bridge.runtime.lock().await;
+            runtime.state = Some(BridgeState::Ready);
+            runtime.workspace_sn = Some("ws-idle".to_string());
+        }
+
+        assert!(bridge.stop_idle_workspace().await);
+
+        let snapshot = bridge.snapshot().await;
+        assert_eq!(snapshot.state, BridgeState::Idle);
+        assert_eq!(snapshot.workspace_sn, None);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stop_all_stops_workspace_and_clears_its_sn() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/workspace/stop"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
             .mount(&server)
             .await;
         let temp = tempfile::tempdir().unwrap();
@@ -1123,15 +1128,13 @@ mod tests {
             let mut runtime = bridge.runtime.lock().await;
             runtime.state = Some(BridgeState::Ready);
             runtime.repo_slug = Some("team/repo".to_string());
-            runtime.workspace_sn = Some("ws-kept".to_string());
+            runtime.workspace_sn = Some("ws-stopped".to_string());
         }
 
-        let snapshot = bridge.detach_local().await;
+        let snapshot = bridge.stop_all().await;
 
         assert_eq!(snapshot.state, BridgeState::Idle);
-        assert_eq!(snapshot.workspace_sn.as_deref(), Some("ws-kept"));
-        let (_, session) = bridge.try_reuse_workspace("token").await.unwrap();
-        assert_eq!(session.sn, "ws-kept");
+        assert_eq!(snapshot.workspace_sn, None);
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 

@@ -279,6 +279,7 @@ export function useDesktopApp() {
     return `${devCpuUsageAmount.value}，${devCpuUsagePercent.value}`;
   });
   const mainActionLabel = computed(() => {
+    if (bridgeState.value === "stopping") return "正在关闭…";
     if (startingBridge.value || bridgeTransitioning.value) {
       return startingSeconds.value > 0
         ? `正在启动… ${startingSeconds.value}s`
@@ -332,11 +333,15 @@ export function useDesktopApp() {
       },
       {
         label: "云主机",
-        detail: snapshot.value?.bridge.workspaceSn
-          ? ready.value
-            ? "工作空间与 SSH 通道"
-            : "工作空间已保留，按需重连"
-          : "启动工作空间",
+        detail: ready.value
+          ? "SSH 已连接"
+          : effectiveBridgeState === "stopping"
+            ? "正在停止"
+            : effectiveBridgeState === "connecting"
+              ? "正在连接"
+              : idle.value && snapshot.value?.bridge.workspaceSn
+                ? "等待重连"
+                : "按需启动",
         tone: tone(
           workspaceDone,
           Boolean(snapshot.value?.bridge.workspaceSn) ||

@@ -245,7 +245,7 @@ pub async fn create_cnb_namespace(
 
 #[tauri::command]
 pub async fn stop_bridge(state: State<'_, DesktopState>) -> Result<AppSnapshot, CommandError> {
-    let _ = state.bridge.detach_local().await;
+    let _ = state.bridge.stop_all().await;
     state.snapshot().await
 }
 

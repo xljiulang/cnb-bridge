@@ -394,9 +394,14 @@ describe("App shell", () => {
   });
 
   it("updates startup stages from bridge events while the start command is pending", async () => {
-    let currentSnapshot = snapshot;
-    let resolveStart!: (value: typeof snapshot) => void;
-    const pendingStart = new Promise<typeof snapshot>((resolve) => {
+    type SnapshotWithWorkspace = Omit<typeof snapshot, "bridge"> & {
+      bridge: Omit<typeof snapshot.bridge, "workspaceSn"> & {
+        workspaceSn: string | null;
+      };
+    };
+    let currentSnapshot: SnapshotWithWorkspace = snapshot;
+    let resolveStart!: (value: SnapshotWithWorkspace) => void;
+    const pendingStart = new Promise<SnapshotWithWorkspace>((resolve) => {
       resolveStart = resolve;
     });
     mockWindows("main");
@@ -425,10 +430,13 @@ describe("App shell", () => {
     await wrapper.get(".head-actions .primary").trigger("click");
     await flushPromises();
 
-    const publish = async (state: string) => {
+    const publish = async (
+      state: string,
+      workspaceSn: string | null = currentSnapshot.bridge.workspaceSn,
+    ) => {
       currentSnapshot = {
         ...currentSnapshot,
-        bridge: { ...currentSnapshot.bridge, state },
+        bridge: { ...currentSnapshot.bridge, state, workspaceSn },
       };
       await emit("cnb-bridge://snapshot");
       await flushPromises();
@@ -440,19 +448,24 @@ describe("App shell", () => {
     await publish("startingWorkspace");
     expect(wrapper.findAll(".pipeline .step")[2].classes()).toContain("current");
 
-    await publish("connecting");
+    await publish("connecting", "ws-connecting");
     expect(wrapper.findAll(".pipeline .step")[3].classes()).toContain("current");
+    expect(wrapper.findAll(".pipeline .step")[2].text()).toContain("正在连接");
+    expect(wrapper.findAll(".pipeline .step")[2].text()).not.toContain(
+      "工作空间与 SSH 通道",
+    );
 
     await publish("ready");
     expect(wrapper.text()).toContain("在线");
     expect(wrapper.findAll(".pipeline .step")[3].classes()).toContain("done");
+    expect(wrapper.findAll(".pipeline .step")[2].text()).toContain("SSH 已连接");
 
     resolveStart(currentSnapshot);
     await flushPromises();
     wrapper.unmount();
   });
 
-  it("keeps a detached cloud workspace marked ready in the pipeline", async () => {
+  it("marks a running cloud workspace after an unexpected tunnel disconnect", async () => {
     const detachedSnapshot = {
       ...snapshot,
       bridge: {
@@ -485,7 +498,58 @@ describe("App shell", () => {
     const workspaceStep = wrapper.findAll(".pipeline .step")[2];
     expect(workspaceStep.classes()).toContain("done");
     expect(workspaceStep.classes()).not.toContain("current");
-    expect(workspaceStep.text()).toContain("工作空间已保留");
+    expect(workspaceStep.text()).toContain("等待重连");
+    wrapper.unmount();
+  });
+
+  it("shows the workspace as restartable after a normal stop", async () => {
+    mockSnapshotIpc();
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const workspaceStep = wrapper.findAll(".pipeline .step")[2];
+    expect(workspaceStep.text()).toContain("按需启动");
+    expect(workspaceStep.text()).not.toContain("工作空间已保留");
+    wrapper.unmount();
+  });
+
+  it("shows a closing label while the bridge is stopping", async () => {
+    const stoppingSnapshot = {
+      ...snapshot,
+      bridge: {
+        ...snapshot.bridge,
+        state: "stopping",
+        workspaceSn: "ws-stopping",
+      },
+    };
+    mockWindows("main");
+    mockIPC(
+      (command) => {
+        switch (command) {
+          case "get_snapshot":
+            return stoppingSnapshot;
+          case "get_logs":
+          case "list_http_traces":
+          case "list_namespaces":
+            return [];
+          case "get_cnb_usage":
+            return null;
+          default:
+            return null;
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const action = wrapper.get(".head-actions .primary");
+    expect(action.text()).toContain("正在关闭");
+    expect(action.text()).not.toContain("正在启动");
+    const workspaceStep = wrapper.findAll(".pipeline .step")[2];
+    expect(workspaceStep.text()).toContain("正在停止");
+    expect(workspaceStep.text()).not.toContain("工作空间已保留");
+    expect(workspaceStep.text()).not.toContain("工作空间");
     wrapper.unmount();
   });
 
