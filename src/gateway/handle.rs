@@ -25,6 +25,16 @@ impl GatewayConfig {
     }
 }
 
+pub(super) fn gateway_upstream_client(config: &GatewayConfig) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(config.upstream_connect_timeout)
+        .read_timeout(config.upstream_read_timeout)
+        .pool_max_idle_per_host(0)
+        .build()
+        .map_err(|error| format!("创建本地 HTTP 客户端失败: {error}"))
+}
+
 pub(super) fn should_close_idle_tunnel(
     active_connections: usize,
     idle_for: Duration,
@@ -138,12 +148,7 @@ impl GatewayHandle {
             models: Arc::new(ModelResponses::from_catalog(model_catalog::catalog()?)?),
             activation_timeout: config.activation_timeout,
             non_stream_timeout: config.non_stream_timeout,
-            client: reqwest::Client::builder()
-                .no_proxy()
-                .connect_timeout(config.upstream_connect_timeout)
-                .read_timeout(config.upstream_read_timeout)
-                .build()
-                .map_err(|error| format!("创建本地 HTTP 客户端失败: {error}"))?,
+            client: gateway_upstream_client(&config)?,
             upstream_override,
             trace_store: HttpTraceStore::new(trace_root),
             logger: bridge.logger_handle(),

@@ -137,11 +137,15 @@ pub(super) async fn send_chat_request(
                 })
             }
             Err(error) => {
-                last_error = Some(error.to_string());
+                let detail = crate::net::format_error_chain(&error);
+                last_error = Some(detail.clone());
                 if attempt == 0 && state.upstream_override.is_none() {
                     state
                         .bridge
-                        .invalidate_tunnel(port, format!("本地 HTTP 网关连接 agent 失败: {error}"))
+                        .invalidate_tunnel(
+                            port,
+                            format!("本地 Gateway 到 Agent 连接失败，正在重建隧道: {detail}"),
+                        )
                         .await;
                 }
             }

@@ -22,6 +22,129 @@ fn gateway_config_uses_request_driven_defaults() {
     assert_eq!(config.non_stream_timeout, Duration::from_secs(120));
 }
 
+async fn read_http_request(stream: &mut TcpStream) -> bool {
+    let mut buffered = Vec::new();
+    loop {
+        let mut chunk = [0_u8; 4096];
+        let read = match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => return false,
+            Ok(read) => read,
+        };
+        buffered.extend_from_slice(&chunk[..read]);
+        let Some(header_end) = buffered.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = String::from_utf8_lossy(&buffered[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or_default();
+        let request_length = header_end + 4 + content_length;
+        while buffered.len() < request_length {
+            let read = match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => return false,
+                Ok(read) => read,
+            };
+            buffered.extend_from_slice(&chunk[..read]);
+        }
+        buffered.drain(..request_length);
+        return true;
+    }
+}
+
+#[tokio::test]
+async fn upstream_client_does_not_reuse_a_half_dead_keep_alive_connection() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let first_connection_requests = Arc::new(AtomicUsize::new(0));
+    let second_connection_requests = Arc::new(AtomicUsize::new(0));
+    let connection_count = Arc::new(AtomicUsize::new(0));
+    let first_for_server = Arc::clone(&first_connection_requests);
+    let second_for_server = Arc::clone(&second_connection_requests);
+    let count_for_server = Arc::clone(&connection_count);
+    let (shutdown, mut shutdown_rx) = watch::channel(false);
+    let server = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                Some(_) = connections.join_next(), if !connections.is_empty() => {}
+                accepted = listener.accept() => {
+                    let Ok((mut stream, _)) = accepted else {
+                        break;
+                    };
+                    let connection_index =
+                        count_for_server.fetch_add(1, Ordering::SeqCst);
+                    let first_requests = Arc::clone(&first_for_server);
+                    let second_requests = Arc::clone(&second_for_server);
+                    connections.spawn(async move {
+                        loop {
+                            if !read_http_request(&mut stream).await {
+                                return;
+                            }
+                            let request_index = if connection_index == 0 {
+                                first_requests.fetch_add(1, Ordering::SeqCst)
+                            } else {
+                                second_requests.fetch_add(1, Ordering::SeqCst)
+                            };
+                            if connection_index == 0 && request_index > 0 {
+                                std::future::pending::<()>().await;
+                            }
+                            let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\n\r\nok";
+                            if stream.write_all(response).await.is_err() {
+                                return;
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
+    });
+
+    let config = GatewayConfig {
+        port: 0,
+        activation_timeout: Duration::from_secs(1),
+        idle_timeout: Duration::from_secs(60),
+        upstream_connect_timeout: Duration::from_secs(1),
+        upstream_read_timeout: Duration::from_millis(100),
+        non_stream_timeout: Duration::from_secs(1),
+    };
+    let client = gateway_upstream_client(&config).unwrap();
+    let url = format!("http://{address}/chat/completions");
+
+    let first = client.post(&url).body("{}").send().await.unwrap();
+    assert_eq!(first.status(), reqwest::StatusCode::OK);
+    assert_eq!(first.text().await.unwrap(), "ok");
+
+    let second = client
+        .post(&url)
+        .body("{}")
+        .send()
+        .await
+        .expect("second request should use a fresh connection");
+    assert_eq!(second.status(), reqwest::StatusCode::OK);
+    assert_eq!(second.text().await.unwrap(), "ok");
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(connection_count.load(Ordering::SeqCst), 2);
+    assert_eq!(first_connection_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(second_connection_requests.load(Ordering::SeqCst), 1);
+
+    let _ = shutdown.send(true);
+    server.await.unwrap();
+}
+
 #[test]
 fn forwarded_headers_force_identity_content_encoding() {
     let mut headers = HeaderMap::new();

@@ -632,10 +632,7 @@ impl Bridge {
             runtime.error = Some(reason.clone());
         }
         self.notify_runtime_changed();
-        self.logger.log(
-            "warn",
-            format!("CNB 隧道已失效，下一次请求将重新连接: {reason}"),
-        );
+        self.logger.log("warn", reason);
     }
 
     /// Refreshes the UI state after account binding completes.
@@ -1140,6 +1137,43 @@ mod tests {
         let snapshot = bridge.snapshot().await;
         assert_eq!(snapshot.state, BridgeState::Ready);
         assert!(snapshot.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn tunnel_invalidation_logs_the_actual_agent_connection_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let account =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account.bin")));
+        let logger = Arc::new(Logger::new(32));
+        let bridge = Bridge::new(
+            account,
+            SettingsStore::new(temp.path().join("settings.json")),
+            SshKeyStore::new(
+                temp.path().join("id_ed25519"),
+                temp.path().join("id_ed25519.pub"),
+            ),
+            Arc::clone(&logger),
+        );
+        let (tunnel, address) = TunnelHandle::test_handle().await;
+        {
+            let mut runtime = bridge.runtime.lock().await;
+            runtime.state = Some(BridgeState::Ready);
+            runtime.tunnel = Some(tunnel);
+        }
+        let reason = "本地 Gateway 到 Agent 连接失败，正在重建隧道: connection reset".to_string();
+
+        bridge
+            .invalidate_tunnel(address.port(), reason.clone())
+            .await;
+
+        let messages = logger
+            .recent(8)
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(messages.contains(&reason));
+        assert!(!messages.contains("CNB 隧道已失效"));
     }
 
     #[tokio::test]
