@@ -3,7 +3,9 @@
 use chrono::Local;
 use serde::Serialize;
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::Path;
 use std::sync::Mutex;
 
 /// One log entry shown by the UI.
@@ -19,7 +21,7 @@ pub struct LogEntry {
 pub struct Logger {
     capacity: usize,
     entries: Mutex<VecDeque<LogEntry>>,
-    file: Option<PathBuf>,
+    file: Mutex<Option<File>>,
 }
 
 impl Logger {
@@ -28,14 +30,22 @@ impl Logger {
         Self {
             capacity: capacity.max(1),
             entries: Mutex::new(VecDeque::with_capacity(capacity.max(1))),
-            file: None,
+            file: Mutex::new(None),
         }
     }
 
     /// Creates a logger that also appends to `dir/cnb-bridge.log`.
     pub fn with_file(capacity: usize, dir: impl AsRef<Path>) -> Self {
         let mut logger = Self::new(capacity);
-        logger.file = Some(dir.as_ref().join("cnb-bridge.log"));
+        let path = dir.as_ref().join("cnb-bridge.log");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        *logger
+            .file
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner()) =
+            OpenOptions::new().create(true).append(true).open(path).ok();
         logger
     }
 
@@ -47,25 +57,17 @@ impl Logger {
             message: redact_secrets(&message.into()),
         };
 
+        if let Ok(mut file) = self.file.lock() {
+            if let Some(file) = file.as_mut() {
+                let _ = writeln!(file, "{} [{}] {}", entry.time, entry.level, entry.message);
+            }
+        }
+
         if let Ok(mut entries) = self.entries.lock() {
             if entries.len() == self.capacity {
                 entries.pop_front();
             }
-            entries.push_back(entry.clone());
-        }
-
-        if let Some(path) = &self.file {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-            {
-                use std::io::Write;
-                let _ = writeln!(file, "{} [{}] {}", entry.time, entry.level, entry.message);
-            }
+            entries.push_back(entry);
         }
     }
 
@@ -133,5 +135,18 @@ mod tests {
         let redacted = redact_secrets("Authorization: Bearer abcdefghijklmnop");
         assert!(!redacted.contains("abcdefghijklmnop"));
         assert!(redacted.contains("Bearer abcdefgh..."));
+    }
+
+    #[test]
+    fn file_sink_appends_without_reopening_per_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let logger = Logger::with_file(4, dir.path());
+
+        logger.log("info", "one");
+        logger.log("warn", "two");
+
+        let text = std::fs::read_to_string(dir.path().join("cnb-bridge.log")).unwrap();
+        assert!(text.contains("[info] one"));
+        assert!(text.contains("[warn] two"));
     }
 }

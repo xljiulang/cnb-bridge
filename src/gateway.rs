@@ -121,12 +121,39 @@ impl Drop for ActivityGuard {
 struct GatewayState {
     bridge: Arc<Bridge>,
     activity: Arc<GatewayActivity>,
-    models: Value,
+    models: Arc<ModelResponses>,
     activation_timeout: Duration,
     client: reqwest::Client,
     upstream_override: Option<u16>,
     trace_store: HttpTraceStore,
     logger: Arc<Logger>,
+}
+
+struct ModelResponses {
+    list: Bytes,
+    details: BTreeMap<String, Bytes>,
+}
+
+impl ModelResponses {
+    fn from_catalog(catalog: Value) -> Self {
+        let models = catalog["models"]
+            .as_array()
+            .expect("validated model catalog has a models array");
+        let list =
+            serde_json::to_vec(&json!({ "object": "list", "data": models })).unwrap_or_default();
+        let details = models
+            .iter()
+            .filter_map(|model| {
+                let id = model["id"].as_str()?.to_string();
+                let body = serde_json::to_vec(model).ok()?;
+                Some((id, Bytes::from(body)))
+            })
+            .collect();
+        Self {
+            list: Bytes::from(list),
+            details,
+        }
+    }
 }
 
 /// Handle owning one gateway listener and its monitoring task.
@@ -177,7 +204,7 @@ impl GatewayHandle {
         let state = GatewayState {
             bridge: Arc::clone(&bridge),
             activity: Arc::clone(&activity),
-            models: model_catalog::catalog()?,
+            models: Arc::new(ModelResponses::from_catalog(model_catalog::catalog()?)),
             activation_timeout: config.activation_timeout,
             client: reqwest::Client::builder()
                 .no_proxy()
@@ -305,7 +332,7 @@ fn begin_upstream_trace(
     let parts = UpstreamTraceParts {
         protocol,
         request_headers: &exchange.request_headers,
-        request_body: &exchange.request_body,
+        request_body: exchange.request_body.clone(),
         request_target: &exchange.request_target,
         started: exchange.started,
         started_at: exchange.started_at,
@@ -318,7 +345,7 @@ fn begin_upstream_trace(
 struct UpstreamTraceParts<'a> {
     protocol: &'a str,
     request_headers: &'a HeaderMap,
-    request_body: &'a [u8],
+    request_body: Bytes,
     request_target: &'a str,
     started: Instant,
     started_at: std::time::SystemTime,
@@ -344,7 +371,7 @@ fn begin_upstream_trace_parts(
             "POST",
             parts.request_target,
             parts.request_headers,
-            parts.request_body,
+            parts.request_body.clone(),
         )
         .ok();
     trace
@@ -503,30 +530,27 @@ async fn handle_health(State(_state): State<GatewayState>) -> Response<Body> {
 }
 
 async fn handle_models(State(state): State<GatewayState>) -> Response<Body> {
-    Json(json!({
-        "object": "list",
-        "data": state.models["models"].clone()
-    }))
-    .into_response()
+    json_bytes_response(state.models.list.clone())
 }
 
 async fn handle_model(State(state): State<GatewayState>, Path(id): Path<String>) -> Response<Body> {
-    let model = state.models["models"]
-        .as_array()
-        .and_then(|models| {
-            models
-                .iter()
-                .find(|model| model.get("id").and_then(Value::as_str) == Some(id.as_str()))
-        })
-        .cloned();
-    match model {
-        Some(model) => Json(model).into_response(),
+    match state.models.details.get(&id) {
+        Some(model) => json_bytes_response(model.clone()),
         None => error_response(
             StatusCode::NOT_FOUND,
             "model_not_found",
             format!("The model '{id}' does not exist"),
         ),
     }
+}
+
+fn json_bytes_response(body: Bytes) -> Response<Body> {
+    let mut response = Response::new(Body::from(body));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
 }
 
 async fn handle_chat(
@@ -625,9 +649,15 @@ fn prepare_chat_request(bytes: Bytes, headers: &HeaderMap) -> PreparedChatReques
     object.insert("stream".to_string(), Value::Bool(true));
     let mut value = Value::Object(object);
     let report = normalize_chat(&mut value, headers);
-    let encoded = serde_json::to_vec(&value).expect("a parsed JSON object is always serializable");
+    let body = if !downstream_stream || report.changed() {
+        Bytes::from(
+            serde_json::to_vec(&value).expect("a parsed JSON object is always serializable"),
+        )
+    } else {
+        bytes
+    };
     PreparedChatRequest {
-        body: Bytes::from(encoded),
+        body,
         gate_report: report,
         valid_json_object: true,
         downstream_stream,
@@ -732,7 +762,7 @@ async fn handle_responses(
             &UpstreamTraceParts {
                 protocol: "responses",
                 request_headers: &exchange.request_headers,
-                request_body: &exchange.request_body,
+                request_body: exchange.request_body.clone(),
                 request_target: &exchange.request_target,
                 started: exchange.started,
                 started_at: exchange.started_at,
@@ -1030,7 +1060,7 @@ fn status_from_reqwest(status: reqwest::StatusCode) -> StatusCode {
 
 fn is_request_hop_header(name: &str) -> bool {
     matches!(
-        name.to_ascii_lowercase().as_str(),
+        name,
         "host"
             | "content-length"
             | "connection"
@@ -1047,7 +1077,7 @@ fn is_request_hop_header(name: &str) -> bool {
 fn copy_response_headers(source: &reqwest::header::HeaderMap, destination: &mut HeaderMap) {
     for (name, value) in source.iter() {
         if matches!(
-            name.as_str().to_ascii_lowercase().as_str(),
+            name.as_str(),
             "connection"
                 | "keep-alive"
                 | "proxy-authenticate"
@@ -1424,9 +1454,8 @@ fn responses_stream_response(
                             continue;
                         };
                         if payload.trim() == "[DONE]" {
-                            let terminal = state.translator.finish().concat();
-                            if !terminal.is_empty() {
-                                state.pending.push_back(Ok(Bytes::from(terminal)));
+                            for event in state.translator.finish() {
+                                state.pending.push_back(Ok(Bytes::from(event)));
                             }
                             if let Some(mut trace) = state.trace.take() {
                                 let elapsed = trace.elapsed();
@@ -1438,9 +1467,8 @@ fn responses_stream_response(
                             break;
                         }
                         if let Ok(chunk) = serde_json::from_str::<Value>(payload.trim()) {
-                            let events = state.translator.push(&chunk).concat();
-                            if !events.is_empty() {
-                                state.pending.push_back(Ok(Bytes::from(events)));
+                            for event in state.translator.push(&chunk) {
+                                state.pending.push_back(Ok(Bytes::from(event)));
                             }
                         }
                     }
@@ -1461,9 +1489,8 @@ fn responses_stream_response(
                     state.done = true;
                 }
                 None => {
-                    let terminal = state.translator.finish().concat();
-                    if !terminal.is_empty() {
-                        state.pending.push_back(Ok(Bytes::from(terminal)));
+                    for event in state.translator.finish() {
+                        state.pending.push_back(Ok(Bytes::from(event)));
                     }
                     if let Some(mut trace) = state.trace.take() {
                         let elapsed = trace.elapsed();
@@ -2019,6 +2046,20 @@ mod tests {
             assert_eq!(prepared.requested_model, "hy4-flash");
             assert!(prepared.valid_json_object);
         }
+    }
+
+    #[test]
+    fn chat_preparation_reuses_unchanged_streaming_body() {
+        let original = Bytes::from_static(
+            br#"{"model":"hy4-flash","messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+        );
+        let original_pointer = original.as_ptr();
+
+        let prepared = prepare_chat_request(original, &HeaderMap::new());
+
+        assert_eq!(prepared.body.as_ptr(), original_pointer);
+        assert!(prepared.downstream_stream);
+        assert!(!prepared.gate_report.changed());
     }
 
     #[tokio::test]
