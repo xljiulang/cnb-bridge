@@ -1,0 +1,40 @@
+{
+  "repoSlug": "xljiulang/cnb-bridge-benchmark",
+  "branch": "main",
+  "config": "D:\\github\\cyarp-cnb\\scripts\\benchmark-workspace\\no-vscode.cnb.yml",
+  "runs": [
+    {
+      "run": 1,
+      "success": true,
+      "workspaceMs": 8496,
+      "sshMs": 410,
+      "agentHealthMs": 5024,
+      "totalMs": 14289,
+      "error": null
+    },
+    {
+      "run": 2,
+      "success": true,
+      "workspaceMs": 10609,
+      "sshMs": 321,
+      "agentHealthMs": 4337,
+      "totalMs": 15616,
+      "error": null
+    },
+    {
+      "run": 3,
+      "success": true,
+      "workspaceMs": 10571,
+      "sshMs": 499,
+      "agentHealthMs": 2901,
+      "totalMs": 14338,
+      "error": null
+    }
+  ],
+  "failureCount": 0,
+  "failureRate": 0.0,
+  "workspaceMedianMs": 10571,
+  "sshMedianMs": 410,
+  "agentHealthMedianMs": 4337,
+  "totalMedianMs": 14338
+}

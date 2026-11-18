@@ -6,35 +6,35 @@
     {
       "run": 1,
       "success": true,
-      "workspaceMs": 8447,
-      "sshMs": 392,
-      "agentHealthMs": 4053,
-      "totalMs": 13339,
+      "workspaceMs": 8459,
+      "sshMs": 244,
+      "agentHealthMs": 2855,
+      "totalMs": 11919,
       "error": null
     },
     {
       "run": 2,
       "success": true,
-      "workspaceMs": 10628,
-      "sshMs": 253,
-      "agentHealthMs": 3904,
-      "totalMs": 15193,
+      "workspaceMs": 8497,
+      "sshMs": 524,
+      "agentHealthMs": 4339,
+      "totalMs": 13740,
       "error": null
     },
     {
       "run": 3,
       "success": true,
-      "workspaceMs": 10690,
-      "sshMs": 493,
-      "agentHealthMs": 3815,
-      "totalMs": 15424,
+      "workspaceMs": 8585,
+      "sshMs": 282,
+      "agentHealthMs": 4453,
+      "totalMs": 13680,
       "error": null
     }
   ],
   "failureCount": 0,
   "failureRate": 0.0,
-  "workspaceMedianMs": 10628,
-  "sshMedianMs": 392,
-  "agentHealthMedianMs": 3904,
-  "totalMedianMs": 15193
+  "workspaceMedianMs": 8497,
+  "sshMedianMs": 282,
+  "agentHealthMedianMs": 4339,
+  "totalMedianMs": 13680
 }
