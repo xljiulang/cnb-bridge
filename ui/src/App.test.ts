@@ -612,6 +612,103 @@ describe("App shell", () => {
     wrapper.unmount();
   });
 
+  it("shows newest runtime logs first while preserving HTTP record order", async () => {
+    const runtimeLogs = [
+      { time: "2026-11-18 10:00:00", level: "info", message: "oldest info" },
+      { time: "2026-11-18 10:00:01", level: "error", message: "old error" },
+      { time: "2026-11-18 10:00:02", level: "info", message: "middle info" },
+      { time: "2026-11-18 10:00:03", level: "error", message: "latest error" },
+    ];
+    const httpTraces = [
+      {
+        id: "new-trace",
+        startedAt: "2026-11-18T10:00:03Z",
+        method: "POST",
+        path: "/v1/responses",
+        status: 200,
+        elapsedMs: 10,
+        protocol: "responses->chat",
+        stream: true,
+        requestBytes: 10,
+        responseBytes: 20,
+        requestTruncated: false,
+        responseTruncated: false,
+        result: "completed",
+      },
+      {
+        id: "old-trace",
+        startedAt: "2026-11-18T10:00:01Z",
+        method: "POST",
+        path: "/v1/chat/completions",
+        status: 200,
+        elapsedMs: 20,
+        protocol: "chat",
+        stream: true,
+        requestBytes: 10,
+        responseBytes: 20,
+        requestTruncated: false,
+        responseTruncated: false,
+        result: "completed",
+      },
+    ];
+    mockWindows("main");
+    mockIPC(
+      (command) => {
+        switch (command) {
+          case "get_snapshot":
+            return snapshot;
+          case "get_logs":
+            return runtimeLogs;
+          case "list_http_traces":
+            return httpTraces;
+          case "list_namespaces":
+            return [];
+          case "get_cnb_usage":
+            return null;
+          default:
+            return null;
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.findAll("nav button")[2].trigger("click");
+    await flushPromises();
+
+    expect(wrapper.findAll(".log-row").map((row) => row.text())).toEqual([
+      expect.stringContaining("latest error"),
+      expect.stringContaining("middle info"),
+      expect.stringContaining("old error"),
+      expect.stringContaining("oldest info"),
+    ]);
+
+    await wrapper.get(".filter-control .select-trigger").trigger("click");
+    (
+      [...document.body.querySelectorAll<HTMLElement>(".select-option")].find(
+        (option) => option.textContent?.trim() === "Error",
+      ) as HTMLElement
+    ).click();
+    await flushPromises();
+    expect(wrapper.findAll(".log-row").map((row) => row.text())).toEqual([
+      expect.stringContaining("latest error"),
+      expect.stringContaining("old error"),
+    ]);
+
+    await wrapper
+      .findAll(".mode-switch button")
+      .find((button) => button.text() === "HTTP 记录")!
+      .trigger("click");
+    await flushPromises();
+    expect(
+      wrapper.findAll(".http-log-row").map((row) => row.text()),
+    ).toEqual([
+      expect.stringContaining("/v1/responses"),
+      expect.stringContaining("/v1/chat/completions"),
+    ]);
+    wrapper.unmount();
+  });
+
   it("keeps an organization warning badge on a connected account", async () => {
     const needsOrganizationSnapshot = {
       ...snapshot,

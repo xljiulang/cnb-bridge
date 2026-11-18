@@ -158,11 +158,13 @@ export function useDesktopApp() {
       (namespace) => namespace.path === settingsDraft.repoNamespace,
     ),
   );
-  const filteredLogs = computed(() =>
-    logFilter.value === "all"
-      ? logs.value
-      : logs.value.filter((entry) => entry.level === logFilter.value),
-  );
+  const filteredLogs = computed(() => {
+    const filtered =
+      logFilter.value === "all"
+        ? logs.value
+        : logs.value.filter((entry) => entry.level === logFilter.value);
+    return [...filtered].reverse();
+  });
   const namespaceOptions = computed(() => {
     const options = [{ value: "", label: "自动选择" }];
     if (settingsDraft.repoNamespace && !namespaceAvailable.value) {
