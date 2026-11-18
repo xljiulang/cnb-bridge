@@ -1,17 +1,18 @@
 //! End-to-end bridge state machine.
 
 use crate::account::{AccountError, AccountManager, AccountStatus};
-use crate::api::{ApiError, CnbApi, Namespace, WorkspaceDetail};
+use crate::api::{ApiError, CnbApi, Namespace, WorkspaceDetail, WorkspaceStopOutcome};
 use crate::gateway::{GatewayConfig, GatewayHandle};
 use crate::logging::Logger;
 use crate::settings::{Settings, SettingsStore};
 use crate::ssh_key::SshKeyStore;
 use crate::tunnel::{start_tunnel_with_logger, TunnelHandle, DEFAULT_TUNNEL_PORT};
-use crate::workspace::{RepoProvisionError, RepoProvisioner, WorkspaceManager};
+use crate::workspace::{RepoProvisionError, RepoProvisioner, WorkspaceManager, WorkspaceSession};
 use serde::Serialize;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::time::Instant;
 use tokio::sync::Mutex;
 
 /// High-level bridge state.
@@ -163,6 +164,8 @@ impl Bridge {
     }
 
     async fn start_locked(&self) -> Result<BridgeSnapshot, BridgeError> {
+        let started = Instant::now();
+        let mut phase_started = started;
         let (settings, settings_warning) = self.load_settings_with_fallback();
         if let Some(error) = settings_warning {
             self.logger
@@ -178,6 +181,22 @@ impl Bridge {
                 return Err(BridgeError::Account(error));
             }
         };
+        if !manual_creation_pending {
+            if let Some((repo_slug, session)) = self.try_reuse_workspace(&token).await {
+                self.logger.log(
+                    "info",
+                    format!(
+                        "bridge warm start reused workspace {} ({repo_slug})",
+                        session.sn
+                    ),
+                );
+                self.set_state(BridgeState::Connecting).await;
+                self.spawn_warm_profile_refresh(token.clone());
+                return self
+                    .connect_workspace(session, started, &mut phase_started)
+                    .await;
+            }
+        }
 
         let user = match self.api.current_user(&token).await {
             Ok(user) => user,
@@ -204,6 +223,7 @@ impl Bridge {
             self.set_error(BridgeState::Failed, error.to_string()).await;
             return Err(error);
         }
+        log_phase(&self.logger, "account", &mut phase_started);
 
         let public_key = self.keys.ensure().map_err(BridgeError::Other)?;
         self.runtime.lock().await.ssh_public_key = Some(public_key.clone());
@@ -265,6 +285,7 @@ impl Bridge {
             "info",
             format!("bridge repository ready: {} ({})", repo.slug, repo.branch),
         );
+        log_phase(&self.logger, "repository", &mut phase_started);
 
         self.set_state(BridgeState::StartingWorkspace).await;
         let manager = WorkspaceManager::new(&self.api);
@@ -273,7 +294,17 @@ impl Bridge {
             .await
             .map_err(BridgeError::Api)?;
         self.runtime.lock().await.workspace_sn = Some(session.sn.clone());
+        log_phase(&self.logger, "workspace", &mut phase_started);
+        self.connect_workspace(session, started, &mut phase_started)
+            .await
+    }
 
+    async fn connect_workspace(
+        &self,
+        session: WorkspaceSession,
+        started: Instant,
+        phase_started: &mut Instant,
+    ) -> Result<BridgeSnapshot, BridgeError> {
         let remote_ssh = session
             .detail
             .remote_ssh
@@ -307,6 +338,7 @@ impl Bridge {
             }
         };
         let tunnel_port = tunnel.local_port();
+        log_phase(&self.logger, "ssh", phase_started);
         let tunnel_failure = tunnel.failure_watch();
         self.runtime.lock().await.tunnel = Some(tunnel);
         self.runtime.lock().await.detail = Some(session.detail);
@@ -316,9 +348,70 @@ impl Bridge {
             self.fail_tunnel_health(error.clone()).await;
             return Err(BridgeError::Other(error));
         }
-        self.logger.log("info", "AI bridge is ready");
+        log_phase(&self.logger, "agent_health", phase_started);
+        self.logger.log(
+            "info",
+            format!(
+                "AI bridge is ready; total={}ms",
+                started.elapsed().as_millis()
+            ),
+        );
         self.set_state(BridgeState::Ready).await;
         Ok(self.snapshot().await)
+    }
+
+    async fn try_reuse_workspace(&self, token: &str) -> Option<(String, WorkspaceSession)> {
+        if !self.is_account_connected() {
+            return None;
+        }
+        let (repo_slug, workspace_sn) = {
+            let runtime = self.runtime.lock().await;
+            if runtime.manual_creation_pending {
+                return None;
+            }
+            (runtime.repo_slug.clone()?, runtime.workspace_sn.clone()?)
+        };
+        match WorkspaceManager::new(&self.api)
+            .reuse_running(token, &repo_slug, &workspace_sn)
+            .await
+        {
+            Ok(session) => Some((repo_slug, session)),
+            Err(error) => {
+                self.logger.log(
+                    "warn",
+                    format!("温启动 workspace {workspace_sn} 不可复用，回退完整启动: {error}"),
+                );
+                None
+            }
+        }
+    }
+
+    fn spawn_warm_profile_refresh(&self, token: String) {
+        let api = self.api.clone();
+        let account = Arc::clone(&self.account);
+        let logger = Arc::clone(&self.logger);
+        tokio::spawn(async move {
+            match api.current_user(&token).await {
+                Ok(user) => {
+                    if let Err(error) =
+                        account.update_profile_nickname(&user.username, Some(&user.nickname))
+                    {
+                        logger.log("warn", format!("后台刷新 CNB 昵称失败: {error}"));
+                    }
+                }
+                Err(error) => {
+                    logger.log("warn", format!("后台刷新 CNB 用户资料失败: {error}"));
+                }
+            }
+            match api.list_owned_namespaces(&token).await {
+                Ok(namespaces) => {
+                    account.set_needs_organization(namespaces.is_empty());
+                }
+                Err(error) => {
+                    logger.log("warn", format!("后台刷新 CNB 组织状态失败: {error}"));
+                }
+            }
+        });
     }
 
     /// Stops the tunnel and the cloud workspace.
@@ -340,9 +433,16 @@ impl Bridge {
             match self.account.access_token().await {
                 Ok(token) => {
                     let manager = WorkspaceManager::new(&self.api);
-                    if let Err(error) = manager.stop(&token, &sn).await {
-                        self.logger
-                            .log("warn", format!("停止工作空间失败: {error}"));
+                    match manager.stop(&token, &sn).await {
+                        Ok(WorkspaceStopOutcome::StopRequested) => {}
+                        Ok(WorkspaceStopOutcome::AlreadyEndedSuccess) => {
+                            self.logger
+                                .log("info", "workspace 已自然结束，无需再次停止");
+                        }
+                        Err(error) => {
+                            self.logger
+                                .log("warn", format!("停止工作空间失败: {error}"));
+                        }
                     }
                 }
                 Err(error) => self
@@ -699,6 +799,18 @@ impl Bridge {
     }
 }
 
+fn log_phase(logger: &Logger, phase: &str, phase_started: &mut Instant) {
+    let now = Instant::now();
+    logger.log(
+        "info",
+        format!(
+            "bridge phase {phase} completed; elapsed={}ms",
+            now.duration_since(*phase_started).as_millis()
+        ),
+    );
+    *phase_started = now;
+}
+
 fn encode_http_log_filter(filter: crate::settings::HttpLogFilter) -> u8 {
     match filter {
         crate::settings::HttpLogFilter::Abnormal => 0,
@@ -936,6 +1048,153 @@ mod tests {
             Some("https://cnb.cool/new/repos")
         );
         assert!(bridge.runtime.lock().await.manual_creation_pending);
+    }
+
+    #[tokio::test]
+    async fn warm_context_reuses_only_the_known_workspace() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/team/repo/-/workspace/detail/ws-warm"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "remoteSsh": "cnb@example.test"
+            })))
+            .mount(&server)
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let account =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account.bin")));
+        account
+            .complete_token_login("token", Some("alice".to_string()), None, None, None)
+            .unwrap();
+        let mut bridge = Bridge::new(
+            account,
+            SettingsStore::new(temp.path().join("settings.json")),
+            SshKeyStore::new(
+                temp.path().join("id_ed25519"),
+                temp.path().join("id_ed25519.pub"),
+            ),
+            Arc::new(Logger::new(32)),
+        );
+        bridge.api = CnbApi::with_base_url(server.uri());
+        {
+            let mut runtime = bridge.runtime.lock().await;
+            runtime.state = Some(BridgeState::Idle);
+            runtime.repo_slug = Some("team/repo".to_string());
+            runtime.workspace_sn = Some("ws-warm".to_string());
+        }
+
+        let reused = bridge.try_reuse_workspace("token").await.unwrap();
+
+        assert_eq!(reused.0, "team/repo");
+        assert_eq!(reused.1.sn, "ws-warm");
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn manual_repository_state_disables_warm_reuse() {
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&temp);
+        {
+            let mut runtime = bridge.runtime.lock().await;
+            runtime.repo_slug = Some("team/repo".to_string());
+            runtime.workspace_sn = Some("ws-old".to_string());
+            runtime.manual_creation_pending = true;
+        }
+
+        assert!(bridge.try_reuse_workspace("token").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_warm_workspace_detail_falls_back_to_full_start() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/team/repo/-/workspace/detail/ws-stale"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "errmsg": "workspace not found"
+            })))
+            .mount(&server)
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let account =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account.bin")));
+        account
+            .complete_token_login("token", Some("alice".to_string()), None, None, None)
+            .unwrap();
+        let logger = Arc::new(Logger::new(32));
+        let mut bridge = Bridge::new(
+            account,
+            SettingsStore::new(temp.path().join("settings.json")),
+            SshKeyStore::new(
+                temp.path().join("id_ed25519"),
+                temp.path().join("id_ed25519.pub"),
+            ),
+            Arc::clone(&logger),
+        );
+        bridge.api = CnbApi::with_base_url(server.uri());
+        {
+            let mut runtime = bridge.runtime.lock().await;
+            runtime.repo_slug = Some("team/repo".to_string());
+            runtime.workspace_sn = Some("ws-stale".to_string());
+        }
+
+        assert!(bridge.try_reuse_workspace("token").await.is_none());
+        assert!(logger
+            .recent(4)
+            .iter()
+            .any(|entry| entry.message.contains("回退完整启动")));
+    }
+
+    #[tokio::test]
+    async fn stop_logs_already_ended_success_as_info() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/workspace/stop"))
+            .respond_with(ResponseTemplate::new(422).set_body_string(
+                "[STOP_FAIL_WRONG_STATUS]Current build(cnb-test) already end: success",
+            ))
+            .mount(&server)
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let account =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account.bin")));
+        account
+            .complete_token_login("token", Some("alice".to_string()), None, None, None)
+            .unwrap();
+        let logger = Arc::new(Logger::new(32));
+        let mut bridge = Bridge::new(
+            account,
+            SettingsStore::new(temp.path().join("settings.json")),
+            SshKeyStore::new(
+                temp.path().join("id_ed25519"),
+                temp.path().join("id_ed25519.pub"),
+            ),
+            Arc::clone(&logger),
+        );
+        bridge.api = CnbApi::with_base_url(server.uri());
+        bridge.runtime.lock().await.workspace_sn = Some("ws-ended".to_string());
+
+        bridge.stop().await;
+
+        let logs = logger.recent(8);
+        assert!(logs
+            .iter()
+            .any(|entry| { entry.level == "info" && entry.message.contains("已自然结束") }));
+        assert!(!logs
+            .iter()
+            .any(|entry| entry.message.contains("停止工作空间失败")));
+    }
+
+    #[test]
+    fn phase_logging_reports_elapsed_time_without_sensitive_values() {
+        let logger = Logger::new(8);
+        let mut phase_started = Instant::now() - std::time::Duration::from_millis(25);
+
+        log_phase(&logger, "repository", &mut phase_started);
+
+        let message = &logger.recent(1)[0].message;
+        assert!(message.contains("bridge phase repository completed"));
+        assert!(message.contains("elapsed="));
+        assert!(!message.to_ascii_lowercase().contains("token"));
     }
 
     #[test]

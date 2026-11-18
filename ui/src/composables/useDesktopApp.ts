@@ -63,6 +63,8 @@ export function useDesktopApp() {
   const snapshot = ref<AppSnapshot | null>(null);
   const tab = ref<Tab>("connect");
   const busy = ref(false);
+  const startingBridge = ref(false);
+  const startingSeconds = ref(0);
   const error = ref<string | null>(null);
   const notice = ref<string | null>(null);
   const logs = ref<LogEntry[]>([]);
@@ -93,6 +95,7 @@ export function useDesktopApp() {
   let usageTimer: number | undefined;
   let usageGeneration = 0;
   let refreshGeneration = 0;
+  let startingTimer: number | undefined;
   let unlisten: UnlistenFn | undefined;
 
   const ready = computed(() => snapshot.value?.bridge.state === "ready");
@@ -134,6 +137,7 @@ export function useDesktopApp() {
     ),
   );
   const statusLabel = computed(() => {
+    if (startingBridge.value) return "正在启动";
     if (accountState.value === "signingIn") return "等待授权";
     if (accountState.value === "failed") return "登录失败";
     if (accountState.value === "signedOut") return "未登录";
@@ -273,19 +277,28 @@ export function useDesktopApp() {
     return `${devCpuUsageAmount.value}，${devCpuUsagePercent.value}`;
   });
   const mainActionLabel = computed(() => {
-    if (bridgeTransitioning.value) return "正在启动…";
+    if (startingBridge.value || bridgeTransitioning.value) {
+      return startingSeconds.value > 0
+        ? `正在启动… ${startingSeconds.value}s`
+        : "正在启动…";
+    }
     if (repoCreationNeeded.value) return "重新检查仓库";
     if (idle.value) return "立即启动";
     return "启动桥接";
   });
   const pipelineSteps = computed<ConnectionStep[]>(() => {
+    const effectiveBridgeState =
+      startingBridge.value && bridgeState.value === "idle"
+        ? "preparingKey"
+        : bridgeState.value;
     const failed =
-      bridgeState.value === "failed" || bridgeState.value === "needsSshKey";
+      effectiveBridgeState === "failed" ||
+      effectiveBridgeState === "needsSshKey";
     const accountDone = accountState.value === "connected";
     const repoDone =
       Boolean(snapshot.value?.bridge.repoSlug) && !repoCreationNeeded.value;
     const workspaceDone = ready.value;
-    const tunnelActive = bridgeState.value === "connecting";
+    const tunnelActive = effectiveBridgeState === "connecting";
     const tone = (done: boolean, current: boolean): StepTone => {
       if (done) return "done";
       if (failed) return "error";
@@ -309,7 +322,8 @@ export function useDesktopApp() {
           repoDone,
           accountDone &&
             !repoDone &&
-            bridgeState.value === "preparingRepo",
+            (effectiveBridgeState === "preparingRepo" ||
+              effectiveBridgeState === "preparingKey"),
         ),
       },
       {
@@ -320,7 +334,7 @@ export function useDesktopApp() {
         tone: tone(
           workspaceDone,
           Boolean(snapshot.value?.bridge.workspaceSn) ||
-            bridgeState.value === "startingWorkspace" ||
+            effectiveBridgeState === "startingWorkspace" ||
             tunnelActive,
         ),
       },
@@ -451,7 +465,21 @@ export function useDesktopApp() {
   }
 
   async function startBridge() {
-    await run(() => startBridgeApi());
+    if (busy.value || startingBridge.value) return;
+    startingBridge.value = true;
+    startingSeconds.value = 0;
+    const startedAt = Date.now();
+    startingTimer = window.setInterval(() => {
+      startingSeconds.value = Math.floor((Date.now() - startedAt) / 1000);
+    }, 1000);
+    try {
+      await run(() => startBridgeApi());
+    } finally {
+      startingBridge.value = false;
+      startingSeconds.value = 0;
+      if (startingTimer) window.clearInterval(startingTimer);
+      startingTimer = undefined;
+    }
   }
 
   async function stopBridge() {
@@ -667,6 +695,7 @@ export function useDesktopApp() {
 
   onBeforeUnmount(() => {
     if (timer) window.clearInterval(timer);
+    if (startingTimer) window.clearInterval(startingTimer);
     if (usageTimer) window.clearInterval(usageTimer);
     document.removeEventListener("visibilitychange", handleVisibilityChange);
     clearTransientFeedback();
@@ -699,6 +728,8 @@ export function useDesktopApp() {
     snapshot,
     tab,
     busy,
+    startingBridge,
+    startingSeconds,
     error,
     notice,
     logs,

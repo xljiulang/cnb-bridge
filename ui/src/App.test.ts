@@ -322,6 +322,57 @@ describe("App shell", () => {
     wrapper.unmount();
   });
 
+  it("shows startup progress immediately and prevents duplicate starts", async () => {
+    let startCalls = 0;
+    let started = false;
+    let resolveStart!: (value: typeof snapshot) => void;
+    const pendingStart = new Promise<typeof snapshot>((resolve) => {
+      resolveStart = resolve;
+    });
+    const readySnapshot = {
+      ...snapshot,
+      bridge: { ...snapshot.bridge, state: "ready" },
+    };
+    mockWindows("main");
+    mockIPC(
+      (command) => {
+        switch (command) {
+          case "get_snapshot":
+            return started ? readySnapshot : snapshot;
+          case "start_bridge":
+            startCalls += 1;
+            return pendingStart.then((value) => {
+              started = true;
+              return value;
+            });
+          case "get_logs":
+          case "list_http_traces":
+          case "list_namespaces":
+            return [];
+          case "get_cnb_usage":
+            return null;
+          default:
+            return null;
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const startButton = wrapper.get(".head-actions .primary");
+    await startButton.trigger("click");
+    expect(startButton.text()).toContain("正在启动");
+    expect(startButton.find(".spin").exists()).toBe(true);
+    await startButton.trigger("click");
+    expect(startCalls).toBe(1);
+
+    resolveStart(readySnapshot);
+    await flushPromises();
+    expect(wrapper.find(".head-actions .danger").text()).toContain("停止桥接");
+    wrapper.unmount();
+  });
+
   it("shows AI Credits amount and progress percentage separately", async () => {
     mockSnapshotIpc();
     const wrapper = mount(App);

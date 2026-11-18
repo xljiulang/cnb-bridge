@@ -1,6 +1,8 @@
 //! Repository provisioning and CNB workspace lifecycle.
 
-use crate::api::{ApiError, Branch, CnbApi, Namespace, Repo, WorkspaceDetail};
+use crate::api::{
+    ApiError, Branch, CnbApi, Namespace, Repo, WorkspaceDetail, WorkspaceStopOutcome,
+};
 use git2::{RemoteCallbacks, Repository, Signature};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -284,6 +286,20 @@ impl<'a> WorkspaceManager<'a> {
         Self { api }
     }
 
+    /// Reuses a known workspace SN without listing or starting workspaces.
+    pub async fn reuse_running(
+        &self,
+        token: &str,
+        slug: &str,
+        sn: &str,
+    ) -> Result<WorkspaceSession, ApiError> {
+        let detail = self.api.workspace_detail(token, slug, sn).await?;
+        Ok(WorkspaceSession {
+            sn: sn.to_string(),
+            detail,
+        })
+    }
+
     /// Ensures a running workspace exists and returns its SSH information.
     pub async fn ensure_running(
         &self,
@@ -323,7 +339,7 @@ impl<'a> WorkspaceManager<'a> {
     }
 
     /// Stops the workspace when the client exits.
-    pub async fn stop(&self, token: &str, sn: &str) -> Result<(), ApiError> {
+    pub async fn stop(&self, token: &str, sn: &str) -> Result<WorkspaceStopOutcome, ApiError> {
         self.api.stop_workspace(token, sn).await
     }
 }
@@ -1262,6 +1278,32 @@ mod tests {
             .unwrap();
 
         assert_eq!(session.sn, "ws-running");
+    }
+
+    #[tokio::test]
+    async fn warm_reuse_reads_only_the_known_workspace_detail() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xljiulang/cnb-ai-bridge/-/workspace/detail/ws-warm"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "remoteSsh": "cnb@example.test"
+            })))
+            .mount(&server)
+            .await;
+        let api = CnbApi::with_base_url(server.uri());
+
+        let session = WorkspaceManager::new(&api)
+            .reuse_running("token", "xljiulang/cnb-ai-bridge", "ws-warm")
+            .await
+            .unwrap();
+
+        assert_eq!(session.sn, "ws-warm");
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].url.path(),
+            "/xljiulang/cnb-ai-bridge/-/workspace/detail/ws-warm"
+        );
     }
 
     #[tokio::test]

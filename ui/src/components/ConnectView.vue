@@ -33,7 +33,7 @@ defineProps<{ app: DesktopApp }>();
           <h1>连接</h1>
           <span
             class="badge dot"
-            :class="{ live: app.ready, busy: app.bridgeTransitioning || app.creatingOrganization }"
+            :class="{ live: app.ready, busy: app.startingBridge || app.bridgeTransitioning || app.creatingOrganization }"
           >
             {{
               !app.accountConnected
@@ -48,7 +48,7 @@ defineProps<{ app: DesktopApp }>();
                   ? "在线"
                   : app.idle
                     ? "待命"
-                    : app.bridgeTransitioning
+                    : app.startingBridge || app.bridgeTransitioning
                       ? "处理中"
                       : "待连接"
             }}
@@ -60,11 +60,11 @@ defineProps<{ app: DesktopApp }>();
           v-if="!app.ready"
           type="button"
           class="primary"
-          :disabled="app.busy || app.bridgeTransitioning || !app.accountConnected"
+          :disabled="app.busy || app.startingBridge || app.bridgeTransitioning || !app.accountConnected"
           @click="app.startBridge"
         >
           <LoaderCircle
-            v-if="app.bridgeTransitioning"
+            v-if="app.startingBridge || app.bridgeTransitioning"
             class="spin"
             :size="15"
             aria-hidden="true"
@@ -393,7 +393,7 @@ defineProps<{ app: DesktopApp }>();
             <span class="step-icon">
               <CheckCircle2 v-if="step.tone === 'done'" :size="16" aria-hidden="true" />
               <LoaderCircle
-                v-else-if="step.tone === 'current' && app.bridgeTransitioning"
+                v-else-if="step.tone === 'current' && (app.startingBridge || app.bridgeTransitioning)"
                 class="spin"
                 :size="16"
                 aria-hidden="true"
