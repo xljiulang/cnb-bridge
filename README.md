@@ -36,11 +36,13 @@ agent 从云会话继承 `CNB_TOKEN`，只监听 loopback。客户端侧传入�
 |---|---|---|
 | GET | `/v1/healthz` | 本机健康检查，不启动工作空间 |
 | GET | `/v1/models`、`/v1/models/{id}` | 客户端内置模型目录，包含 `deepseek-v4.1-flash` |
-| POST | `/v1/chat/completions` | PromptGate 兼容处理后转发 Chat Completions |
+| POST | `/v1/chat/completions` | PromptGate 兼容处理后转发 Chat Completions；支持流式与非流式客户端 |
 | POST | `/v1/responses` | Responses 入、Chat 出并回译 |
 | OPTIONS | 已知 `/v1` 公开路径 | CORS 预检 |
 
 无 `/v1` 前缀的旧路径直接返回 404，不做重定向。
+
+CNB Chat 上游当前只接受流式请求。桌面网关会在发送前把合法 JSON 请求统一改为 `stream:true`：客户端使用 `stream:true` 时原样回传 SSE；使用 `stream:false` 或省略 `stream` 时，网关读取上游 SSE 并聚合为标准 `chat.completion` JSON。非流式响应会合并多个 choice、文本、`reasoning_content`、工具调用分片和 usage，并保留上游实际模型 ID。
 
 模型目录通过编译内置的 `resources/models.json` 提供。`deepseek-v4.1-flash` 声明文本/图像输入、流式输出、工具调用、reasoning summary 和 1,048,576 token 上下文；推理请求仍允许显式传入其它模型 ID。
 

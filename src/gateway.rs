@@ -16,6 +16,7 @@ use axum::Router;
 use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -544,33 +545,94 @@ async fn handle_chat(
             )
         }
     };
-    let (bytes, mut gate_report, normalized) = prepare_chat_request(bytes, &headers);
-    if normalized {
-        apply_headers(&mut headers, &mut gate_report);
+    let mut prepared = prepare_chat_request(bytes, &headers);
+    if prepared.valid_json_object {
+        apply_headers(&mut headers, &mut prepared.gate_report);
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("text/event-stream"),
+        );
     }
-    let exchange = match send_chat_request(&state, &headers, &uri, bytes).await {
+    let exchange = match send_chat_request(&state, &headers, &uri, prepared.body).await {
         Ok(exchange) => exchange,
         Err(response) => return response,
     };
     let trace = begin_upstream_trace(&state, "chat", &exchange);
     let request_id = response_request_id(&trace);
-    log_gate_report(&state, &request_id, &gate_report);
+    log_gate_report(&state, &request_id, &prepared.gate_report);
     if !exchange.response.status().is_success() {
-        return upstream_error_response(&state, exchange, trace, &request_id, &gate_report).await;
+        return upstream_error_response(
+            &state,
+            exchange,
+            trace,
+            &request_id,
+            &prepared.gate_report,
+        )
+        .await;
+    }
+    let content_type = exchange
+        .response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if !prepared.downstream_stream && content_type.starts_with("text/event-stream") {
+        let status = status_from_reqwest(exchange.response.status());
+        return match aggregate_chat_stream(
+            exchange.response,
+            trace,
+            status,
+            &prepared.requested_model,
+        )
+        .await
+        {
+            Ok(chat) => with_request_id(Json(chat).into_response(), &request_id),
+            Err((status, code, message)) => {
+                error_response_with_id(status, code, message, request_id)
+            }
+        };
     }
     traced_upstream_response(exchange.response, trace, &request_id)
 }
 
-fn prepare_chat_request(bytes: Bytes, headers: &HeaderMap) -> (Bytes, GateReport, bool) {
-    let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) else {
-        return (bytes, GateReport::default(), false);
+struct PreparedChatRequest {
+    body: Bytes,
+    gate_report: GateReport,
+    valid_json_object: bool,
+    downstream_stream: bool,
+    requested_model: String,
+}
+
+fn prepare_chat_request(bytes: Bytes, headers: &HeaderMap) -> PreparedChatRequest {
+    let Ok(Value::Object(mut object)) = serde_json::from_slice::<Value>(&bytes) else {
+        return PreparedChatRequest {
+            body: bytes,
+            gate_report: GateReport::default(),
+            valid_json_object: false,
+            downstream_stream: false,
+            requested_model: String::new(),
+        };
     };
+    let downstream_stream = object
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let requested_model = object
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    object.insert("stream".to_string(), Value::Bool(true));
+    let mut value = Value::Object(object);
     let report = normalize_chat(&mut value, headers);
-    if !report.changed() {
-        return (bytes, report, true);
+    let encoded = serde_json::to_vec(&value).expect("a parsed JSON object is always serializable");
+    PreparedChatRequest {
+        body: Bytes::from(encoded),
+        gate_report: report,
+        valid_json_object: true,
+        downstream_stream,
+        requested_model,
     }
-    let encoded = serde_json::to_vec(&value).map(Bytes::from).unwrap_or(bytes);
-    (encoded, report, true)
 }
 
 async fn handle_responses(
@@ -708,7 +770,7 @@ async fn handle_responses(
         return responses_stream_response(exchange.response, model, shape, trace, &request_id);
     }
     let chat = if content_type.starts_with("text/event-stream") {
-        match aggregate_chat_stream(exchange.response, trace, status).await {
+        match aggregate_chat_stream(exchange.response, trace, status, &model).await {
             Ok(chat) => chat,
             Err((status, code, message)) => {
                 return error_response_with_id(status, code, message, request_id)
@@ -1003,15 +1065,205 @@ fn copy_response_headers(source: &reqwest::header::HeaderMap, destination: &mut 
     }
 }
 
+#[derive(Default)]
+struct AggregateToolCall {
+    id: String,
+    kind: String,
+    name: String,
+    arguments: String,
+}
+
+#[derive(Default)]
+struct AggregateChoice {
+    content: String,
+    reasoning_content: String,
+    has_content: bool,
+    tool_calls: BTreeMap<usize, AggregateToolCall>,
+    finish_reason: Option<String>,
+}
+
+#[derive(Default)]
+struct ChatCompletionAccumulator {
+    id: Option<String>,
+    created: Option<u64>,
+    model: Option<String>,
+    system_fingerprint: Option<Value>,
+    usage: Option<Value>,
+    choices: BTreeMap<usize, AggregateChoice>,
+    saw_done: bool,
+    saw_finish: bool,
+}
+
+impl ChatCompletionAccumulator {
+    fn push_data(&mut self, payload: &str) -> Result<(), String> {
+        if payload == "[DONE]" {
+            self.saw_done = true;
+            return Ok(());
+        }
+        let chunk: Value =
+            serde_json::from_str(payload).map_err(|error| format!("无效 SSE JSON: {error}"))?;
+        if let Some(error) = chunk.get("error").filter(|value| !value.is_null()) {
+            return Err(format!("上游流内错误: {error}"));
+        }
+        if let Some(id) = chunk.get("id").and_then(Value::as_str) {
+            self.id = Some(id.to_string());
+        }
+        if let Some(created) = chunk.get("created").and_then(Value::as_u64) {
+            self.created = Some(created);
+        }
+        if let Some(model) = chunk.get("model").and_then(Value::as_str) {
+            self.model = Some(model.to_string());
+        }
+        if let Some(fingerprint) = chunk
+            .get("system_fingerprint")
+            .filter(|value| !value.is_null())
+        {
+            self.system_fingerprint = Some(fingerprint.clone());
+        }
+        if let Some(usage) = chunk.get("usage").filter(|value| !value.is_null()) {
+            self.usage = Some(usage.clone());
+        }
+        for choice in chunk
+            .get("choices")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let index = choice.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let state = self.choices.entry(index).or_default();
+            let delta = choice
+                .get("delta")
+                .or_else(|| choice.get("message"))
+                .unwrap_or(&Value::Null);
+            if let Some(content) = delta.get("content").and_then(Value::as_str) {
+                state.has_content = true;
+                state.content.push_str(content);
+            }
+            if let Some(reasoning) = aggregate_reasoning_text(delta) {
+                state.reasoning_content.push_str(reasoning);
+            }
+            for tool in delta
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let tool_index = tool.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let tool_state = state.tool_calls.entry(tool_index).or_default();
+                if let Some(id) = tool.get("id").and_then(Value::as_str) {
+                    tool_state.id = id.to_string();
+                }
+                if let Some(kind) = tool.get("type").and_then(Value::as_str) {
+                    tool_state.kind = kind.to_string();
+                }
+                if let Some(name) = tool.pointer("/function/name").and_then(Value::as_str) {
+                    tool_state.name.push_str(name);
+                }
+                if let Some(arguments) = tool.pointer("/function/arguments").and_then(Value::as_str)
+                {
+                    tool_state.arguments.push_str(arguments);
+                }
+            }
+            if let Some(reason) = choice
+                .get("finish_reason")
+                .and_then(Value::as_str)
+                .filter(|reason| !reason.is_empty())
+            {
+                state.finish_reason = Some(reason.to_string());
+                self.saw_finish = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(self, requested_model: &str) -> Result<Value, String> {
+        if !self.saw_done && !self.saw_finish {
+            return Err("上游 SSE 缺少完成分片或 [DONE]".to_string());
+        }
+        let choices = self
+            .choices
+            .into_iter()
+            .map(|(index, choice)| {
+                let mut message = json!({
+                    "role": "assistant",
+                    "content": if choice.has_content {
+                        Value::String(choice.content)
+                    } else {
+                        Value::Null
+                    }
+                });
+                if !choice.reasoning_content.is_empty() {
+                    message["reasoning_content"] = Value::String(choice.reasoning_content);
+                }
+                if !choice.tool_calls.is_empty() {
+                    message["tool_calls"] = Value::Array(
+                        choice
+                            .tool_calls
+                            .into_values()
+                            .map(|tool| {
+                                json!({
+                                    "id": tool.id,
+                                    "type": if tool.kind.is_empty() { "function" } else { tool.kind.as_str() },
+                                    "function": {
+                                        "name": tool.name,
+                                        "arguments": tool.arguments
+                                    }
+                                })
+                            })
+                            .collect(),
+                    );
+                }
+                json!({
+                    "index": index,
+                    "message": message,
+                    "finish_reason": choice.finish_reason
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut completion = json!({
+            "id": self.id.unwrap_or_else(|| format!("chatcmpl_{}", new_request_id())),
+            "object": "chat.completion",
+            "created": self.created.unwrap_or_else(|| chrono::Utc::now().timestamp() as u64),
+            "model": self.model.unwrap_or_else(|| requested_model.to_string()),
+            "choices": choices
+        });
+        if let Some(fingerprint) = self.system_fingerprint {
+            completion["system_fingerprint"] = fingerprint;
+        }
+        if let Some(usage) = self.usage {
+            completion["usage"] = usage;
+        }
+        Ok(completion)
+    }
+}
+
+fn aggregate_reasoning_text(delta: &Value) -> Option<&str> {
+    delta
+        .get("reasoning_content")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            delta
+                .get("reasoning")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+        })
+}
+
+fn aggregate_response_too_large(current: usize, additional: usize) -> bool {
+    current.saturating_add(additional) > BODY_LIMIT
+}
+
 async fn aggregate_chat_stream(
     response: reqwest::Response,
     mut trace: Option<HttpTraceSession>,
     status: StatusCode,
+    requested_model: &str,
 ) -> Result<Value, (StatusCode, &'static str, String)> {
     let mut chunks = response.bytes_stream();
     let mut buffer = Vec::new();
-    let mut chat = json!({ "choices": [{ "message": { "role": "assistant", "content": "" } }] });
-    let mut tools = std::collections::BTreeMap::<usize, Value>::new();
+    let mut total = 0usize;
+    let mut accumulator = ChatCompletionAccumulator::default();
     while let Some(chunk) = chunks.next().await {
         let chunk = match chunk {
             Ok(chunk) => chunk,
@@ -1027,6 +1279,18 @@ async fn aggregate_chat_stream(
                 ));
             }
         };
+        if aggregate_response_too_large(total, chunk.len()) {
+            if let Some(mut trace) = trace.take() {
+                let elapsed = trace.elapsed();
+                trace.finish(status.as_u16(), "failed", elapsed).ok();
+            }
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                "upstream_server_error",
+                "aggregated upstream response exceeds 64 MiB".to_string(),
+            ));
+        }
+        total += chunk.len();
         if let Some(trace) = trace.as_mut() {
             trace.write_response_chunk(&chunk).ok();
         }
@@ -1035,7 +1299,7 @@ async fn aggregate_chat_stream(
         while let Some(relative) = buffer[consumed..].iter().position(|byte| *byte == b'\n') {
             let position = consumed + relative;
             if let Err(error) =
-                process_aggregate_line(&buffer[consumed..=position], &mut chat, &mut tools)
+                process_aggregate_line(&buffer[consumed..=position], &mut accumulator)
             {
                 if let Some(mut trace) = trace.take() {
                     let elapsed = trace.elapsed();
@@ -1044,13 +1308,19 @@ async fn aggregate_chat_stream(
                 return Err(error);
             }
             consumed = position + 1;
+            if accumulator.saw_done {
+                break;
+            }
         }
         if consumed > 0 {
             buffer.drain(..consumed);
         }
+        if accumulator.saw_done {
+            break;
+        }
     }
-    if !buffer.is_empty() {
-        if let Err(error) = process_aggregate_line(&buffer, &mut chat, &mut tools) {
+    if !buffer.is_empty() && !accumulator.saw_done {
+        if let Err(error) = process_aggregate_line(&buffer, &mut accumulator) {
             if let Some(mut trace) = trace.take() {
                 let elapsed = trace.elapsed();
                 trace.finish(status.as_u16(), "failed", elapsed).ok();
@@ -1058,9 +1328,13 @@ async fn aggregate_chat_stream(
             return Err(error);
         }
     }
-    if !tools.is_empty() {
-        chat["choices"][0]["message"]["tool_calls"] = Value::Array(tools.into_values().collect());
-    }
+    let chat = accumulator.finish(requested_model).map_err(|message| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "upstream_server_error",
+            format!("failed to aggregate upstream chat stream: {message}"),
+        )
+    })?;
     if let Some(mut trace) = trace.take() {
         let elapsed = trace.elapsed();
         trace.finish(status.as_u16(), "completed", elapsed).ok();
@@ -1070,79 +1344,15 @@ async fn aggregate_chat_stream(
 
 fn process_aggregate_line(
     line: &[u8],
-    chat: &mut Value,
-    tools: &mut std::collections::BTreeMap<usize, Value>,
+    accumulator: &mut ChatCompletionAccumulator,
 ) -> Result<(), (StatusCode, &'static str, String)> {
     let line = String::from_utf8_lossy(line);
-    let Some(payload) = line.trim().strip_prefix("data:") else {
+    let Some(payload) = line.trim_end().strip_prefix("data:") else {
         return Ok(());
     };
-    if payload.trim() == "[DONE]" {
-        return Ok(());
-    }
-    let chunk: Value = serde_json::from_str(payload.trim()).map_err(|error| {
-        (
-            StatusCode::BAD_GATEWAY,
-            "upstream_server_error",
-            format!("invalid upstream SSE JSON: {error}"),
-        )
-    })?;
-    for field in ["id", "created", "model"] {
-        if let Some(value) = chunk.get(field) {
-            chat[field] = value.clone();
-        }
-    }
-    if let Some(usage) = chunk.get("usage").filter(|value| !value.is_null()) {
-        chat["usage"] = usage.clone();
-    }
-    if let Some(choice) = chunk
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
-    {
-        let delta = choice.get("delta").unwrap_or(&Value::Null);
-        if let Some(content) = delta.get("content").and_then(Value::as_str) {
-            let existing = chat["choices"][0]["message"]["content"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            chat["choices"][0]["message"]["content"] = json!(format!("{existing}{content}"));
-        }
-        if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
-            for call in calls {
-                let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                let entry = tools.entry(index).or_insert_with(|| {
-                    json!({
-                        "id": "",
-                        "type": "function",
-                        "function": { "name": "", "arguments": "" }
-                    })
-                });
-                if let Some(id) = call.get("id").and_then(Value::as_str) {
-                    entry["id"] = json!(id);
-                }
-                if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
-                    entry["function"]["name"] = json!(format!(
-                        "{}{}",
-                        entry["function"]["name"].as_str().unwrap_or(""),
-                        name
-                    ));
-                }
-                if let Some(arguments) = call.pointer("/function/arguments").and_then(Value::as_str)
-                {
-                    entry["function"]["arguments"] = json!(format!(
-                        "{}{}",
-                        entry["function"]["arguments"].as_str().unwrap_or(""),
-                        arguments
-                    ));
-                }
-            }
-        }
-        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
-            chat["choices"][0]["finish_reason"] = json!(reason);
-        }
-    }
-    Ok(())
+    accumulator
+        .push_data(payload.trim())
+        .map_err(|message| (StatusCode::BAD_GATEWAY, "upstream_server_error", message))
 }
 
 struct ResponsesStreamState {
@@ -1682,6 +1892,321 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_nonstream_aggregates_forced_upstream_stream() {
+        let captured = Arc::new(Mutex::new(None::<(HeaderMap, Value)>));
+        let captured_for_upstream = Arc::clone(&captured);
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(move |headers: HeaderMap, body: Bytes| {
+                let captured = Arc::clone(&captured_for_upstream);
+                async move {
+                    let value: Value = serde_json::from_slice(&body).unwrap();
+                    *captured.lock().unwrap() = Some((headers, value));
+                    (
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        concat!(
+                            "data: {\"id\":\"chatcmpl-upstream\",\"model\":\"deepseek-v4.1-flash\",",
+                            "\"created\":123,\"system_fingerprint\":\"fp-upstream\",",
+                            "\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",",
+                            "\"content\":\"\",\"reasoning_content\":\"think \"},\"finish_reason\":null}]}\n\n",
+                            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\",",
+                            "\"reasoning_content\":\"done\"},\"finish_reason\":null}]}\n\n",
+                            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,",
+                            "\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",",
+                            "\"arguments\":\"{\\\"q\\\":\"}}]},\"finish_reason\":null}]}\n\n",
+                            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,",
+                            "\"function\":{\"arguments\":\"\\\"x\\\"}\"}}]},\"finish_reason\":\"tool_calls\"},",
+                            "{\"index\":1,\"delta\":{\"content\":\"second\"},\"finish_reason\":\"stop\"}],",
+                            "\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":3,\"total_tokens\":7}}\n\n",
+                            "data: [DONE]\n\n"
+                        ),
+                    )
+                        .into_response()
+                }
+            }),
+        );
+        let upstream_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_port = upstream_listener.local_addr().unwrap().port();
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(upstream_listener, upstream).await.unwrap();
+        });
+
+        let (temp, _bridge, gateway) = test_gateway_with_upstream(upstream_port).await;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{}/v1/chat/completions",
+                gateway.port()
+            ))
+            .json(&json!({
+                "model": "hy4-flash",
+                "messages": [{ "role": "user", "content": "hello" }],
+                "stream": false
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
+        assert!(response.headers().contains_key(REQUEST_ID_HEADER));
+        let payload: Value = response.json().await.unwrap();
+        assert_eq!(payload["object"], "chat.completion");
+        assert_eq!(payload["id"], "chatcmpl-upstream");
+        assert_eq!(payload["model"], "deepseek-v4.1-flash");
+        assert_eq!(payload["created"], 123);
+        assert_eq!(payload["system_fingerprint"], "fp-upstream");
+        assert_eq!(payload["choices"][0]["index"], 0);
+        assert_eq!(payload["choices"][0]["message"]["content"], "OK");
+        assert_eq!(
+            payload["choices"][0]["message"]["reasoning_content"],
+            "think done"
+        );
+        assert_eq!(
+            payload["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+            "{\"q\":\"x\"}"
+        );
+        assert_eq!(payload["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(payload["choices"][1]["message"]["content"], "second");
+        assert_eq!(payload["choices"][1]["finish_reason"], "stop");
+        assert_eq!(payload["usage"]["total_tokens"], 7);
+
+        let (headers, upstream_body) = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(upstream_body["stream"], true);
+        assert_eq!(
+            headers
+                .get(header::ACCEPT)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream")
+        );
+
+        gateway.stop().await;
+        let store = HttpTraceStore::new(temp.path().join("http-trace"));
+        let summary = store.list(1).unwrap().remove(0);
+        let (request_path, response_path) = store.record_paths(&summary.id).unwrap();
+        assert!(std::fs::read_to_string(request_path)
+            .unwrap()
+            .contains("\"stream\":true"));
+        assert!(std::fs::read_to_string(response_path)
+            .unwrap()
+            .contains("content-type: text/event-stream"));
+        upstream_task.abort();
+    }
+
+    #[test]
+    fn chat_preparation_forces_upstream_stream_and_keeps_client_intent() {
+        for (stream, expected_downstream_stream) in
+            [(None, false), (Some(false), false), (Some(true), true)]
+        {
+            let mut request = json!({
+                "model": "hy4-flash",
+                "messages": [{ "role": "user", "content": "hello" }]
+            });
+            if let Some(stream) = stream {
+                request["stream"] = json!(stream);
+            }
+            let prepared =
+                prepare_chat_request(Bytes::from(request.to_string()), &HeaderMap::new());
+            let upstream: Value = serde_json::from_slice(&prepared.body).unwrap();
+
+            assert_eq!(upstream["stream"], true);
+            assert_eq!(prepared.downstream_stream, expected_downstream_stream);
+            assert_eq!(prepared.requested_model, "hy4-flash");
+            assert!(prepared.valid_json_object);
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_streaming_response_remains_sse() {
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    concat!(
+                        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},",
+                        "\"finish_reason\":\"stop\"}]}\n\n",
+                        "data: [DONE]\n\n"
+                    ),
+                )
+                    .into_response()
+            }),
+        );
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+        let (_temp, _bridge, gateway) = test_gateway_with_upstream(port).await;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{}/v1/chat/completions",
+                gateway.port()
+            ))
+            .json(&json!({
+                "model": "hy4-flash",
+                "messages": [{ "role": "user", "content": "hello" }],
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream")
+        );
+        let text = response.text().await.unwrap();
+        assert!(text.contains("data: {"));
+        assert!(text.contains("data: [DONE]"));
+
+        gateway.stop().await;
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn chat_nonstream_passes_through_unexpected_upstream_json() {
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                Json(json!({
+                    "id": "chatcmpl-json",
+                    "object": "chat.completion",
+                    "model": "deepseek-v4.1-flash",
+                    "choices": [{
+                        "index": 0,
+                        "message": { "role": "assistant", "content": "json" },
+                        "finish_reason": "stop"
+                    }]
+                }))
+            }),
+        );
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+        let (_temp, _bridge, gateway) = test_gateway_with_upstream(port).await;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{}/v1/chat/completions",
+                gateway.port()
+            ))
+            .json(&json!({
+                "model": "hy4-flash",
+                "messages": [{ "role": "user", "content": "hello" }],
+                "stream": false
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let payload: Value = response.json().await.unwrap();
+        assert_eq!(payload["id"], "chatcmpl-json");
+        assert_eq!(payload["choices"][0]["message"]["content"], "json");
+
+        gateway.stop().await;
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn chat_nonstream_returns_an_error_for_in_stream_failures() {
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    concat!(
+                        "data: {\"error\":{\"message\":\"upstream exploded\"}}\n\n",
+                        "data: [DONE]\n\n"
+                    ),
+                )
+                    .into_response()
+            }),
+        );
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+        let (_temp, _bridge, gateway) = test_gateway_with_upstream(port).await;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{}/v1/chat/completions",
+                gateway.port()
+            ))
+            .json(&json!({
+                "model": "hy4-flash",
+                "messages": [{ "role": "user", "content": "hello" }],
+                "stream": false
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+        let payload: Value = response.json().await.unwrap();
+        assert_eq!(payload["error"]["code"], "upstream_server_error");
+        assert!(payload["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("upstream exploded")));
+
+        gateway.stop().await;
+        upstream_task.abort();
+    }
+
+    #[test]
+    fn chat_completion_aggregation_enforces_the_size_limit() {
+        assert!(!aggregate_response_too_large(BODY_LIMIT - 1, 1));
+        assert!(aggregate_response_too_large(BODY_LIMIT, 1));
+        assert!(aggregate_response_too_large(usize::MAX, 1));
+    }
+
+    #[test]
+    fn chat_completion_aggregation_rejects_in_stream_errors() {
+        let mut accumulator = ChatCompletionAccumulator::default();
+        let error = accumulator
+            .push_data(r#"{"error":{"message":"upstream exploded"}}"#)
+            .unwrap_err();
+
+        assert!(error.contains("上游流内错误"));
+        assert!(error.contains("upstream exploded"));
+    }
+
+    #[test]
+    fn chat_completion_aggregation_rejects_truncated_streams() {
+        let mut accumulator = ChatCompletionAccumulator::default();
+        accumulator
+            .push_data(
+                r#"{"choices":[{"index":0,"delta":{"content":"half"},"finish_reason":null}]}"#,
+            )
+            .unwrap();
+
+        let error = accumulator.finish("hy4-flash").unwrap_err();
+
+        assert!(error.contains("缺少完成分片"));
+    }
+
+    #[test]
+    fn chat_completion_aggregation_rejects_invalid_sse_json() {
+        let mut accumulator = ChatCompletionAccumulator::default();
+        let error = process_aggregate_line(b"data: not-json\n", &mut accumulator).unwrap_err();
+
+        assert_eq!(error.0, StatusCode::BAD_GATEWAY);
+        assert_eq!(error.1, "upstream_server_error");
+    }
+
+    #[tokio::test]
     async fn responses_stream_is_translated_and_logged_without_buffering() {
         let upstream = Router::new().route(
             "/chat/completions",
@@ -2031,10 +2556,11 @@ mod tests {
     fn non_json_chat_bodies_are_not_reencoded() {
         let body = Bytes::from_static(b"Codex is not JSON");
         let headers = HeaderMap::new();
-        let (prepared, report, normalized) = prepare_chat_request(body.clone(), &headers);
-        assert_eq!(prepared, body);
-        assert!(!report.changed());
-        assert!(!normalized);
+        let prepared = prepare_chat_request(body.clone(), &headers);
+        assert_eq!(prepared.body, body);
+        assert!(!prepared.gate_report.changed());
+        assert!(!prepared.valid_json_object);
+        assert!(!prepared.downstream_stream);
     }
 
     #[tokio::test]
@@ -2204,6 +2730,7 @@ mod tests {
             headers.get(header::USER_AGENT).unwrap(),
             crate::prompt_gate::WORKBUDDY_USER_AGENT
         );
+        assert_eq!(body["stream"], true);
         assert_eq!(
             body["messages"][0]["content"],
             concat!(
