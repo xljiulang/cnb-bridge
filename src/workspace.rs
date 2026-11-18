@@ -206,8 +206,22 @@ impl<'a> RepoProvisioner<'a> {
                         let schema = template_schema(self.api, token, &slug, branch).await?;
                         if schema < TEMPLATE_SCHEMA {
                             let remote_url = format!("{}/{slug}", self.remote_base_url);
-                            sync_template_to_existing(token, &remote_url, &slug, branch)
-                                .map_err(RepoProvisionError::Message)?;
+                            let token_for_sync = token.to_string();
+                            let slug_for_sync = slug.clone();
+                            let branch_for_sync = branch.to_string();
+                            tokio::task::spawn_blocking(move || {
+                                sync_template_to_existing(
+                                    &token_for_sync,
+                                    &remote_url,
+                                    &slug_for_sync,
+                                    &branch_for_sync,
+                                )
+                            })
+                            .await
+                            .map_err(|error| {
+                                RepoProvisionError::Message(format!("模板同步任务失败: {error}"))
+                            })?
+                            .map_err(RepoProvisionError::Message)?;
                             confirm_template_branch(self.api, token, &slug, branch).await?;
                         }
                         return Ok(RepoInfo {
@@ -462,7 +476,21 @@ async fn push_template_with_retry(
         {
             return Ok(());
         }
-        match push_template_to_remote(slug, token, branch, remote_url) {
+        let token_for_push = token.to_string();
+        let remote_url_for_push = remote_url.to_string();
+        let slug_for_push = slug.to_string();
+        let branch_for_push = branch.to_string();
+        match tokio::task::spawn_blocking(move || {
+            push_template_to_remote(
+                &slug_for_push,
+                &token_for_push,
+                &branch_for_push,
+                &remote_url_for_push,
+            )
+        })
+        .await
+        .map_err(|error| RepoProvisionError::Message(format!("模板推送任务失败: {error}")))?
+        {
             Ok(()) => match confirm_template_branch(api, token, slug, branch).await {
                 Ok(()) => return Ok(()),
                 Err(error) => last_error = error.to_string(),

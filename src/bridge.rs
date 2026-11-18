@@ -67,6 +67,7 @@ pub struct Bridge {
     keys: SshKeyStore,
     settings: SettingsStore,
     logger: Arc<Logger>,
+    health_client: reqwest::Client,
     runtime: Mutex<Runtime>,
     transition: Mutex<()>,
     organization_transition: Mutex<()>,
@@ -101,6 +102,11 @@ impl Bridge {
             keys,
             settings,
             logger,
+            health_client: reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .expect("static health-check client configuration is valid"),
             runtime: Mutex::new(Runtime::default()),
             transition: Mutex::new(()),
             organization_transition: Mutex::new(()),
@@ -292,11 +298,13 @@ impl Bridge {
             }
         };
         let tunnel_port = tunnel.local_port();
+        let tunnel_failure = tunnel.failure_watch();
         self.runtime.lock().await.tunnel = Some(tunnel);
         self.runtime.lock().await.detail = Some(session.detail);
 
-        if let Err(error) = wait_for_health(tunnel_port).await {
-            self.set_error(BridgeState::Failed, error.clone()).await;
+        if let Err(error) = wait_for_health(&self.health_client, tunnel_port, &tunnel_failure).await
+        {
+            self.fail_tunnel_health(error.clone()).await;
             return Err(BridgeError::Other(error));
         }
         self.logger.log("info", "AI bridge is ready");
@@ -436,9 +444,10 @@ impl Bridge {
                 None
             }
         };
-        if let Some(tunnel) = tunnel {
-            tunnel.stop().await;
-        }
+        let Some(tunnel) = tunnel else {
+            return;
+        };
+        tunnel.stop().await;
         {
             let mut runtime = self.runtime.lock().await;
             runtime.state = Some(BridgeState::Idle);
@@ -601,6 +610,15 @@ impl Bridge {
         runtime.repo_creation_url = None;
     }
 
+    async fn fail_tunnel_health(&self, error: String) -> String {
+        let tunnel = self.runtime.lock().await.tunnel.take();
+        if let Some(tunnel) = tunnel {
+            tunnel.stop().await;
+        }
+        self.set_error(BridgeState::Failed, error.clone()).await;
+        error
+    }
+
     async fn current_state(&self) -> BridgeState {
         self.runtime
             .lock()
@@ -614,9 +632,16 @@ impl Bridge {
     }
 }
 
-async fn wait_for_health(port: u16) -> Result<(), String> {
+async fn wait_for_health(
+    client: &reqwest::Client,
+    port: u16,
+    failure: &tokio::sync::watch::Receiver<Option<String>>,
+) -> Result<(), String> {
     for _ in 0..30 {
-        if check_health_once(port).await.is_ok() {
+        if let Some(reason) = failure.borrow().clone() {
+            return Err(reason);
+        }
+        if check_health_once(client, port).await.is_ok() {
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -626,11 +651,7 @@ async fn wait_for_health(port: u16) -> Result<(), String> {
     ))
 }
 
-async fn check_health_once(port: u16) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .map_err(|error| error.to_string())?;
+async fn check_health_once(client: &reqwest::Client, port: u16) -> Result<(), String> {
     let url = format!("http://127.0.0.1:{port}/healthz");
     let response = client
         .get(&url)
@@ -740,6 +761,48 @@ mod tests {
         bridge.runtime.lock().await.state = Some(BridgeState::Idle);
 
         assert!(!bridge.sleep_tunnel().await);
+    }
+
+    #[tokio::test]
+    async fn stale_tunnel_invalidation_does_not_change_current_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&temp);
+        {
+            let mut runtime = bridge.runtime.lock().await;
+            runtime.state = Some(BridgeState::Ready);
+            runtime.error = None;
+        }
+
+        bridge
+            .invalidate_tunnel(65000, "stale request failed".to_string())
+            .await;
+
+        let snapshot = bridge.snapshot().await;
+        assert_eq!(snapshot.state, BridgeState::Ready);
+        assert!(snapshot.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn health_failure_releases_the_active_tunnel() {
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = test_bridge(&temp);
+        let (tunnel, address) = TunnelHandle::test_handle().await;
+        {
+            let mut runtime = bridge.runtime.lock().await;
+            runtime.state = Some(BridgeState::Ready);
+            runtime.tunnel = Some(tunnel);
+        }
+
+        let error = bridge
+            .fail_tunnel_health("health check failed".to_string())
+            .await;
+
+        assert_eq!(error, "health check failed");
+        assert!(tokio::net::TcpListener::bind(address).await.is_ok());
+        let runtime = bridge.runtime.lock().await;
+        assert!(runtime.tunnel.is_none());
+        assert_eq!(runtime.state, Some(BridgeState::Failed));
+        assert_eq!(runtime.error.as_deref(), Some("health check failed"));
     }
 
     #[test]

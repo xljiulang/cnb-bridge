@@ -7,6 +7,7 @@ pub struct AccountManager {
     pub(super) store: AccountStore,
     pub(super) book: Mutex<AccountBook>,
     pub(super) status: Mutex<AccountStatus>,
+    pub(super) mutation: Mutex<()>,
 }
 
 impl AccountManager {
@@ -37,6 +38,7 @@ impl AccountManager {
             store,
             book: Mutex::new(book),
             status: Mutex::new(status),
+            mutation: Mutex::new(()),
         })
     }
 
@@ -140,29 +142,33 @@ impl AccountManager {
             ));
         }
 
-        let mut book = self.book.lock().unwrap_or_else(|e| e.into_inner());
-        let mut next = book.clone();
-        let last_login_at = next.next_login_timestamp();
-        if let Some(account) = next.account_mut(username) {
-            let canonical = account.username.clone();
-            credentials.username = Some(canonical.clone());
-            account.credentials = credentials.clone();
-            account.last_login_at = last_login_at;
-            if bridge_settings.is_some() {
-                account.bridge_settings = bridge_settings;
+        let _mutation = self.mutation.lock().unwrap_or_else(|e| e.into_inner());
+        let next = {
+            let book = self.book.lock().unwrap_or_else(|e| e.into_inner());
+            let mut next = book.clone();
+            let last_login_at = next.next_login_timestamp();
+            if let Some(account) = next.account_mut(username) {
+                let canonical = account.username.clone();
+                credentials.username = Some(canonical.clone());
+                account.credentials = credentials.clone();
+                account.last_login_at = last_login_at;
+                if bridge_settings.is_some() {
+                    account.bridge_settings = bridge_settings;
+                }
+                next.active_username = Some(canonical);
+            } else {
+                next.accounts.push(StoredAccount {
+                    username: username.to_string(),
+                    credentials: credentials.clone(),
+                    last_login_at,
+                    bridge_settings: Some(bridge_settings.unwrap_or_default()),
+                });
+                next.active_username = Some(username.to_string());
             }
-            next.active_username = Some(canonical);
-        } else {
-            next.accounts.push(StoredAccount {
-                username: username.to_string(),
-                credentials: credentials.clone(),
-                last_login_at,
-                bridge_settings: Some(bridge_settings.unwrap_or_default()),
-            });
-            next.active_username = Some(username.to_string());
-        }
-        self.store.save_book(&next)?;
-        *book = next;
+            next
+        };
+        self.persist_book(&next)?;
+        *self.book.lock().unwrap_or_else(|e| e.into_inner()) = next;
         let status = AccountStatus::connected(&credentials);
         *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status.clone();
         Ok(status)
@@ -268,20 +274,24 @@ impl AccountManager {
         &self,
         settings: AccountBridgeSettings,
     ) -> Result<(), AccountError> {
-        let mut book = self.book.lock().unwrap_or_else(|e| e.into_inner());
-        let active = book
-            .active_username
-            .clone()
-            .ok_or_else(|| AccountError::Authorization("尚未登录".to_string()))?;
-        if book.account(&active).is_none() {
-            return Err(AccountError::Authorization("活动账号不存在".to_string()));
-        }
-        let mut next = book.clone();
-        next.account_mut(&active)
-            .expect("active account exists")
-            .bridge_settings = Some(settings);
-        self.store.save_book(&next)?;
-        *book = next;
+        let _mutation = self.mutation.lock().unwrap_or_else(|e| e.into_inner());
+        let next = {
+            let book = self.book.lock().unwrap_or_else(|e| e.into_inner());
+            let active = book
+                .active_username
+                .clone()
+                .ok_or_else(|| AccountError::Authorization("尚未登录".to_string()))?;
+            if book.account(&active).is_none() {
+                return Err(AccountError::Authorization("活动账号不存在".to_string()));
+            }
+            let mut next = book.clone();
+            next.account_mut(&active)
+                .expect("active account exists")
+                .bridge_settings = Some(settings);
+            next
+        };
+        self.persist_book(&next)?;
+        *self.book.lock().unwrap_or_else(|e| e.into_inner()) = next;
         Ok(())
     }
 
@@ -291,22 +301,25 @@ impl AccountManager {
         username: &str,
         nickname: Option<String>,
     ) -> Result<AccountStatus, AccountError> {
-        let mut book = self.book.lock().unwrap_or_else(|e| e.into_inner());
-        let account = book
-            .account(username)
-            .ok_or_else(|| AccountError::Authorization("账号不存在".to_string()))?;
-        let username = account.username.clone();
-        let mut credentials = account.credentials.clone();
-        credentials.nickname = normalized_nickname(nickname.as_deref());
-        let mut next = book.clone();
-        let last_login_at = next.next_login_timestamp();
-        next.active_username = Some(username.clone());
-        let account = next.account_mut(&username).expect("account exists");
-        account.credentials = credentials.clone();
-        account.last_login_at = last_login_at;
-        self.store.save_book(&next)?;
-        let status = AccountStatus::connected(&credentials);
-        *book = next;
+        let _mutation = self.mutation.lock().unwrap_or_else(|e| e.into_inner());
+        let (next, status) = {
+            let book = self.book.lock().unwrap_or_else(|e| e.into_inner());
+            let account = book
+                .account(username)
+                .ok_or_else(|| AccountError::Authorization("账号不存在".to_string()))?;
+            let username = account.username.clone();
+            let mut credentials = account.credentials.clone();
+            credentials.nickname = normalized_nickname(nickname.as_deref());
+            let mut next = book.clone();
+            let last_login_at = next.next_login_timestamp();
+            next.active_username = Some(username.clone());
+            let account = next.account_mut(&username).expect("account exists");
+            account.credentials = credentials.clone();
+            account.last_login_at = last_login_at;
+            (next, AccountStatus::connected(&credentials))
+        };
+        self.persist_book(&next)?;
+        *self.book.lock().unwrap_or_else(|e| e.into_inner()) = next;
         *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status.clone();
         Ok(status)
     }
@@ -317,19 +330,23 @@ impl AccountManager {
         username: &str,
         nickname: Option<&str>,
     ) -> Result<AccountStatus, AccountError> {
-        let mut book = self.book.lock().unwrap_or_else(|e| e.into_inner());
-        let account = book
-            .account(username)
-            .ok_or_else(|| AccountError::Authorization("账号不存在".to_string()))?;
-        let canonical = account.username.clone();
-        let normalized = normalized_nickname(nickname);
-        let mut next = book.clone();
-        next.account_mut(&canonical)
-            .expect("account exists")
-            .credentials
-            .nickname = normalized.clone();
-        self.store.save_book(&next)?;
-        *book = next;
+        let _mutation = self.mutation.lock().unwrap_or_else(|e| e.into_inner());
+        let (next, canonical, normalized) = {
+            let book = self.book.lock().unwrap_or_else(|e| e.into_inner());
+            let account = book
+                .account(username)
+                .ok_or_else(|| AccountError::Authorization("账号不存在".to_string()))?;
+            let canonical = account.username.clone();
+            let normalized = normalized_nickname(nickname);
+            let mut next = book.clone();
+            next.account_mut(&canonical)
+                .expect("account exists")
+                .credentials
+                .nickname = normalized.clone();
+            (next, canonical, normalized)
+        };
+        self.persist_book(&next)?;
+        *self.book.lock().unwrap_or_else(|e| e.into_inner()) = next;
 
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if status
@@ -344,11 +361,15 @@ impl AccountManager {
 
     /// Clears the active account while preserving all saved credentials.
     pub fn logout(&self) -> Result<AccountStatus, AccountError> {
-        let mut book = self.book.lock().unwrap_or_else(|e| e.into_inner());
-        let mut next = book.clone();
-        next.active_username = None;
-        self.store.save_book(&next)?;
-        *book = next;
+        let _mutation = self.mutation.lock().unwrap_or_else(|e| e.into_inner());
+        let next = {
+            let book = self.book.lock().unwrap_or_else(|e| e.into_inner());
+            let mut next = book.clone();
+            next.active_username = None;
+            next
+        };
+        self.persist_book(&next)?;
+        *self.book.lock().unwrap_or_else(|e| e.into_inner()) = next;
         let status = AccountStatus::signed_out();
         *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status.clone();
         Ok(status)
@@ -356,25 +377,40 @@ impl AccountManager {
 
     /// Removes a saved account. The active account must be logged out first.
     pub fn remove_account(&self, username: &str) -> Result<(), AccountError> {
-        let mut book = self.book.lock().unwrap_or_else(|e| e.into_inner());
-        let account = book
-            .account(username)
-            .ok_or_else(|| AccountError::Authorization("账号不存在".to_string()))?;
-        if book
-            .active_username
-            .as_deref()
-            .is_some_and(|active| active.eq_ignore_ascii_case(&account.username))
-        {
-            return Err(AccountError::Authorization(
-                "请先退出当前账号再移除".to_string(),
-            ));
-        }
-        let canonical = account.username.clone();
-        let mut next = book.clone();
-        next.accounts
-            .retain(|account| !account.username.eq_ignore_ascii_case(&canonical));
-        self.store.save_book(&next)?;
-        *book = next;
+        let _mutation = self.mutation.lock().unwrap_or_else(|e| e.into_inner());
+        let next = {
+            let book = self.book.lock().unwrap_or_else(|e| e.into_inner());
+            let account = book
+                .account(username)
+                .ok_or_else(|| AccountError::Authorization("账号不存在".to_string()))?;
+            if book
+                .active_username
+                .as_deref()
+                .is_some_and(|active| active.eq_ignore_ascii_case(&account.username))
+            {
+                return Err(AccountError::Authorization(
+                    "请先退出当前账号再移除".to_string(),
+                ));
+            }
+            let canonical = account.username.clone();
+            let mut next = book.clone();
+            next.accounts
+                .retain(|account| !account.username.eq_ignore_ascii_case(&canonical));
+            next
+        };
+        self.persist_book(&next)?;
+        *self.book.lock().unwrap_or_else(|e| e.into_inner()) = next;
         Ok(())
+    }
+
+    fn persist_book(&self, book: &AccountBook) -> Result<(), AccountError> {
+        let move_off_async_worker = tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+            handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::CurrentThread
+        });
+        if move_off_async_worker {
+            tokio::task::block_in_place(|| self.store.save_book(book))
+        } else {
+            self.store.save_book(book)
+        }
     }
 }

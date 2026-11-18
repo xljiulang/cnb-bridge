@@ -6,6 +6,7 @@ use std::future::Future;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
+use tokio::task::JoinSet;
 use tokio::time::{timeout, Duration};
 
 use crate::logging::Logger;
@@ -129,11 +130,51 @@ impl TunnelHandle {
         self.failure.borrow().clone()
     }
 
+    pub(crate) fn failure_watch(&self) -> watch::Receiver<Option<String>> {
+        self.failure.clone()
+    }
+
     /// Stops forwarding and releases the local port.
     pub async fn stop(self) {
         let _ = self.shutdown.send(true);
-        self.task.abort();
-        let _ = self.task.await;
+        let mut task = self.task;
+        if tokio::time::timeout(Duration::from_secs(5), &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_handle() -> (Self, std::net::SocketAddr) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (shutdown, mut shutdown_rx) = watch::channel(false);
+        let (_failure_tx, failure) = watch::channel(None);
+        let task = tokio::spawn(async move {
+            let _listener = listener;
+            loop {
+                tokio::select! {
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+                }
+            }
+        });
+        (
+            Self {
+                local_port: address.port(),
+                shutdown,
+                task,
+                failure,
+            },
+            address,
+        )
     }
 }
 
@@ -243,6 +284,7 @@ pub async fn start_tunnel_with_logger(
     let accept_failure_tx = failure_tx.clone();
     let mut accept_failure_rx = failure_rx.clone();
     let task = tokio::spawn(async move {
+        let mut connections = JoinSet::new();
         loop {
             tokio::select! {
                 changed = shutdown_rx.changed() => {
@@ -255,6 +297,7 @@ pub async fn start_tunnel_with_logger(
                         break;
                     }
                 }
+                Some(_) = connections.join_next(), if !connections.is_empty() => {}
                 accepted = listener.accept() => {
                     let (mut socket, _peer) = match accepted {
                         Ok(accepted) => accepted,
@@ -267,7 +310,7 @@ pub async fn start_tunnel_with_logger(
                     };
                     let session = Arc::clone(&accept_session);
                     let failure_tx = accept_failure_tx.clone();
-                    tokio::spawn(async move {
+                    connections.spawn(async move {
                         let channel = match session
                             .channel_open_direct_tcpip(
                                 "127.0.0.1",
@@ -290,6 +333,7 @@ pub async fn start_tunnel_with_logger(
                 }
             }
         }
+        stop_connections(&mut connections).await;
     });
 
     Ok(TunnelHandle {
@@ -298,6 +342,11 @@ pub async fn start_tunnel_with_logger(
         task,
         failure: failure_rx,
     })
+}
+
+async fn stop_connections(connections: &mut JoinSet<()>) {
+    connections.abort_all();
+    while connections.join_next().await.is_some() {}
 }
 
 #[cfg(test)]
@@ -443,5 +492,33 @@ mod tests {
         let error = russh::Error::IO(std::io::Error::from_raw_os_error(10054));
 
         assert!(is_retryable_connect_error(&error));
+    }
+
+    #[tokio::test]
+    async fn stopping_tunnel_drains_connection_tasks() {
+        struct DropSignal {
+            dropped: Arc<AtomicUsize>,
+        }
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.dropped.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let mut connections = JoinSet::new();
+        for _ in 0..2 {
+            let dropped = Arc::clone(&dropped);
+            connections.spawn(async move {
+                let _signal = DropSignal { dropped };
+                std::future::pending::<()>().await;
+            });
+        }
+        tokio::task::yield_now().await;
+
+        stop_connections(&mut connections).await;
+
+        assert_eq!(dropped.load(Ordering::SeqCst), 2);
+        assert!(connections.is_empty());
     }
 }
