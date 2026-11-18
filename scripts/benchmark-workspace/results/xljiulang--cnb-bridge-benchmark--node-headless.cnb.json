@@ -1,0 +1,40 @@
+{
+  "repoSlug": "xljiulang/cnb-bridge-benchmark",
+  "branch": "main",
+  "config": "D:\\github\\cyarp-cnb\\scripts\\benchmark-workspace\\node-headless.cnb.yml",
+  "runs": [
+    {
+      "run": 1,
+      "success": false,
+      "workspaceMs": 8429,
+      "sshMs": null,
+      "agentHealthMs": null,
+      "totalMs": 8843,
+      "error": "CNB 未返回 SSH 地址"
+    },
+    {
+      "run": 2,
+      "success": false,
+      "workspaceMs": 10576,
+      "sshMs": null,
+      "agentHealthMs": null,
+      "totalMs": 10965,
+      "error": "CNB 未返回 SSH 地址"
+    },
+    {
+      "run": 3,
+      "success": false,
+      "workspaceMs": 8600,
+      "sshMs": null,
+      "agentHealthMs": null,
+      "totalMs": 8968,
+      "error": "CNB 未返回 SSH 地址"
+    }
+  ],
+  "failureCount": 3,
+  "failureRate": 1.0,
+  "workspaceMedianMs": 8600,
+  "sshMedianMs": null,
+  "agentHealthMedianMs": null,
+  "totalMedianMs": null
+}

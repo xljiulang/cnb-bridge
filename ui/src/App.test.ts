@@ -373,6 +373,43 @@ describe("App shell", () => {
     wrapper.unmount();
   });
 
+  it("keeps a detached cloud workspace marked ready in the pipeline", async () => {
+    const detachedSnapshot = {
+      ...snapshot,
+      bridge: {
+        ...snapshot.bridge,
+        state: "idle",
+        workspaceSn: "ws-kept",
+      },
+    };
+    mockWindows("main");
+    mockIPC(
+      (command) => {
+        switch (command) {
+          case "get_snapshot":
+            return detachedSnapshot;
+          case "get_logs":
+          case "list_http_traces":
+          case "list_namespaces":
+            return [];
+          case "get_cnb_usage":
+            return null;
+          default:
+            return null;
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const workspaceStep = wrapper.findAll(".pipeline .step")[2];
+    expect(workspaceStep.classes()).toContain("done");
+    expect(workspaceStep.classes()).not.toContain("current");
+    expect(workspaceStep.text()).toContain("工作空间已保留");
+    wrapper.unmount();
+  });
+
   it("shows AI Credits amount and progress percentage separately", async () => {
     mockSnapshotIpc();
     const wrapper = mount(App);

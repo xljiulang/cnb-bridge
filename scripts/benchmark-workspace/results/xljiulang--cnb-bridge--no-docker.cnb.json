@@ -1,0 +1,22 @@
+{
+  "repoSlug": "xljiulang/cnb-ai-bridge",
+  "branch": "main",
+  "config": "D:\\github\\cyarp-cnb\\scripts\\benchmark-workspace\\no-docker.cnb.yml",
+  "runs": [
+    {
+      "run": 1,
+      "success": true,
+      "workspaceMs": 15017,
+      "sshMs": 416,
+      "agentHealthMs": 6760,
+      "totalMs": 22621,
+      "error": null
+    }
+  ],
+  "failureCount": 0,
+  "failureRate": 0.0,
+  "workspaceMedianMs": 15017,
+  "sshMedianMs": 416,
+  "agentHealthMedianMs": 6760,
+  "totalMedianMs": 22621
+}

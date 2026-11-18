@@ -1,0 +1,40 @@
+{
+  "repoSlug": "xljiulang/cnb-bridge-benchmark",
+  "branch": "main",
+  "config": "D:\\github\\cyarp-cnb\\scripts\\benchmark-workspace\\current.cnb.yml",
+  "runs": [
+    {
+      "run": 1,
+      "success": true,
+      "workspaceMs": 14791,
+      "sshMs": 373,
+      "agentHealthMs": 6113,
+      "totalMs": 21658,
+      "error": null
+    },
+    {
+      "run": 2,
+      "success": true,
+      "workspaceMs": 19229,
+      "sshMs": 365,
+      "agentHealthMs": 7870,
+      "totalMs": 27847,
+      "error": null
+    },
+    {
+      "run": 3,
+      "success": true,
+      "workspaceMs": 12760,
+      "sshMs": 637,
+      "agentHealthMs": 7346,
+      "totalMs": 21141,
+      "error": null
+    }
+  ],
+  "failureCount": 0,
+  "failureRate": 0.0,
+  "workspaceMedianMs": 14791,
+  "sshMedianMs": 373,
+  "agentHealthMedianMs": 7346,
+  "totalMedianMs": 21658
+}

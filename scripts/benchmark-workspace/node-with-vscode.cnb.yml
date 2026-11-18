@@ -1,0 +1,13 @@
+$:
+  vscode:
+    - docker:
+        image: node:22-bookworm-slim
+      runner:
+        cpus: 1
+      services:
+        - name: vscode
+      stages:
+        - name: start-cnb-ai-bridge
+          script: |
+            set -euo pipefail
+            exec bash "$(pwd)/agent/supervisor.sh"

@@ -6,7 +6,6 @@ $:
         cpus: 1
       services:
         - name: vscode
-        - docker
       stages:
         - name: start-cnb-ai-bridge
           script: |

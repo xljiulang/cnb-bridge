@@ -1,0 +1,14 @@
+$:
+  vscode:
+    - docker:
+        image: cnbcool/default-dev-env:latest
+      runner:
+        cpus: 1
+      services:
+        - name: vscode
+        - docker
+      stages:
+        - name: start-cnb-ai-bridge
+          script: |
+            set -euo pipefail
+            exec bash "$(pwd)/agent/supervisor.sh"

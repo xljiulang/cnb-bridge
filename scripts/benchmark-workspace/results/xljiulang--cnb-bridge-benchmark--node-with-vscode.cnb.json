@@ -1,0 +1,40 @@
+{
+  "repoSlug": "xljiulang/cnb-bridge-benchmark",
+  "branch": "main",
+  "config": "D:\\github\\cyarp-cnb\\scripts\\benchmark-workspace\\node-with-vscode.cnb.yml",
+  "runs": [
+    {
+      "run": 1,
+      "success": false,
+      "workspaceMs": 10597,
+      "sshMs": null,
+      "agentHealthMs": null,
+      "totalMs": 11010,
+      "error": "CNB 未返回 SSH 地址"
+    },
+    {
+      "run": 2,
+      "success": false,
+      "workspaceMs": 10587,
+      "sshMs": null,
+      "agentHealthMs": null,
+      "totalMs": 10979,
+      "error": "CNB 未返回 SSH 地址"
+    },
+    {
+      "run": 3,
+      "success": false,
+      "workspaceMs": 10636,
+      "sshMs": null,
+      "agentHealthMs": null,
+      "totalMs": 11041,
+      "error": "CNB 未返回 SSH 地址"
+    }
+  ],
+  "failureCount": 3,
+  "failureRate": 1.0,
+  "workspaceMedianMs": 10597,
+  "sshMedianMs": null,
+  "agentHealthMedianMs": null,
+  "totalMedianMs": null
+}

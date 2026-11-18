@@ -299,7 +299,9 @@ export function useDesktopApp() {
     const accountDone = accountState.value === "connected";
     const repoDone =
       Boolean(snapshot.value?.bridge.repoSlug) && !repoCreationNeeded.value;
-    const workspaceDone = ready.value;
+    const workspaceDone =
+      ready.value ||
+      (idle.value && Boolean(snapshot.value?.bridge.workspaceSn));
     const tunnelActive = effectiveBridgeState === "connecting";
     const tone = (done: boolean, current: boolean): StepTone => {
       if (done) return "done";
@@ -331,7 +333,9 @@ export function useDesktopApp() {
       {
         label: "云主机",
         detail: snapshot.value?.bridge.workspaceSn
-          ? "工作空间与 SSH 通道"
+          ? ready.value
+            ? "工作空间与 SSH 通道"
+            : "工作空间已保留，按需重连"
           : "启动工作空间",
         tone: tone(
           workspaceDone,

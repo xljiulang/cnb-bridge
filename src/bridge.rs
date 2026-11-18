@@ -414,8 +414,28 @@ impl Bridge {
         });
     }
 
+    /// Stops the local tunnel while keeping the cloud workspace available.
+    pub async fn detach_local(&self) -> BridgeSnapshot {
+        let _transition = self.transition.lock().await;
+        let tunnel = self.runtime.lock().await.tunnel.take();
+        if let Some(tunnel) = tunnel {
+            tunnel.stop().await;
+        }
+        let connected = self.is_account_connected();
+        {
+            let mut runtime = self.runtime.lock().await;
+            runtime.state = Some(if connected {
+                BridgeState::Idle
+            } else {
+                BridgeState::SignedOut
+            });
+            runtime.error = None;
+        }
+        self.snapshot().await
+    }
+
     /// Stops the tunnel and the cloud workspace.
-    pub async fn stop(&self) -> BridgeSnapshot {
+    pub async fn stop_all(&self) -> BridgeSnapshot {
         let _transition = self.transition.lock().await;
         self.stop_locked().await
     }
@@ -957,6 +977,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn detach_local_keeps_workspace_for_warm_restart() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/team/repo/-/workspace/detail/ws-kept"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "remoteSsh": "cnb@example.test"
+            })))
+            .mount(&server)
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let account =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account.bin")));
+        account
+            .complete_token_login("token", Some("alice".to_string()), None, None, None)
+            .unwrap();
+        let mut bridge = Bridge::new(
+            account,
+            SettingsStore::new(temp.path().join("settings.json")),
+            SshKeyStore::new(
+                temp.path().join("id_ed25519"),
+                temp.path().join("id_ed25519.pub"),
+            ),
+            Arc::new(Logger::new(32)),
+        );
+        bridge.api = CnbApi::with_base_url(server.uri());
+        {
+            let mut runtime = bridge.runtime.lock().await;
+            runtime.state = Some(BridgeState::Ready);
+            runtime.repo_slug = Some("team/repo".to_string());
+            runtime.workspace_sn = Some("ws-kept".to_string());
+        }
+
+        let snapshot = bridge.detach_local().await;
+
+        assert_eq!(snapshot.state, BridgeState::Idle);
+        assert_eq!(snapshot.workspace_sn.as_deref(), Some("ws-kept"));
+        let (_, session) = bridge.try_reuse_workspace("token").await.unwrap();
+        assert_eq!(session.sn, "ws-kept");
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn stale_tunnel_invalidation_does_not_change_current_state() {
         let temp = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&temp);
@@ -1173,7 +1235,7 @@ mod tests {
         bridge.api = CnbApi::with_base_url(server.uri());
         bridge.runtime.lock().await.workspace_sn = Some("ws-ended".to_string());
 
-        bridge.stop().await;
+        bridge.stop_all().await;
 
         let logs = logger.recent(8);
         assert!(logs

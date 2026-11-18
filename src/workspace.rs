@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 pub const REPO_DESCRIPTION: &str = "CNB Bridge workspace agent";
 
 const TEMPLATE_MARKER: &str = ".cnb-ai-bridge/workspace.json";
-const TEMPLATE_SCHEMA: u64 = 3;
+const TEMPLATE_SCHEMA: u64 = 4;
 const DEFAULT_BRANCH: &str = "main";
 const LEGACY_BRANCH: &str = "master";
 
@@ -747,6 +747,7 @@ mod tests {
     #[test]
     fn managed_template_uses_cnb_default_idle_recycling() {
         assert!(!CNB_YML.contains("keepAliveTimeout"));
+        assert!(!CNB_YML.lines().any(|line| line.trim() == "- docker"));
         let marker: serde_json::Value = serde_json::from_str(WORKSPACE_MARKER).unwrap();
         assert_eq!(marker["schema"].as_u64(), Some(TEMPLATE_SCHEMA));
     }
@@ -891,7 +892,7 @@ mod tests {
             .and(path(
                 "/xljiulang/cnb-ai-bridge/-/git/contents/.cnb-ai-bridge/workspace.json",
             ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(3)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(TEMPLATE_SCHEMA)))
             .mount(&server)
             .await;
         let api = CnbApi::with_base_url(server.uri());
@@ -1004,7 +1005,7 @@ mod tests {
             .and(path(
                 "/xljiulang/cnb-ai-bridge/-/git/contents/.cnb-ai-bridge/workspace.json",
             ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(3)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(TEMPLATE_SCHEMA)))
             .mount(&server)
             .await;
         let api = CnbApi::with_base_url(server.uri());
@@ -1068,7 +1069,7 @@ mod tests {
             .and(path(
                 "/xljiulang/cnb-ai-bridge/-/git/contents/.cnb-ai-bridge/workspace.json",
             ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(3)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(TEMPLATE_SCHEMA)))
             .mount(&server)
             .await;
         let api = CnbApi::with_base_url(server.uri());
@@ -1184,7 +1185,7 @@ mod tests {
             .and(path(
                 "/xljiulang/cnb-ai-bridge/-/git/contents/.cnb-ai-bridge/workspace.json",
             ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(3)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(marker_body(TEMPLATE_SCHEMA)))
             .mount(&server)
             .await;
         let api = CnbApi::with_base_url(server.uri());
@@ -1389,7 +1390,7 @@ mod tests {
                 let schema = if marker_reads_for_response.fetch_add(1, Ordering::SeqCst) < 2 {
                     1
                 } else {
-                    3
+                    4
                 };
                 ResponseTemplate::new(200).set_body_json(marker_body(schema))
             })
@@ -1410,7 +1411,7 @@ mod tests {
         let marker = tree.get_path(Path::new(TEMPLATE_MARKER)).unwrap();
         let marker_blob = remote.find_blob(marker.id()).unwrap();
         let marker_text = std::str::from_utf8(marker_blob.content()).unwrap();
-        assert!(marker_text.contains(r#""schema": 3"#));
+        assert!(marker_text.contains(r#""schema": 4"#));
         assert!(tree.get_path(Path::new("agent/models.json")).is_err());
         let cnb_yml = tree.get_path(Path::new(".cnb.yml")).unwrap();
         let cnb_yml_blob = remote.find_blob(cnb_yml.id()).unwrap();
