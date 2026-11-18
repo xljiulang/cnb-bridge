@@ -1,24 +1,91 @@
 use super::*;
 
+const UPSTREAM_ERROR_BODY_LIMIT: usize = 64 * 1024;
+
+pub(super) enum UpstreamBodyError {
+    TooLarge,
+    Network(reqwest::Error),
+}
+
+pub(super) async fn read_upstream_body_bounded(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<Bytes, UpstreamBodyError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(UpstreamBodyError::TooLarge);
+    }
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(UpstreamBodyError::Network)?;
+        if body.len().saturating_add(chunk.len()) > limit {
+            return Err(UpstreamBodyError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Bytes::from(body))
+}
+
+pub(super) async fn read_upstream_body_prefix(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<Bytes, reqwest::Error> {
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        let remaining = limit.saturating_sub(body.len());
+        let take = chunk.len().min(remaining);
+        body.extend_from_slice(&chunk[..take]);
+        if body.len() == limit {
+            break;
+        }
+    }
+    Ok(Bytes::from(body))
+}
+
+pub(super) enum ActivationWaitError {
+    Timeout,
+    Join(tokio::task::JoinError),
+}
+
+pub(super) async fn await_activation_task(
+    mut task: tokio::task::JoinHandle<Result<u16, crate::bridge::BridgeError>>,
+    timeout: Duration,
+) -> Result<Result<u16, crate::bridge::BridgeError>, ActivationWaitError> {
+    match tokio::time::timeout(timeout, &mut task).await {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(error)) => Err(ActivationWaitError::Join(error)),
+        Err(_) => {
+            task.abort();
+            let _ = task.await;
+            Err(ActivationWaitError::Timeout)
+        }
+    }
+}
+
 pub(super) async fn ensure_upstream_port(state: &GatewayState) -> Result<u16, Response<Body>> {
     if let Some(port) = state.upstream_override {
         return Ok(port);
     }
     let bridge = Arc::clone(&state.bridge);
     let activation = tokio::spawn(async move { bridge.ensure_active().await });
-    match tokio::time::timeout(state.activation_timeout, activation).await {
-        Ok(Ok(Ok(port))) => Ok(port),
-        Ok(Ok(Err(error))) => Err(error_response(
+    match await_activation_task(activation, state.activation_timeout).await {
+        Ok(Ok(port)) => Ok(port),
+        Ok(Err(error)) => Err(error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "workspace_unavailable",
             error.to_string(),
         )),
-        Ok(Err(error)) => Err(error_response(
+        Err(ActivationWaitError::Join(error)) => Err(error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "workspace_unavailable",
             format!("workspace activation task failed: {error}"),
         )),
-        Err(_) => Err(error_response(
+        Err(ActivationWaitError::Timeout) => Err(error_response(
             StatusCode::GATEWAY_TIMEOUT,
             "workspace_activation_timeout",
             "workspace activation timed out",
@@ -124,7 +191,30 @@ pub(super) async fn upstream_error_response(
         .headers()
         .get(header::RETRY_AFTER)
         .cloned();
-    let body = exchange.response.bytes().await.unwrap_or_default();
+    let body = match tokio::time::timeout(
+        state.non_stream_timeout,
+        read_upstream_body_prefix(exchange.response, UPSTREAM_ERROR_BODY_LIMIT),
+    )
+    .await
+    {
+        Ok(Ok(body)) => body,
+        Ok(Err(error)) => {
+            return error_response_with_id(
+                StatusCode::BAD_GATEWAY,
+                "upstream_network_error",
+                format!("failed to read upstream error response: {error}"),
+                request_id.to_string(),
+            )
+        }
+        Err(_) => {
+            return error_response_with_id(
+                StatusCode::GATEWAY_TIMEOUT,
+                "upstream_timeout",
+                "upstream error response timed out",
+                request_id.to_string(),
+            )
+        }
+    };
     if let Some(trace) = trace.as_mut() {
         trace.write_response_chunk(&body).ok();
         let elapsed = trace.elapsed();

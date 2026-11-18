@@ -3,6 +3,7 @@
 use axum::http::{header, HeaderMap, HeaderValue};
 use regex::Regex;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
@@ -186,16 +187,21 @@ fn normalize_text(text: &mut String, profiles: &[&GateProfile], report: &mut Gat
                         let (rewritten, matches) =
                             replace_at_ascii_letter_boundaries(text, term, replacement);
                         if matches > 0 {
-                            *text = rewritten;
+                            *text = rewritten.into_owned();
                             count += matches;
                         }
                     }
                     report.record_hit(id, count);
                 }
                 GateRule::PathInstructions { id } => {
-                    let rewritten = path_instruction_re()
-                        .replace_all(text.as_str(), PATH_INSTRUCTION_REPLACEMENT);
-                    let matches = path_instruction_re().find_iter(text).count();
+                    let mut matches = 0;
+                    let rewritten = path_instruction_re().replace_all(
+                        text.as_str(),
+                        |_captures: &regex::Captures<'_>| {
+                            matches += 1;
+                            PATH_INSTRUCTION_REPLACEMENT
+                        },
+                    );
                     if matches > 0 {
                         *text = rewritten.into_owned();
                         report.record_hit(id, matches);
@@ -219,20 +225,25 @@ fn path_instruction_re() -> &'static Regex {
     })
 }
 
-fn replace_at_ascii_letter_boundaries(
-    text: &str,
+fn replace_at_ascii_letter_boundaries<'a>(
+    text: &'a str,
     needle: &str,
     replacement: &str,
-) -> (String, usize) {
-    let haystack = text.to_ascii_lowercase();
-    let needle = needle.to_ascii_lowercase();
-    let bytes = haystack.as_bytes();
+) -> (Cow<'a, str>, usize) {
+    let needle = needle.as_bytes();
+    if needle.is_empty() {
+        return (Cow::Borrowed(text), 0);
+    }
+    let bytes = text.as_bytes();
     let mut result = String::with_capacity(text.len());
     let mut copied = 0;
     let mut search = 0;
     let mut matches = 0;
-    while search < haystack.len() {
-        let Some(offset) = haystack[search..].find(&needle) else {
+    while search < bytes.len() {
+        let Some(offset) = bytes[search..]
+            .windows(needle.len())
+            .position(|candidate| candidate.eq_ignore_ascii_case(needle))
+        else {
             break;
         };
         let start = search + offset;
@@ -250,17 +261,18 @@ fn replace_at_ascii_letter_boundaries(
         }
     }
     result.push_str(&text[copied..]);
-    (result, matches)
+    if matches == 0 {
+        (Cow::Borrowed(text), 0)
+    } else {
+        (Cow::Owned(result), matches)
+    }
 }
 
 /// Overrides the upstream User-Agent and records whether a change was needed.
 pub(crate) fn apply_headers(headers: &mut HeaderMap, report: &mut GateReport) {
-    let changed = headers
-        .get_all(header::USER_AGENT)
-        .iter()
-        .map(HeaderValue::as_bytes)
-        .collect::<Vec<_>>()
-        != vec![WORKBUDDY_USER_AGENT.as_bytes()];
+    let mut values = headers.get_all(header::USER_AGENT).iter();
+    let changed = values.next().map(HeaderValue::as_bytes) != Some(WORKBUDDY_USER_AGENT.as_bytes())
+        || values.next().is_some();
     headers.remove(header::USER_AGENT);
     headers.insert(
         header::USER_AGENT,
@@ -381,6 +393,16 @@ mod tests {
         assert_eq!(body["messages"][1]["content"], "Codex DeepSeek Harness");
         assert_eq!(body["messages"][2]["content"], "Codex");
         assert_eq!(body["messages"][3]["content"], "Codex");
+    }
+
+    #[test]
+    fn no_op_replacement_borrows_the_original_text() {
+        let text = "unchanged system prompt";
+        let (rewritten, matches) =
+            replace_at_ascii_letter_boundaries(text, "DeepSeek Harness", "replacement");
+
+        assert_eq!(matches, 0);
+        assert!(matches!(rewritten, std::borrow::Cow::Borrowed(value) if value == text));
     }
 
     #[test]

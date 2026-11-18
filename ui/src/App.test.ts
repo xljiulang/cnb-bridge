@@ -266,9 +266,59 @@ describe("App shell", () => {
     expect(wrapper.text()).not.toContain("扫码窗口已关闭");
 
     nextError = "新的扫码错误";
-    await vi.advanceTimersByTimeAsync(1600);
+    await vi.advanceTimersByTimeAsync(30_000);
     await flushPromises();
     expect(wrapper.text()).toContain("新的扫码错误");
+    wrapper.unmount();
+  });
+
+  it("polls snapshots slowly and pauses while the window is hidden", async () => {
+    let snapshotCalls = 0;
+    vi.useFakeTimers();
+    mockWindows("main");
+    mockIPC(
+      (command) => {
+        switch (command) {
+          case "get_snapshot":
+            snapshotCalls += 1;
+            return snapshot;
+          case "get_logs":
+          case "list_http_traces":
+          case "list_namespaces":
+            return [];
+          case "get_cnb_usage":
+            return null;
+          default:
+            return null;
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+    const initialCalls = snapshotCalls;
+
+    await vi.advanceTimersByTimeAsync(1_600);
+    await flushPromises();
+    expect(snapshotCalls).toBe(initialCalls);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await flushPromises();
+    expect(snapshotCalls).toBeGreaterThan(initialCalls);
+
+    const visibleCalls = snapshotCalls;
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "hidden",
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    await flushPromises();
+    expect(snapshotCalls).toBe(visibleCalls);
+
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "visible",
+    });
     wrapper.unmount();
   });
 

@@ -1,4 +1,6 @@
 use super::*;
+use bytes::Bytes;
+use std::io::Write as _;
 
 #[derive(Clone)]
 pub(super) struct TextTrack {
@@ -59,7 +61,7 @@ impl ResponsesStream {
     }
 
     /// Translates one Chat completion chunk into zero or more Responses SSE events.
-    pub fn push(&mut self, chunk: &Value) -> Vec<String> {
+    pub fn push(&mut self, chunk: &Value) -> Vec<Bytes> {
         if self.finished {
             return Vec::new();
         }
@@ -101,7 +103,7 @@ impl ResponsesStream {
     }
 
     /// Emits terminal events exactly once.
-    pub fn finish(&mut self) -> Vec<String> {
+    pub fn finish(&mut self) -> Vec<Bytes> {
         if self.finished {
             return Vec::new();
         }
@@ -321,7 +323,7 @@ impl ResponsesStream {
     }
 
     /// Marks the stream as failed and emits its terminal event.
-    pub fn fail(&mut self, code: impl Into<String>, message: impl Into<String>) -> Vec<String> {
+    pub fn fail(&mut self, code: impl Into<String>, message: impl Into<String>) -> Vec<Bytes> {
         if self.finished {
             return Vec::new();
         }
@@ -329,7 +331,7 @@ impl ResponsesStream {
         self.finish()
     }
 
-    fn ensure_created(&mut self) -> Vec<String> {
+    fn ensure_created(&mut self) -> Vec<Bytes> {
         if self.created {
             return Vec::new();
         }
@@ -351,7 +353,7 @@ impl ResponsesStream {
         )]
     }
 
-    fn reasoning_delta(&mut self, delta: &str) -> Vec<String> {
+    fn reasoning_delta(&mut self, delta: &str) -> Vec<Bytes> {
         let mut events = Vec::new();
         if self.reasoning.is_none() {
             let index = self.next_index;
@@ -396,7 +398,7 @@ impl ResponsesStream {
         events
     }
 
-    fn text_delta(&mut self, delta: &str) -> Vec<String> {
+    fn text_delta(&mut self, delta: &str) -> Vec<Bytes> {
         let mut events = Vec::new();
         if self.text.is_none() {
             let index = self.next_index;
@@ -447,7 +449,7 @@ impl ResponsesStream {
         events
     }
 
-    fn tool_delta(&mut self, call: &Value) -> Vec<String> {
+    fn tool_delta(&mut self, call: &Value) -> Vec<Bytes> {
         let tool_index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
         let mut events = Vec::new();
         if !self.calls.contains_key(&tool_index) {
@@ -560,8 +562,12 @@ pub(super) fn reasoning_text(delta: &Value) -> Option<&str> {
         })
 }
 
-pub(super) fn sse_event(name: &str, data: Value) -> String {
-    format!("event: {name}\ndata: {data}\n\n")
+pub(super) fn sse_event(name: &str, data: Value) -> Bytes {
+    let mut event = Vec::with_capacity(96);
+    write!(event, "event: {name}\ndata: ").expect("writing to Vec cannot fail");
+    serde_json::to_writer(&mut event, &data).expect("SSE event data is serializable");
+    event.extend_from_slice(b"\n\n");
+    Bytes::from(event)
 }
 
 pub(super) fn unix_now() -> u64 {

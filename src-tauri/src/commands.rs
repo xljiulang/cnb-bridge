@@ -63,6 +63,7 @@ pub async fn save_settings(
         }
         return Err(CommandError::new("settings_save_failed", message));
     }
+    state.bridge.set_http_log_filter(settings.http_log_filter);
     if state.account.status().state == AccountState::Connected {
         state
             .account

@@ -6,13 +6,20 @@ pub(super) async fn handle_responses(
     mut headers: HeaderMap,
     body: Body,
 ) -> Response<Body> {
-    let bytes = match to_bytes(body, BODY_LIMIT).await {
+    let bytes = match read_body_limited(&headers, body).await {
         Ok(bytes) => bytes,
-        Err(_) => {
+        Err(BodyReadError::TooLarge) => {
             return error_response(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "payload_too_large",
                 "request body is too large",
+            )
+        }
+        Err(BodyReadError::Invalid(message)) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_body",
+                format!("request body could not be read: {message}"),
             )
         }
     };
@@ -166,30 +173,42 @@ pub(super) async fn handle_responses(
             }
         }
     } else {
-        let body =
-            match tokio::time::timeout(state.non_stream_timeout, exchange.response.bytes()).await {
-                Ok(Ok(body)) => body,
-                Ok(Err(error)) => {
-                    if let Some(mut trace) = trace.take() {
-                        let elapsed = trace.elapsed();
-                        trace.finish(status.as_u16(), "stream_error", elapsed).ok();
-                    }
-                    return error_response_with_id(
-                        StatusCode::BAD_GATEWAY,
-                        "upstream_network_error",
-                        format!("failed to read upstream response: {error}"),
-                        request_id,
-                    );
+        let body = match tokio::time::timeout(
+            state.non_stream_timeout,
+            read_upstream_body_bounded(exchange.response, BODY_LIMIT),
+        )
+        .await
+        {
+            Ok(Ok(body)) => body,
+            Ok(Err(UpstreamBodyError::Network(error))) => {
+                if let Some(mut trace) = trace.take() {
+                    let elapsed = trace.elapsed();
+                    trace.finish(status.as_u16(), "stream_error", elapsed).ok();
                 }
-                Err(_) => {
-                    return error_response_with_id(
-                        StatusCode::GATEWAY_TIMEOUT,
-                        "upstream_timeout",
-                        "upstream response timed out",
-                        request_id,
-                    )
-                }
-            };
+                return error_response_with_id(
+                    StatusCode::BAD_GATEWAY,
+                    "upstream_network_error",
+                    format!("failed to read upstream response: {error}"),
+                    request_id,
+                );
+            }
+            Ok(Err(UpstreamBodyError::TooLarge)) => {
+                return error_response_with_id(
+                    StatusCode::BAD_GATEWAY,
+                    "upstream_server_error",
+                    "upstream response exceeds 64 MiB",
+                    request_id,
+                )
+            }
+            Err(_) => {
+                return error_response_with_id(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "upstream_timeout",
+                    "upstream response timed out",
+                    request_id,
+                )
+            }
+        };
         if let Some(mut trace) = trace {
             trace.write_response_chunk(&body).ok();
             let elapsed = trace.elapsed();
@@ -227,6 +246,10 @@ pub(super) struct ResponsesStreamState {
     done: bool,
     trace: Option<HttpTraceSession>,
     status: StatusCode,
+}
+
+pub(super) fn responses_buffer_too_large(current: usize, additional: usize) -> bool {
+    current.saturating_add(additional) > BODY_LIMIT
 }
 
 impl Drop for ResponsesStreamState {
@@ -273,6 +296,20 @@ pub(super) fn responses_stream_response(
             }
             match state.source.next().await {
                 Some(Ok(chunk)) => {
+                    if responses_buffer_too_large(state.buffer.len(), chunk.len()) {
+                        for event in state
+                            .translator
+                            .fail("upstream_server_error", "upstream SSE frame exceeds 64 MiB")
+                        {
+                            state.pending.push_back(Ok(event));
+                        }
+                        if let Some(mut trace) = state.trace.take() {
+                            let elapsed = trace.elapsed();
+                            trace.finish(state.status.as_u16(), "failed", elapsed).ok();
+                        }
+                        state.done = true;
+                        continue;
+                    }
                     if let Some(trace) = state.trace.as_mut() {
                         trace.write_response_chunk(&chunk).ok();
                     }
@@ -291,7 +328,7 @@ pub(super) fn responses_stream_response(
                         if payload.trim() == "[DONE]" {
                             state.saw_done = true;
                             for event in state.translator.finish() {
-                                state.pending.push_back(Ok(Bytes::from(event)));
+                                state.pending.push_back(Ok(event));
                             }
                             if let Some(mut trace) = state.trace.take() {
                                 let elapsed = trace.elapsed();
@@ -305,7 +342,7 @@ pub(super) fn responses_stream_response(
                         match serde_json::from_str::<Value>(payload.trim()) {
                             Ok(chunk) => {
                                 for event in state.translator.push(&chunk) {
-                                    state.pending.push_back(Ok(Bytes::from(event)));
+                                    state.pending.push_back(Ok(event));
                                 }
                             }
                             Err(error) => {
@@ -313,7 +350,7 @@ pub(super) fn responses_stream_response(
                                     "upstream_server_error",
                                     format!("无效 SSE JSON: {error}"),
                                 ) {
-                                    state.pending.push_back(Ok(Bytes::from(event)));
+                                    state.pending.push_back(Ok(event));
                                 }
                                 if let Some(mut trace) = state.trace.take() {
                                     let elapsed = trace.elapsed();
@@ -333,7 +370,7 @@ pub(super) fn responses_stream_response(
                         .translator
                         .fail("upstream_network_error", format!("读取上游流失败: {error}"))
                     {
-                        state.pending.push_back(Ok(Bytes::from(event)));
+                        state.pending.push_back(Ok(event));
                     }
                     if let Some(mut trace) = state.trace.take() {
                         let elapsed = trace.elapsed();
@@ -352,7 +389,7 @@ pub(super) fn responses_stream_response(
                             .fail("incomplete_stream", "上游流在 [DONE] 前结束")
                     };
                     for event in events {
-                        state.pending.push_back(Ok(Bytes::from(event)));
+                        state.pending.push_back(Ok(event));
                     }
                     if let Some(mut trace) = state.trace.take() {
                         let elapsed = trace.elapsed();

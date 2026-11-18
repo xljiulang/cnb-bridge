@@ -6,13 +6,20 @@ pub(super) async fn handle_chat(
     mut headers: HeaderMap,
     body: Body,
 ) -> Response<Body> {
-    let bytes = match to_bytes(body, BODY_LIMIT).await {
+    let bytes = match read_body_limited(&headers, body).await {
         Ok(bytes) => bytes,
-        Err(_) => {
+        Err(BodyReadError::TooLarge) => {
             return error_response(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "payload_too_large",
                 "request body is too large",
+            )
+        }
+        Err(BodyReadError::Invalid(message)) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_body",
+                format!("request body could not be read: {message}"),
             )
         }
     };
@@ -113,12 +120,12 @@ pub(super) fn prepare_chat_request(bytes: Bytes, headers: &HeaderMap) -> Prepare
     object.insert("stream".to_string(), Value::Bool(true));
     let mut value = Value::Object(object);
     let report = normalize_chat(&mut value, headers);
-    let body = if !downstream_stream || report.changed() {
+    let body = if report.changed() {
         Bytes::from(
             serde_json::to_vec(&value).expect("a parsed JSON object is always serializable"),
         )
     } else {
-        bytes
+        force_top_level_stream_true(&bytes)
     };
     PreparedChatRequest {
         body,
@@ -127,6 +134,108 @@ pub(super) fn prepare_chat_request(bytes: Bytes, headers: &HeaderMap) -> Prepare
         downstream_stream,
         requested_model,
     }
+}
+
+fn force_top_level_stream_true(bytes: &Bytes) -> Bytes {
+    let Some(object_start) = bytes.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+        return bytes.clone();
+    };
+    if bytes[object_start] != b'{' {
+        return bytes.clone();
+    }
+    let mut depth = 1usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut index = object_start + 1;
+    let mut closing = None;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'"' => {
+                if depth == 1 {
+                    let key_start = index + 1;
+                    let mut key_end = key_start;
+                    let mut key_escaped = false;
+                    while key_end < bytes.len() {
+                        if key_escaped {
+                            key_escaped = false;
+                        } else if bytes[key_end] == b'\\' {
+                            key_escaped = true;
+                        } else if bytes[key_end] == b'"' {
+                            break;
+                        }
+                        key_end += 1;
+                    }
+                    if key_end < bytes.len() && &bytes[key_start..key_end] == b"stream" {
+                        let mut value_start = key_end + 1;
+                        while value_start < bytes.len()
+                            && (bytes[value_start].is_ascii_whitespace()
+                                || bytes[value_start] == b':')
+                        {
+                            value_start += 1;
+                        }
+                        let mut value_end = value_start;
+                        while value_end < bytes.len() && !matches!(bytes[value_end], b',' | b'}') {
+                            value_end += 1;
+                        }
+                        while value_end > value_start && bytes[value_end - 1].is_ascii_whitespace()
+                        {
+                            value_end -= 1;
+                        }
+                        return match &bytes[value_start..value_end] {
+                            b"true" => bytes.clone(),
+                            b"false" => {
+                                let mut replaced =
+                                    Vec::with_capacity(bytes.len().saturating_sub(4));
+                                replaced.extend_from_slice(&bytes[..value_start]);
+                                replaced.extend_from_slice(b"true");
+                                replaced.extend_from_slice(&bytes[value_end..]);
+                                Bytes::from(replaced)
+                            }
+                            _ => bytes.clone(),
+                        };
+                    }
+                }
+                in_string = true;
+            }
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    closing = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    let Some(closing) = closing else {
+        return bytes.clone();
+    };
+    let previous = bytes[..closing]
+        .iter()
+        .rfind(|byte| !byte.is_ascii_whitespace())
+        .copied();
+    let mut inserted = Vec::with_capacity(bytes.len() + 15);
+    inserted.extend_from_slice(&bytes[..closing]);
+    if !matches!(previous, Some(b'{') | Some(b',')) {
+        inserted.push(b',');
+    }
+    inserted.extend_from_slice(b"\"stream\":true");
+    inserted.extend_from_slice(&bytes[closing..]);
+    Bytes::from(inserted)
 }
 
 #[derive(Default)]

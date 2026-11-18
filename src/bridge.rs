@@ -9,6 +9,7 @@ use crate::ssh_key::SshKeyStore;
 use crate::tunnel::{start_tunnel_with_logger, TunnelHandle, DEFAULT_TUNNEL_PORT};
 use crate::workspace::{RepoProvisionError, RepoProvisioner, WorkspaceManager};
 use serde::Serialize;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -68,6 +69,7 @@ pub struct Bridge {
     settings: SettingsStore,
     logger: Arc<Logger>,
     health_client: reqwest::Client,
+    http_log_filter: AtomicU8,
     runtime: Mutex<Runtime>,
     transition: Mutex<()>,
     organization_transition: Mutex<()>,
@@ -96,6 +98,10 @@ impl Bridge {
         keys: SshKeyStore,
         logger: Arc<Logger>,
     ) -> Self {
+        let http_log_filter = settings
+            .load()
+            .map(|settings| settings.http_log_filter)
+            .unwrap_or_default();
         Self {
             api: CnbApi::new(),
             account,
@@ -107,6 +113,7 @@ impl Bridge {
                 .timeout(std::time::Duration::from_secs(2))
                 .build()
                 .expect("static health-check client configuration is valid"),
+            http_log_filter: AtomicU8::new(encode_http_log_filter(http_log_filter)),
             runtime: Mutex::new(Runtime::default()),
             transition: Mutex::new(()),
             organization_transition: Mutex::new(()),
@@ -528,10 +535,12 @@ impl Bridge {
     }
 
     pub(crate) fn http_log_filter(&self) -> crate::settings::HttpLogFilter {
-        self.settings
-            .load()
-            .map(|settings| settings.http_log_filter)
-            .unwrap_or_default()
+        decode_http_log_filter(self.http_log_filter.load(Ordering::Relaxed))
+    }
+
+    pub fn set_http_log_filter(&self, filter: crate::settings::HttpLogFilter) {
+        self.http_log_filter
+            .store(encode_http_log_filter(filter), Ordering::Relaxed);
     }
 
     /// Regenerates the dedicated key pair.
@@ -629,6 +638,20 @@ impl Bridge {
 
     fn is_account_connected(&self) -> bool {
         self.account.status().state == crate::account::AccountState::Connected
+    }
+}
+
+fn encode_http_log_filter(filter: crate::settings::HttpLogFilter) -> u8 {
+    match filter {
+        crate::settings::HttpLogFilter::Abnormal => 0,
+        crate::settings::HttpLogFilter::All => 1,
+    }
+}
+
+fn decode_http_log_filter(value: u8) -> crate::settings::HttpLogFilter {
+    match value {
+        1 => crate::settings::HttpLogFilter::All,
+        _ => crate::settings::HttpLogFilter::Abnormal,
     }
 }
 
@@ -816,12 +839,7 @@ mod tests {
             crate::settings::HttpLogFilter::Abnormal
         );
 
-        store
-            .save(&crate::settings::Settings {
-                http_log_filter: crate::settings::HttpLogFilter::All,
-                ..crate::settings::Settings::default()
-            })
-            .unwrap();
+        bridge.set_http_log_filter(crate::settings::HttpLogFilter::All);
         assert_eq!(
             bridge.http_log_filter(),
             crate::settings::HttpLogFilter::All

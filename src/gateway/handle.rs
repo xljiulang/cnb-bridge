@@ -91,6 +91,7 @@ pub struct GatewayHandle {
     port: u16,
     shutdown: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
+    trace_cleanup_task: tokio::task::JoinHandle<()>,
     activity: Arc<GatewayActivity>,
 }
 
@@ -147,6 +148,7 @@ impl GatewayHandle {
             trace_store: HttpTraceStore::new(trace_root),
             logger: bridge.logger_handle(),
         };
+        let trace_cleanup_store = state.trace_store.clone();
         let app = router(state);
         let mut shutdown_rx = shutdown.subscribe();
         let task = tokio::spawn(async move {
@@ -193,10 +195,29 @@ impl GatewayHandle {
             }
         });
 
+        let mut cleanup_shutdown = shutdown.subscribe();
+        let trace_cleanup_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    changed = cleanup_shutdown.changed() => {
+                        if changed.is_err() || *cleanup_shutdown.borrow() {
+                            break;
+                        }
+                    }
+                    _ = interval.tick() => {
+                        let store = trace_cleanup_store.clone();
+                        let _ = tokio::task::spawn_blocking(move || store.cleanup()).await;
+                    }
+                }
+            }
+        });
+
         Ok(Self {
             port,
             shutdown,
             task,
+            trace_cleanup_task,
             activity,
         })
     }
@@ -221,6 +242,14 @@ impl GatewayHandle {
         {
             task.abort();
             let _ = task.await;
+        }
+        let mut cleanup_task = self.trace_cleanup_task;
+        if tokio::time::timeout(Duration::from_secs(5), &mut cleanup_task)
+            .await
+            .is_err()
+        {
+            cleanup_task.abort();
+            let _ = cleanup_task.await;
         }
     }
 }

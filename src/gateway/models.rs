@@ -6,7 +6,7 @@ pub(super) struct ModelResponses {
 }
 
 impl ModelResponses {
-    pub(super) fn from_catalog(catalog: Value) -> Self {
+    pub(super) fn from_catalog(catalog: &Value) -> Self {
         let models = catalog["models"]
             .as_array()
             .expect("validated model catalog has a models array");

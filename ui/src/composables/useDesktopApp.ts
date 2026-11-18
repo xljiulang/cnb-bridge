@@ -88,6 +88,7 @@ export function useDesktopApp() {
   let copyTimer: number | undefined;
   let usageTimer: number | undefined;
   let usageGeneration = 0;
+  let refreshGeneration = 0;
   let unlisten: UnlistenFn | undefined;
 
   const ready = computed(() => snapshot.value?.bridge.state === "ready");
@@ -332,9 +333,11 @@ export function useDesktopApp() {
   });
 
   async function refresh() {
+    const generation = ++refreshGeneration;
     try {
       const syncDraft = !settingsDirty.value;
       const next = await getSnapshot();
+      if (generation !== refreshGeneration) return;
       snapshot.value = next;
       if (next.account.state === "failed" && next.account.error) {
         error.value = next.account.error;
@@ -350,6 +353,7 @@ export function useDesktopApp() {
       }
       if (syncDraft) applySettingsDraft(next.settings);
     } catch (cause) {
+      if (generation !== refreshGeneration) return;
       error.value = formatError(cause);
     }
   }
@@ -631,12 +635,13 @@ export function useDesktopApp() {
     if (organizationReady.value) void loadUsage();
     await Promise.all([loadLogs(), loadHttpTraces()]);
     timer = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
       void refresh();
       if (tab.value === "logs") {
         if (logMode.value === "runtime") void loadLogs();
         else void loadHttpTraces();
       }
-    }, 1500);
+    }, 30_000);
     usageTimer = window.setInterval(() => {
       if (organizationReady.value) void loadUsage();
     }, 60_000);

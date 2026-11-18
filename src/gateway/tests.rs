@@ -65,6 +65,51 @@ async fn activity_tracks_requests_and_last_use() {
     assert!(activity.idle_for() < Duration::from_secs(1));
 }
 
+#[tokio::test]
+async fn timed_out_activation_task_is_aborted_and_awaited() {
+    let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let completed_for_task = Arc::clone(&completed);
+    let task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        completed_for_task.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok::<u16, crate::bridge::BridgeError>(11233)
+    });
+
+    let result = await_activation_task(task, Duration::from_millis(10)).await;
+
+    assert!(result.is_err());
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!completed.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn request_body_precheck_rejects_large_content_length_before_reading() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&(BODY_LIMIT + 1).to_string()).unwrap(),
+    );
+
+    let error = read_body_limited(&headers, Body::empty())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, BodyReadError::TooLarge));
+}
+
+#[tokio::test]
+async fn request_body_read_error_is_not_reported_as_payload_too_large() {
+    let body = Body::from_stream(futures_util::stream::once(async {
+        Err::<Bytes, std::io::Error>(std::io::Error::other("broken upload"))
+    }));
+
+    let error = read_body_limited(&HeaderMap::new(), body)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, BodyReadError::Invalid(message) if message.contains("broken upload")));
+}
+
 async fn test_gateway() -> (tempfile::TempDir, Arc<Bridge>, GatewayHandle) {
     let temp = tempfile::tempdir().unwrap();
     let account = crate::account::AccountManager::with_store(AccountStore::new(
@@ -465,6 +510,20 @@ fn chat_preparation_reuses_unchanged_streaming_body() {
     assert!(!prepared.gate_report.changed());
 }
 
+#[test]
+fn non_stream_chat_preserves_unchanged_json_bytes() {
+    let original = Bytes::from_static(
+        br#"{"model":"hy4-flash","temperature":1.00,"messages":[{"role":"user","content":"hello"}],"stream":false}"#,
+    );
+
+    let prepared = prepare_chat_request(original, &HeaderMap::new());
+    let body = std::str::from_utf8(&prepared.body).unwrap();
+
+    assert!(body.contains("\"temperature\":1.00"));
+    assert!(body.contains("\"stream\":true"));
+    assert!(!body.contains("\"stream\":false"));
+}
+
 #[tokio::test]
 async fn chat_streaming_response_remains_sse() {
     let upstream = Router::new().route(
@@ -614,6 +673,13 @@ fn chat_completion_aggregation_enforces_the_size_limit() {
     assert!(!aggregate_response_too_large(BODY_LIMIT - 1, 1));
     assert!(aggregate_response_too_large(BODY_LIMIT, 1));
     assert!(aggregate_response_too_large(usize::MAX, 1));
+}
+
+#[test]
+fn responses_stream_buffer_enforces_the_size_limit() {
+    assert!(!responses_buffer_too_large(BODY_LIMIT - 1, 1));
+    assert!(responses_buffer_too_large(BODY_LIMIT, 1));
+    assert!(responses_buffer_too_large(usize::MAX, 1));
 }
 
 #[test]

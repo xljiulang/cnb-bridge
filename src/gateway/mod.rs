@@ -6,7 +6,7 @@ use crate::logging::Logger;
 use crate::model_catalog;
 use crate::prompt_gate::{apply_headers, detect_gate_block, normalize_chat, GateReport};
 use crate::responses::{chat_to_responses, responses_to_chat, ResponsesStream, ToolShape};
-use axum::body::{to_bytes, Body, Bytes};
+use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri};
 use axum::middleware::{self, Next};
@@ -36,6 +36,37 @@ const OPTIONAL_CHAT_FIELDS: [(&str, &[&str]); 6] = [
     ("service_tier", &["service_tier"]),
     ("tool_choice", &["tool_choice"]),
 ];
+
+#[derive(Debug)]
+pub(super) enum BodyReadError {
+    TooLarge,
+    Invalid(String),
+}
+
+pub(super) async fn read_body_limited(
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<Bytes, BodyReadError> {
+    if let Some(length) = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        if length > BODY_LIMIT {
+            return Err(BodyReadError::TooLarge);
+        }
+    }
+    let mut stream = body.into_data_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| BodyReadError::Invalid(error.to_string()))?;
+        if body.len().saturating_add(chunk.len()) > BODY_LIMIT {
+            return Err(BodyReadError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Bytes::from(body))
+}
 
 mod chat;
 mod error;

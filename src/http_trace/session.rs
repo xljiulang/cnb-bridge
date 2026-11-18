@@ -11,11 +11,102 @@ use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 pub(super) const ABNORMAL_HEAD_BYTES: usize = 4 * 1024 * 1024;
 pub(super) const ABNORMAL_TAIL_BYTES: usize = 4 * 1024 * 1024;
 pub(super) const ABNORMAL_TRUNCATION_MARKER: &[u8] = b"\r\n\r\n[trace truncated]\r\n\r\n";
+
+enum TraceFileCommand {
+    Write(Vec<u8>),
+    Flush(std::sync::mpsc::Sender<Result<(), String>>),
+    Stop,
+}
+
+struct AsyncTraceWriter {
+    sender: SyncSender<TraceFileCommand>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl AsyncTraceWriter {
+    fn new(path: &PathBuf) -> Result<Self, String> {
+        let file = File::create(path)
+            .map_err(|error| format!("创建 HTTP 响应文件 {} 失败: {error}", path.display()))?;
+        let (sender, receiver) = sync_channel(64);
+        let thread = std::thread::Builder::new()
+            .name("http-trace-writer".to_string())
+            .spawn(move || trace_writer_loop(file, receiver))
+            .map_err(|error| format!("启动 HTTP 日志写盘线程失败: {error}"))?;
+        Ok(Self {
+            sender,
+            thread: Some(thread),
+            dropped: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    fn try_write(&self, bytes: Vec<u8>) -> bool {
+        if self.sender.try_send(TraceFileCommand::Write(bytes)).is_ok() {
+            true
+        } else {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            false
+        }
+    }
+
+    fn dropped_chunks(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    fn flush(&mut self) -> Result<(), String> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.sender
+            .send(TraceFileCommand::Flush(sender))
+            .map_err(|_| "HTTP 日志写盘线程已停止".to_string())?;
+        receiver
+            .recv()
+            .map_err(|_| "HTTP 日志写盘线程未返回结果".to_string())?
+    }
+
+    fn shutdown(&mut self) {
+        let _ = self.sender.send(TraceFileCommand::Stop);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for AsyncTraceWriter {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn trace_writer_loop(file: File, receiver: Receiver<TraceFileCommand>) {
+    let mut writer = BufWriter::with_capacity(32 * 1024, file);
+    while let Ok(command) = receiver.recv() {
+        match command {
+            TraceFileCommand::Write(bytes) => {
+                if let Err(error) = writer.write_all(&bytes) {
+                    eprintln!("writing HTTP trace failed: {error}");
+                    break;
+                }
+            }
+            TraceFileCommand::Flush(result) => {
+                let _ = result.send(
+                    writer
+                        .flush()
+                        .map_err(|error| format!("刷新 HTTP 日志失败: {error}")),
+                );
+            }
+            TraceFileCommand::Stop => break,
+        }
+    }
+    let _ = writer.flush();
+}
 
 struct CapturedRequest {
     method: String,
@@ -41,7 +132,7 @@ pub struct HttpTraceSession {
     request_body_bytes: u64,
     request_file_bytes: u64,
     response_prefix: String,
-    response_writer: Option<BufWriter<File>>,
+    response_writer: Option<AsyncTraceWriter>,
     response_file_bytes: u64,
     response_body_bytes: u64,
     response_truncated: bool,
@@ -153,23 +244,10 @@ impl HttpTraceSession {
             if take < self.response_prefix.len() {
                 return Err("响应头超过 HTTP 日志文件上限".to_string());
             }
-            let mut writer = BufWriter::with_capacity(
-                32 * 1024,
-                File::create(&self.response_path).map_err(|error| {
-                    format!(
-                        "创建 HTTP 响应文件 {} 失败: {error}",
-                        self.response_path.display()
-                    )
-                })?,
-            );
-            writer
-                .write_all(&self.response_prefix.as_bytes()[..take])
-                .map_err(|error| {
-                    format!(
-                        "写入 HTTP 响应文件 {} 失败: {error}",
-                        self.response_path.display()
-                    )
-                })?;
+            let writer = AsyncTraceWriter::new(&self.response_path)?;
+            if !writer.try_write(self.response_prefix.as_bytes()[..take].to_vec()) {
+                return Err("HTTP 日志写盘队列在写入响应头时已满".to_string());
+            }
             self.response_file_bytes = take as u64;
             self.response_writer = Some(writer);
         }
@@ -189,12 +267,10 @@ impl HttpTraceSession {
                 self.response_truncated = true;
             }
             if take > 0 {
-                writer.write_all(&body[..take]).map_err(|error| {
-                    format!(
-                        "写入 HTTP 响应文件 {} 失败: {error}",
-                        self.response_path.display()
-                    )
-                })?;
+                if !writer.try_write(body[..take].to_vec()) {
+                    self.response_truncated = true;
+                    return Ok(());
+                }
                 self.response_file_bytes += take as u64;
             }
             return Ok(());
@@ -231,12 +307,11 @@ impl HttpTraceSession {
             self.write_abnormal_trace()?;
         } else {
             if let Some(writer) = self.response_writer.as_mut() {
-                writer.flush().map_err(|error| {
-                    format!(
-                        "刷新 HTTP 响应文件 {} 失败: {error}",
-                        self.response_path.display()
-                    )
-                })?;
+                if writer.dropped_chunks() > 0 {
+                    self.response_truncated = true;
+                }
+                writer.flush()?;
+                writer.shutdown();
             }
             self.response_writer = None;
         }

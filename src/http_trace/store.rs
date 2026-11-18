@@ -74,7 +74,6 @@ impl HttpTraceStore {
         started_at: SystemTime,
     ) -> Result<HttpTraceSession, String> {
         self.create_root()?;
-        let _ = self.cleanup_if_due();
         let id = next_trace_id(protocol, started_at);
         let (request_path, response_path) = self.record_paths(&id)?;
         Ok(HttpTraceSession::new(

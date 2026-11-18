@@ -1,8 +1,10 @@
 use super::*;
+use bytes::Bytes;
 use serde_json::json;
 
-fn terminal_response(events: &[String], event_name: &str) -> Value {
+fn terminal_response(events: &[Bytes], event_name: &str) -> Value {
     for event in events {
+        let event = std::str::from_utf8(event).unwrap();
         if event.starts_with(&format!("event: {event_name}\n")) {
             let data = event
                 .lines()
@@ -133,7 +135,7 @@ fn streams_text_and_terminal_events_in_order() {
     })));
     events.extend(stream.finish());
 
-    let joined = events.concat();
+    let joined = String::from_utf8(events.concat()).unwrap();
     let names: Vec<&str> = joined
         .lines()
         .filter_map(|line| line.strip_prefix("event: "))
@@ -226,7 +228,7 @@ fn malformed_stream_tool_arguments_fail_the_response() {
         }]
     }));
     events.extend(stream.finish());
-    let joined = events.concat();
+    let joined = String::from_utf8(events.concat()).unwrap();
     assert!(joined.contains("event: response.failed"));
     assert!(!joined.contains("event: response.completed"));
     assert!(joined.contains("malformed_tool_call_arguments"));
