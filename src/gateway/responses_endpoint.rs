@@ -1,0 +1,315 @@
+use super::*;
+
+pub(super) async fn handle_responses(
+    State(state): State<GatewayState>,
+    uri: Uri,
+    mut headers: HeaderMap,
+    body: Body,
+) -> Response<Body> {
+    let bytes = match to_bytes(body, BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                "request body is too large",
+            )
+        }
+    };
+    let request: Value = match serde_json::from_slice(&bytes) {
+        Ok(request @ Value::Object(_)) => request,
+        _ => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_json",
+                "request body is not a valid JSON object",
+            )
+        }
+    };
+    let stream = request
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let model = request
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let shape = ToolShape::from_request(&request);
+    let mut chat = match responses_to_chat(&request, true) {
+        Ok(chat) => chat,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, "invalid_json", message),
+    };
+    if chat.get("stream_options").is_none() {
+        chat["stream_options"] = json!({ "include_usage": true });
+    }
+    let mut gate_report = normalize_chat(&mut chat, &headers);
+    apply_headers(&mut headers, &mut gate_report);
+    let exchange = loop {
+        let encoded = match serde_json::to_vec(&chat) {
+            Ok(encoded) => Bytes::from(encoded),
+            Err(_) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "failed to encode translated request",
+                )
+            }
+        };
+        let exchange = match send_chat_request(&state, &headers, &uri, encoded).await {
+            Ok(exchange) => exchange,
+            Err(response) => return response,
+        };
+        if exchange.response.status().is_success() {
+            break exchange;
+        }
+        let response_status = exchange.response.status();
+        let status = status_from_reqwest(response_status);
+        let retry_after = exchange
+            .response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .cloned();
+        let response_headers = exchange.response.headers().clone();
+        let body = exchange.response.bytes().await.unwrap_or_default();
+        let text = String::from_utf8_lossy(&body).into_owned();
+        let lower = text.to_ascii_lowercase();
+        let removable = if status == StatusCode::BAD_REQUEST {
+            OPTIONAL_CHAT_FIELDS.iter().find_map(|(field, needles)| {
+                chat.get(*field).is_some().then_some(()).filter(|_| {
+                    needles
+                        .iter()
+                        .any(|needle| lower.contains(&needle.to_ascii_lowercase()))
+                })?;
+                Some(*field)
+            })
+        } else {
+            None
+        };
+        if let Some(field) = removable {
+            if let Some(object) = chat.as_object_mut() {
+                object.remove(field);
+            }
+            continue;
+        }
+        let trace = begin_upstream_trace_parts(
+            &state,
+            &UpstreamTraceParts {
+                protocol: "responses",
+                request_headers: &exchange.request_headers,
+                request_body: exchange.request_body.clone(),
+                request_target: &exchange.request_target,
+                started: exchange.started,
+                started_at: exchange.started_at,
+                response_headers: &response_headers,
+                response_status,
+            },
+        );
+        let request_id = response_request_id(&trace);
+        log_gate_report(&state, &request_id, &gate_report);
+        if let Some(mut trace) = trace {
+            trace.write_response_chunk(&body).ok();
+            let elapsed = trace.elapsed();
+            trace.finish(status.as_u16(), "failed", elapsed).ok();
+        }
+        return upstream_error_from_text(
+            status,
+            retry_after,
+            text,
+            &request_id,
+            &gate_report,
+            &state.logger,
+        );
+    };
+    let mut trace = begin_upstream_trace(&state, "responses", &exchange);
+    let request_id = response_request_id(&trace);
+    log_gate_report(&state, &request_id, &gate_report);
+    let status = status_from_reqwest(exchange.response.status());
+    let content_type = exchange
+        .response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if stream && content_type.starts_with("text/event-stream") {
+        return responses_stream_response(exchange.response, model, shape, trace, &request_id);
+    }
+    let chat = if content_type.starts_with("text/event-stream") {
+        match aggregate_chat_stream(exchange.response, trace, status, &model).await {
+            Ok(chat) => chat,
+            Err((status, code, message)) => {
+                return error_response_with_id(status, code, message, request_id)
+            }
+        }
+    } else {
+        let body = match exchange.response.bytes().await {
+            Ok(body) => body,
+            Err(error) => {
+                if let Some(mut trace) = trace.take() {
+                    let elapsed = trace.elapsed();
+                    trace.finish(status.as_u16(), "stream_error", elapsed).ok();
+                }
+                return error_response_with_id(
+                    StatusCode::BAD_GATEWAY,
+                    "upstream_network_error",
+                    format!("failed to read upstream response: {error}"),
+                    request_id,
+                );
+            }
+        };
+        if let Some(mut trace) = trace {
+            trace.write_response_chunk(&body).ok();
+            let elapsed = trace.elapsed();
+            trace.finish(status.as_u16(), "completed", elapsed).ok();
+        }
+        match serde_json::from_slice(&body) {
+            Ok(chat) => chat,
+            Err(error) => {
+                return error_response_with_id(
+                    StatusCode::BAD_GATEWAY,
+                    "upstream_server_error",
+                    format!("upstream response is not valid JSON: {error}"),
+                    request_id,
+                )
+            }
+        }
+    };
+    match chat_to_responses(&chat, &model, &shape) {
+        Ok(response) => with_request_id(Json(response).into_response(), &request_id),
+        Err(message) => error_response_with_id(
+            StatusCode::BAD_GATEWAY,
+            "malformed_tool_call_arguments",
+            message,
+            request_id,
+        ),
+    }
+}
+
+pub(super) struct ResponsesStreamState {
+    source: futures_util::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
+    translator: ResponsesStream,
+    buffer: Vec<u8>,
+    pending: std::collections::VecDeque<Result<Bytes, std::io::Error>>,
+    done: bool,
+    trace: Option<HttpTraceSession>,
+    status: StatusCode,
+}
+
+impl Drop for ResponsesStreamState {
+    fn drop(&mut self) {
+        if let Some(mut trace) = self.trace.take() {
+            let elapsed = trace.elapsed();
+            trace
+                .finish(self.status.as_u16(), "client_disconnected", elapsed)
+                .ok();
+        }
+    }
+}
+
+pub(super) fn responses_stream_response(
+    response: reqwest::Response,
+    model: String,
+    shape: ToolShape,
+    trace: Option<HttpTraceSession>,
+    request_id: &str,
+) -> Response<Body> {
+    let status = status_from_reqwest(response.status());
+    let response_id = format!(
+        "resp_{}_{}",
+        chrono::Utc::now().timestamp_millis(),
+        next_request_sequence()
+    );
+    let state = ResponsesStreamState {
+        source: response.bytes_stream().boxed(),
+        translator: ResponsesStream::with_shape(response_id, model, shape),
+        buffer: Vec::new(),
+        pending: std::collections::VecDeque::new(),
+        done: false,
+        trace,
+        status,
+    };
+    let stream = futures_util::stream::unfold(state, |mut state| async move {
+        loop {
+            if let Some(item) = state.pending.pop_front() {
+                return Some((item, state));
+            }
+            if state.done {
+                return None;
+            }
+            match state.source.next().await {
+                Some(Ok(chunk)) => {
+                    if let Some(trace) = state.trace.as_mut() {
+                        trace.write_response_chunk(&chunk).ok();
+                    }
+                    state.buffer.extend_from_slice(&chunk);
+                    let mut consumed = 0;
+                    while let Some(relative) = state.buffer[consumed..]
+                        .iter()
+                        .position(|byte| *byte == b'\n')
+                    {
+                        let position = consumed + relative;
+                        let line = String::from_utf8_lossy(&state.buffer[consumed..=position]);
+                        consumed = position + 1;
+                        let Some(payload) = line.trim().strip_prefix("data:") else {
+                            continue;
+                        };
+                        if payload.trim() == "[DONE]" {
+                            for event in state.translator.finish() {
+                                state.pending.push_back(Ok(Bytes::from(event)));
+                            }
+                            if let Some(mut trace) = state.trace.take() {
+                                let elapsed = trace.elapsed();
+                                trace
+                                    .finish(state.status.as_u16(), "completed", elapsed)
+                                    .ok();
+                            }
+                            state.done = true;
+                            break;
+                        }
+                        if let Ok(chunk) = serde_json::from_str::<Value>(payload.trim()) {
+                            for event in state.translator.push(&chunk) {
+                                state.pending.push_back(Ok(Bytes::from(event)));
+                            }
+                        }
+                    }
+                    if consumed > 0 {
+                        state.buffer.drain(..consumed);
+                    }
+                }
+                Some(Err(error)) => {
+                    if let Some(mut trace) = state.trace.take() {
+                        let elapsed = trace.elapsed();
+                        trace
+                            .finish(state.status.as_u16(), "stream_error", elapsed)
+                            .ok();
+                    }
+                    state
+                        .pending
+                        .push_back(Err(std::io::Error::other(error.to_string())));
+                    state.done = true;
+                }
+                None => {
+                    for event in state.translator.finish() {
+                        state.pending.push_back(Ok(Bytes::from(event)));
+                    }
+                    if let Some(mut trace) = state.trace.take() {
+                        let elapsed = trace.elapsed();
+                        trace
+                            .finish(state.status.as_u16(), "completed", elapsed)
+                            .ok();
+                    }
+                    state.done = true;
+                }
+            }
+        }
+    });
+    let mut response = Response::new(Body::from_stream(stream));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    with_request_id(response, request_id)
+}
