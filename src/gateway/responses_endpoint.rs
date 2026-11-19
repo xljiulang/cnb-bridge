@@ -406,6 +406,19 @@ pub(super) fn responses_stream_response(
                     }
                 }
                 Some(Err(error)) => {
+                    if state.saw_done {
+                        for event in state.translator.finish() {
+                            state.pending.push_back(Ok(event));
+                        }
+                        if let Some(mut trace) = state.trace.take() {
+                            let elapsed = trace.elapsed();
+                            trace
+                                .finish(state.status.as_u16(), "completed", elapsed)
+                                .ok();
+                        }
+                        state.done = true;
+                        continue;
+                    }
                     for event in state
                         .translator
                         .fail("upstream_network_error", format!("读取上游流失败: {error}"))

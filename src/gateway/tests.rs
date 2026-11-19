@@ -1394,6 +1394,156 @@ async fn responses_stream_reports_eof_without_done_as_failed() {
 }
 
 #[tokio::test]
+async fn responses_stream_ignores_frames_after_done_in_the_same_chunk() {
+    let (_temp, gateway, upstream_task) = gateway_with_static_responses_stream(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"visible\"},\"finish_reason\":\"stop\"}]}\n\n\
+         data: [DONE]\n\n\
+         data: {\"choices\":[{\"delta\":{\"content\":\"late\"},\"finish_reason\":\"stop\"}]}\n\n\
+         data: {\"error\":{\"message\":\"late failure\"}}\n\n\
+         data: [DONE]\n\n",
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{}/v1/responses", gateway.port()))
+        .json(&json!({
+            "model": "model",
+            "input": "hello",
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    let text = response.text().await.unwrap();
+
+    assert_eq!(text.matches("event: response.completed").count(), 1);
+    assert!(!text.contains("event: response.failed"));
+    assert!(!text.contains("\"delta\":\"late\""));
+    gateway.stop().await;
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn responses_stream_done_survives_late_transport_error() {
+    let done_chunk = std::sync::Arc::new(Bytes::from_static(
+        b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+    ));
+    let late_error = std::sync::Arc::new("late reset after done");
+    let handler_done = std::sync::Arc::clone(&done_chunk);
+    let handler_error = std::sync::Arc::clone(&late_error);
+    let upstream = Router::new().route(
+        "/chat/completions",
+        post(move || {
+            let done_chunk = std::sync::Arc::clone(&handler_done);
+            let late_error = std::sync::Arc::clone(&handler_error);
+            async move {
+                let first = futures_util::stream::once(async move {
+                    Ok::<Bytes, std::io::Error>((*done_chunk).clone())
+                });
+                let second = futures_util::stream::once(async move {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    Err(std::io::Error::other(*late_error.as_ref()))
+                });
+                let body = Body::from_stream(first.chain(second));
+                let mut response = Response::new(body);
+                response.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/event-stream"),
+                );
+                response
+            }
+        }),
+    );
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let upstream_task = tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+    let (_temp, _bridge, gateway) = test_gateway_with_upstream(upstream_port).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{}/v1/responses", gateway.port()))
+        .json(&json!({
+            "model": "model",
+            "input": "hello",
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    let text = response.text().await.unwrap();
+
+    assert_eq!(text.matches("event: response.completed").count(), 1);
+    assert!(!text.contains("event: response.failed"));
+    assert!(!text.contains("late reset"));
+    gateway.stop().await;
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn responses_duplicate_argument_history_is_repaired_before_upstream() {
+    let captured = Arc::new(Mutex::new(None::<Value>));
+    let captured_for_upstream = Arc::clone(&captured);
+    let upstream = Router::new().route(
+        "/chat/completions",
+        post(move |body: Bytes| {
+            let captured = Arc::clone(&captured_for_upstream);
+            async move {
+                *captured.lock().unwrap() = Some(serde_json::from_slice(&body).unwrap());
+                (
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                )
+                    .into_response()
+            }
+        }),
+    );
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let upstream_task = tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+    let (_temp, _bridge, gateway) = test_gateway_with_upstream(upstream_port).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{}/v1/responses", gateway.port()))
+        .json(&json!({
+            "model": "model",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_dup",
+                    "name": "lookup",
+                    "arguments": "{\"time\":null,\"nested\":{\"x\":1,\"x\":2},\"time\":\"later\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_dup",
+                    "output": "ok"
+                },
+                { "type": "message", "role": "user", "content": "continue" }
+            ],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let _ = response.text().await.unwrap();
+
+    let forwarded = captured.lock().unwrap().clone().unwrap();
+    let arguments = forwarded["messages"][0]["tool_calls"][0]["function"]["arguments"]
+        .as_str()
+        .unwrap();
+    let parsed: Value = serde_json::from_str(arguments).unwrap();
+    assert_eq!(parsed["time"], "later");
+    assert_eq!(parsed["nested"]["x"], 2);
+
+    gateway.stop().await;
+    upstream_task.abort();
+}
+
+#[tokio::test]
 async fn non_stream_chat_returns_timeout_when_aggregation_exceeds_budget() {
     let upstream = Router::new().route(
         "/chat/completions",

@@ -91,6 +91,7 @@ pub fn responses_to_chat_with_options(
         _ => {}
     }
     preserve_invalid_tool_calls_as_text(&mut messages);
+    dedupe_function_call_arguments(&mut messages);
     messages = collapse_system_messages_to_head(messages);
     drop_empty_user_messages(&mut messages);
     repair_tool_pairing(&mut messages);
@@ -715,6 +716,165 @@ fn arguments_are_object(arguments: Option<&Value>) -> bool {
         }
         Some(Value::Object(_)) => true,
         _ => false,
+    }
+}
+
+pub(super) fn dedupe_function_call_arguments(messages: &mut [Value]) -> usize {
+    let mut repaired = 0;
+    for call in messages
+        .iter_mut()
+        .filter_map(|message| message.get_mut("tool_calls"))
+        .filter_map(Value::as_array_mut)
+        .flatten()
+        .filter(|call| call.get("type").and_then(Value::as_str) == Some("function"))
+    {
+        let Some(arguments) = call.pointer("/function/arguments").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(deduped) = dedupe_json_object(arguments) else {
+            continue;
+        };
+        let Some(arguments) = call.pointer_mut("/function/arguments") else {
+            continue;
+        };
+        *arguments = Value::String(deduped);
+        repaired += 1;
+    }
+    repaired
+}
+
+fn dedupe_json_object(raw: &str) -> Option<String> {
+    let DedupedValue {
+        value,
+        duplicate_keys,
+    } = serde_json::from_str::<DedupedValue>(raw).ok()?;
+    if !value.is_object() || duplicate_keys == 0 {
+        return None;
+    }
+    Some(super::canonical::canonical_json_string(&value))
+}
+
+struct DedupedValue {
+    value: Value,
+    duplicate_keys: usize,
+}
+
+impl<'de> serde::Deserialize<'de> for DedupedValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(DedupedVisitor)
+    }
+}
+
+struct DedupedVisitor;
+
+impl<'de> serde::de::Visitor<'de> for DedupedVisitor {
+    type Value = DedupedValue;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(DedupedValue {
+            value: Value::Bool(value),
+            duplicate_keys: 0,
+        })
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(DedupedValue {
+            value: Value::Number(value.into()),
+            duplicate_keys: 0,
+        })
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(DedupedValue {
+            value: Value::Number(value.into()),
+            duplicate_keys: 0,
+        })
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DedupedValue {
+            value: serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number),
+            duplicate_keys: 0,
+        })
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(DedupedValue {
+            value: Value::String(value.to_string()),
+            duplicate_keys: 0,
+        })
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(DedupedValue {
+            value: Value::String(value),
+            duplicate_keys: 0,
+        })
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(DedupedValue {
+            value: Value::Null,
+            duplicate_keys: 0,
+        })
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(DedupedValue {
+            value: Value::Null,
+            duplicate_keys: 0,
+        })
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        serde::Deserialize::deserialize(deserializer)
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        let mut duplicate_keys = 0;
+        while let Some(item) = seq.next_element::<DedupedValue>()? {
+            duplicate_keys += item.duplicate_keys;
+            values.push(item.value);
+        }
+        Ok(DedupedValue {
+            value: Value::Array(values),
+            duplicate_keys,
+        })
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        let mut values = serde_json::Map::new();
+        let mut duplicate_keys = 0;
+        while let Some((key, item)) = map.next_entry::<String, DedupedValue>()? {
+            if values.insert(key, item.value).is_some() {
+                duplicate_keys += 1;
+            }
+            duplicate_keys += item.duplicate_keys;
+        }
+        Ok(DedupedValue {
+            value: Value::Object(values),
+            duplicate_keys,
+        })
     }
 }
 

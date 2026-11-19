@@ -47,6 +47,7 @@ pub struct ResponsesStream {
     text: Option<TextTrack>,
     inline_think: InlineThinkSplitter,
     calls: BTreeMap<usize, CallTrack>,
+    completed_call_ids: std::collections::HashSet<String>,
     next_call_key_to_add: usize,
     output: Vec<Value>,
     finish_reason: Option<String>,
@@ -77,6 +78,7 @@ impl ResponsesStream {
             text: None,
             inline_think: InlineThinkSplitter::default(),
             calls: BTreeMap::new(),
+            completed_call_ids: std::collections::HashSet::new(),
             next_call_key_to_add: 0,
             output: Vec::new(),
             finish_reason: None,
@@ -557,21 +559,26 @@ impl ResponsesStream {
     }
 
     fn resolve_tool_key(&self, call: &Value) -> usize {
+        let call_id = call
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty());
+        if let Some(call_id) = call_id {
+            if let Some((key, _)) = self
+                .calls
+                .iter()
+                .find(|(_, state)| state.call_id == call_id)
+            {
+                return *key;
+            }
+        }
         if let Some(index) = call.get("index").and_then(Value::as_u64) {
             return usize::try_from(index).unwrap_or(usize::MAX - 1);
         }
 
         let last_key = self.calls.keys().next_back().copied();
-        let Some(id) = call
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-        else {
+        if call_id.is_none() {
             return last_key.unwrap_or(0);
-        };
-
-        if let Some((key, _)) = self.calls.iter().find(|(_, state)| state.call_id == id) {
-            return *key;
         }
         match last_key {
             Some(key) => key.checked_add(1).unwrap_or(key),
@@ -586,6 +593,9 @@ impl ResponsesStream {
     ) -> Vec<Bytes> {
         let mut events = Vec::new();
         for call in calls {
+            if !call.call_id.is_empty() && !self.completed_call_ids.insert(call.call_id.clone()) {
+                continue;
+            }
             if call.custom {
                 let input = custom_tool_input(&call.arguments);
                 if !input.is_empty() {

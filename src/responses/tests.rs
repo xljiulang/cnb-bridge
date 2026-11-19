@@ -1,3 +1,4 @@
+use super::request::dedupe_function_call_arguments;
 use super::request::{COMPACTION_PLACEHOLDER, COMPACTION_PROMPT, HANDLED_INPUT_TYPES};
 use super::*;
 use bytes::Bytes;
@@ -107,6 +108,101 @@ fn canonicalizes_valid_function_arguments_in_history() {
         chat["messages"][0]["tool_calls"][0]["function"]["arguments"],
         "{\"a\":[3,{\"x\":1,\"y\":2}],\"b\":{\"a\":1,\"z\":2}}"
     );
+}
+
+#[test]
+fn repairs_duplicate_function_argument_keys_in_history() {
+    let request = json!({
+        "model": "model",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "call_dup",
+                "name": "lookup",
+                "arguments": "{\"time\":null,\"meta\":{\"k\":1,\"k\":2},\"items\":[{\"q\":\"a\",\"q\":\"b\"}],\"time\":\"later\"}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_dup",
+                "output": "ok"
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let arguments = chat["messages"][0]["tool_calls"][0]["function"]["arguments"]
+        .as_str()
+        .unwrap();
+    let parsed: Value = serde_json::from_str(arguments).unwrap();
+
+    assert_eq!(parsed["time"], "later");
+    assert_eq!(parsed["meta"]["k"], 2);
+    assert_eq!(parsed["items"][0]["q"], "b");
+}
+
+#[test]
+fn preserves_custom_input_when_well_formed_function_arguments_are_canonicalized() {
+    let raw = "{ \"command\": [\"ls\", \"-la\"], \"workdir\": \"/tmp\" }";
+    let patch = "*** Begin Patch\n*** Add File: note.txt\n+hello\n*** End Patch";
+    let request = json!({
+        "model": "model",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "call_raw",
+                "name": "exec_command",
+                "arguments": raw
+            },
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_patch",
+                "name": "apply_patch",
+                "input": patch
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+    let calls = messages
+        .iter()
+        .flat_map(|message| {
+            message
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        calls[0]["function"]["arguments"],
+        "{\"command\":[\"ls\",\"-la\"],\"workdir\":\"/tmp\"}"
+    );
+    let custom: Value =
+        serde_json::from_str(calls[1]["function"]["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(custom["input"], patch);
+}
+
+#[test]
+fn duplicate_argument_repair_is_idempotent() {
+    let mut messages = vec![json!({
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [{
+            "id": "call_dup",
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "arguments": "{\"b\":2,\"a\":1,\"b\":3}"
+            }
+        }]
+    })];
+
+    assert_eq!(dedupe_function_call_arguments(&mut messages), 1);
+    let once = messages.clone();
+    assert_eq!(dedupe_function_call_arguments(&mut messages), 0);
+    assert_eq!(messages, once);
 }
 
 #[test]
@@ -591,6 +687,66 @@ fn streams_text_and_terminal_events_in_order() {
     );
     assert!(joined.contains("\"input_tokens\":3"));
     assert!(joined.contains("\"output_tokens\":2"));
+}
+
+#[test]
+fn stream_ignores_all_events_after_completed_terminal() {
+    let mut stream = ResponsesStream::new("resp_terminal_lock".to_string(), "model".to_string());
+    let first = stream.push(&json!({
+        "choices": [{
+            "delta": { "content": "first" },
+            "finish_reason": "stop"
+        }]
+    }));
+    let mut events = first;
+    events.extend(stream.finish());
+    let expected = events.clone();
+
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": { "content": "late", "tool_calls": [{
+                "index": 0,
+                "id": "call_late",
+                "function": { "name": "read_file", "arguments": "{}" }
+            }] },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": { "prompt_tokens": 99, "completion_tokens": 99 }
+    })));
+    events.extend(stream.fail("late_error", "late failure"));
+    events.extend(stream.finish());
+
+    assert_eq!(events, expected);
+    assert_eq!(named_events(&events, "response.completed").len(), 1);
+}
+
+#[test]
+fn stream_keeps_only_one_terminal_when_error_arrives_after_output() {
+    let mut stream = ResponsesStream::new("resp_error_terminal".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": { "content": "visible" },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.fail("upstream_network_error", "connection reset"));
+    events.extend(stream.push(&json!({
+        "error": { "message": "late timeout", "type": "server_error" }
+    })));
+    events.extend(stream.finish());
+
+    let names = event_names(&events);
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| matches!(
+                name.as_str(),
+                "response.completed" | "response.incomplete" | "response.failed"
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(named_events(&events, "response.failed").len(), 1);
 }
 
 #[test]
@@ -2892,6 +3048,115 @@ fn stream_completes_tool_calls_before_later_reasoning() {
     assert_eq!(call_done.len(), 1);
     assert_eq!(call_done[0]["item"]["type"], "function_call");
     assert_eq!(call_done[0]["item"]["call_id"], "call_1");
+}
+
+#[test]
+fn stream_does_not_complete_the_same_tool_call_twice() {
+    let mut stream = ResponsesStream::new("resp_duplicate_done".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_1",
+                    "function": { "name": "read_file", "arguments": "{}" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    }));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_1",
+                    "function": { "name": "read_file", "arguments": "{}" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })));
+    events.extend(stream.finish());
+
+    let items = named_events(&events, "response.output_item.done");
+    let calls = items
+        .iter()
+        .filter(|event| event["item"]["type"] == "function_call")
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        terminal_response(&events, "response.completed")["response"]["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["type"] == "function_call")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn stream_reuses_call_identity_when_a_late_index_changes() {
+    let mut stream = ResponsesStream::new("resp_moved_index".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "id": "call_1",
+                    "function": { "name": "read_file", "arguments": "{\"path\":" }
+                }]
+            },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 4,
+                    "id": "call_1",
+                    "function": { "arguments": "\"a.txt\"}" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })));
+    events.extend(stream.finish());
+
+    let completed = terminal_response(&events, "response.completed");
+    let calls = completed["response"]["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["arguments"], "{\"path\":\"a.txt\"}");
+}
+
+#[test]
+fn stream_does_not_publish_empty_shell_tool_calls() {
+    let mut stream = ResponsesStream::new("resp_empty_shell".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 3,
+                    "function": { "arguments": "" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    }));
+    events.extend(stream.finish());
+
+    let output = terminal_response(&events, "response.failed")["response"]["output"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(output.is_empty());
+    assert!(named_events(&events, "response.output_item.done").is_empty());
 }
 
 #[test]
