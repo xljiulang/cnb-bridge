@@ -452,7 +452,7 @@ describe("App shell", () => {
     expect(wrapper.findAll(".pipeline .step")[2].classes()).toContain("current");
 
     await publish("connecting", "ws-connecting");
-    expect(wrapper.findAll(".pipeline .step")[3].classes()).toContain("current");
+    expect(wrapper.findAll(".pipeline .step")[2].classes()).toContain("current");
     expect(wrapper.findAll(".pipeline .step")[2].text()).toContain("正在连接");
     expect(wrapper.findAll(".pipeline .step")[2].text()).not.toContain(
       "工作空间与 SSH 通道",
@@ -460,7 +460,7 @@ describe("App shell", () => {
 
     await publish("ready");
     expect(wrapper.text()).toContain("在线");
-    expect(wrapper.findAll(".pipeline .step")[3].classes()).toContain("done");
+    expect(wrapper.findAll(".pipeline .step")[2].classes()).toContain("done");
     expect(wrapper.findAll(".pipeline .step")[2].text()).toContain("SSH 已连接");
 
     resolveStart(currentSnapshot);
@@ -468,7 +468,7 @@ describe("App shell", () => {
     wrapper.unmount();
   });
 
-  it("marks a running cloud workspace after an unexpected tunnel disconnect", async () => {
+  it("does not present a cached workspace as connected or waiting", async () => {
     const detachedSnapshot = {
       ...snapshot,
       bridge: {
@@ -498,22 +498,89 @@ describe("App shell", () => {
     const wrapper = mount(App);
     await flushPromises();
 
-    const workspaceStep = wrapper.findAll(".pipeline .step")[2];
-    expect(workspaceStep.classes()).toContain("done");
+    const steps = wrapper.findAll(".pipeline .step");
+    expect(steps).toHaveLength(3);
+    const workspaceStep = steps[2];
+    expect(workspaceStep.classes()).not.toContain("done");
     expect(workspaceStep.classes()).not.toContain("current");
-    expect(workspaceStep.text()).toContain("等待重连");
+    expect(workspaceStep.text()).toContain("按需连接");
+    expect(workspaceStep.text()).not.toContain("等待重连");
+    expect(wrapper.text()).not.toContain("等待建立通道");
     expect(wrapper.find(".head-actions .primary").text()).toContain("立即桥接");
     wrapper.unmount();
   });
 
-  it("shows the workspace as restartable after a normal stop", async () => {
-    mockSnapshotIpc();
+  it("shows repository provisioning as on demand before the first bridge", async () => {
+    const unpreparedSnapshot = {
+      ...snapshot,
+      bridge: {
+        ...snapshot.bridge,
+        state: "idle",
+        repoSlug: null,
+        workspaceSn: null,
+      },
+    };
+    mockWindows("main");
+    mockIPC(
+      (command) => {
+        switch (command) {
+          case "get_snapshot":
+            return unpreparedSnapshot;
+          case "get_logs":
+          case "list_http_traces":
+          case "list_namespaces":
+            return [];
+          case "get_cnb_usage":
+            return null;
+          default:
+            return null;
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+
+    expect(wrapper.findAll(".pipeline .step")[1].text()).toContain("按需准备");
+    expect(wrapper.text()).not.toContain("等待自动准备");
+    wrapper.unmount();
+  });
+
+  it("shows an explicit failure instead of an on-demand cloud state", async () => {
+    const failedSnapshot = {
+      ...snapshot,
+      bridge: {
+        ...snapshot.bridge,
+        state: "failed",
+        workspaceSn: null,
+        error: "建立 SSH 通道失败",
+      },
+    };
+    mockWindows("main");
+    mockIPC(
+      (command) => {
+        switch (command) {
+          case "get_snapshot":
+            return failedSnapshot;
+          case "get_logs":
+          case "list_http_traces":
+          case "list_namespaces":
+            return [];
+          case "get_cnb_usage":
+            return null;
+          default:
+            return null;
+        }
+      },
+      { shouldMockEvents: true },
+    );
     const wrapper = mount(App);
     await flushPromises();
 
     const workspaceStep = wrapper.findAll(".pipeline .step")[2];
-    expect(workspaceStep.text()).toContain("按需启动");
-    expect(workspaceStep.text()).not.toContain("工作空间已保留");
+    expect(workspaceStep.classes()).toContain("error");
+    expect(workspaceStep.text()).toContain("连接失败");
+    expect(workspaceStep.text()).not.toContain("按需连接");
     wrapper.unmount();
   });
 

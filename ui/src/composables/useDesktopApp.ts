@@ -300,15 +300,25 @@ export function useDesktopApp() {
     const accountDone = accountState.value === "connected";
     const repoDone =
       Boolean(snapshot.value?.bridge.repoSlug) && !repoCreationNeeded.value;
-    const workspaceDone =
-      ready.value ||
-      (idle.value && Boolean(snapshot.value?.bridge.workspaceSn));
     const tunnelActive = effectiveBridgeState === "connecting";
     const tone = (done: boolean, current: boolean): StepTone => {
       if (done) return "done";
       if (failed) return "error";
       return current ? "current" : "pending";
     };
+    const workspaceDetail = ready.value
+      ? "SSH 已连接"
+      : effectiveBridgeState === "stopping"
+        ? "正在断开"
+        : effectiveBridgeState === "connecting"
+          ? "正在连接"
+          : effectiveBridgeState === "startingWorkspace"
+            ? "正在启动云主机"
+            : effectiveBridgeState === "needsSshKey"
+              ? "需要注册 SSH 公钥"
+              : effectiveBridgeState === "failed"
+                ? "连接失败"
+                : "按需连接";
 
     return [
       {
@@ -322,7 +332,11 @@ export function useDesktopApp() {
       },
       {
         label: "仓库",
-        detail: snapshot.value?.bridge.repoSlug || "等待自动准备",
+        detail: repoDone
+          ? snapshot.value?.bridge.repoSlug || ""
+          : repoCreationNeeded.value
+            ? "需要创建仓库"
+            : "按需准备",
         tone: tone(
           repoDone,
           accountDone &&
@@ -333,30 +347,11 @@ export function useDesktopApp() {
       },
       {
         label: "云主机",
-        detail: ready.value
-          ? "SSH 已连接"
-          : effectiveBridgeState === "stopping"
-            ? "正在断开"
-            : effectiveBridgeState === "connecting"
-              ? "正在连接"
-              : idle.value && snapshot.value?.bridge.workspaceSn
-                ? "等待重连"
-                : "按需启动",
+        detail: workspaceDetail,
         tone: tone(
-          workspaceDone,
-          Boolean(snapshot.value?.bridge.workspaceSn) ||
-            effectiveBridgeState === "startingWorkspace" ||
-            tunnelActive,
+          ready.value,
+          effectiveBridgeState === "startingWorkspace" || tunnelActive,
         ),
-      },
-      {
-        label: "本机端点",
-        detail: ready.value
-          ? "端口已监听"
-          : idle.value
-            ? "收到请求后建立通道"
-            : "等待建立通道",
-        tone: tone(ready.value, tunnelActive),
       },
     ];
   });
