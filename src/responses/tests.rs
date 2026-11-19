@@ -2385,6 +2385,128 @@ fn reads_reasoning_from_reasoning_details() {
 }
 
 #[test]
+fn reasoning_text_ignores_whitespace_only_sources() {
+    for value in [
+        json!({ "reasoning_content": " " }),
+        json!({ "reasoning_content": "\n\t " }),
+        json!({ "reasoning": " \n" }),
+        json!({ "reasoning": { "content": "\t" } }),
+        json!({ "reasoning": { "text": "  " } }),
+        json!({ "reasoning": { "summary": "\n" } }),
+        json!({ "reasoning_details": [{ "text": " " }] }),
+        json!({ "reasoning_details": [{ "parts": [{ "text": "\n" }] }] }),
+    ] {
+        assert_eq!(reasoning_text(&value), None, "{value}");
+    }
+    assert_eq!(
+        reasoning_text(&json!({
+            "reasoning_content": " ",
+            "reasoning_details": [{ "text": "fallback" }]
+        }))
+        .as_deref(),
+        Some("fallback")
+    );
+}
+
+#[test]
+fn stream_ignores_whitespace_only_reasoning() {
+    let mut stream = ResponsesStream::new("resp_blank_think".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": { "reasoning_content": " " },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": { "reasoning_content": "\n\t " },
+            "finish_reason": "stop"
+        }]
+    })));
+    events.extend(stream.finish());
+
+    assert!(named_events(&events, "response.reasoning_summary_part.added").is_empty());
+    assert!(named_events(&events, "response.reasoning_summary_text.delta").is_empty());
+    assert!(named_events(&events, "response.reasoning_summary_text.done").is_empty());
+    let completed = terminal_response(&events, "response.completed");
+    assert!(completed["response"]["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| item["type"] != "reasoning"));
+}
+
+#[test]
+fn stream_ignores_whitespace_only_inline_think() {
+    let mut stream = ResponsesStream::new("resp_blank_inline".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": { "content": "<think> \n\t </think>\nanswer" },
+            "finish_reason": "stop"
+        }]
+    }));
+    events.extend(stream.finish());
+
+    assert!(named_events(&events, "response.reasoning_summary_part.added").is_empty());
+    assert!(named_events(&events, "response.reasoning_summary_text.delta").is_empty());
+    let completed = terminal_response(&events, "response.completed");
+    assert_eq!(completed["response"]["output"][0]["type"], "message");
+    assert_eq!(
+        completed["response"]["output"][0]["content"][0]["text"],
+        "answer"
+    );
+}
+
+#[test]
+fn non_stream_ignores_whitespace_only_inline_think() {
+    let chat = json!({
+        "id": "chatcmpl-blank-inline",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "<thinking>\n \t</thinking>\nanswer"
+            },
+            "finish_reason": "stop"
+        }]
+    });
+    let response = chat_to_responses(&chat, "model", &ToolShape::default()).unwrap();
+    assert_eq!(response["output"].as_array().unwrap().len(), 1);
+    assert_eq!(response["output"][0]["type"], "message");
+    assert_eq!(response["output"][0]["content"][0]["text"], "answer");
+}
+
+#[test]
+fn stream_preserves_leading_and_interior_reasoning_whitespace_after_valid_start() {
+    let mut stream = ResponsesStream::new("resp_padded_think".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": { "reasoning_content": " \n" },
+            "finish_reason": null
+        }]
+    }));
+    assert!(named_events(&events, "response.reasoning_summary_part.added").is_empty());
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": { "reasoning_content": "thinking" },
+            "finish_reason": null
+        }]
+    })));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": { "reasoning_content": "\n\n" },
+            "finish_reason": "stop"
+        }]
+    })));
+    events.extend(stream.finish());
+
+    let delta = named_events(&events, "response.reasoning_summary_text.delta")
+        .into_iter()
+        .filter_map(|event| event["delta"].as_str().map(str::to_string))
+        .collect::<String>();
+    assert_eq!(delta, " \nthinking\n\n");
+}
+
+#[test]
 fn reads_reasoning_object_and_joins_multiple_details() {
     assert_eq!(
         reasoning_text(&json!({
@@ -2438,6 +2560,117 @@ fn non_stream_message_reads_reasoning_details() {
 
     assert_eq!(response["output"][0]["type"], "reasoning");
     assert_eq!(response["output"][0]["summary"][0]["text"], "because");
+}
+
+#[test]
+fn non_stream_ignores_whitespace_only_reasoning() {
+    let chat = json!({
+        "id": "chatcmpl-blank",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "done",
+                "reasoning_content": " \n"
+            },
+            "finish_reason": "stop"
+        }]
+    });
+    let response = chat_to_responses(&chat, "model", &ToolShape::default()).unwrap();
+    assert!(response["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| item["type"] != "reasoning"));
+}
+
+#[test]
+fn chat_completion_aggregation_ignores_whitespace_only_reasoning() {
+    assert_eq!(
+        reasoning_text(&json!({ "reasoning_content": " ", "content": "ok" })),
+        None
+    );
+}
+
+#[test]
+fn reasoning_item_text_prefers_non_blank_content_over_blank_summary() {
+    let request = json!({
+        "model": "model",
+        "input": [{
+            "type": "reasoning",
+            "summary": [{ "type": "summary_text", "text": " " }],
+            "content": [{ "type": "reasoning_text", "text": "actual thought" }]
+        }, {
+            "type": "message",
+            "role": "assistant",
+            "content": "continue"
+        }]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    assert_eq!(chat["messages"][0]["reasoning_content"], "actual thought");
+
+    let blank = json!({
+        "model": "model",
+        "input": [{
+            "type": "reasoning",
+            "summary": [{ "type": "summary_text", "text": " " }]
+        }, {
+            "type": "message",
+            "role": "assistant",
+            "content": "continue"
+        }]
+    });
+    let chat = responses_to_chat(&blank, false).unwrap();
+    assert!(chat["messages"][0].get("reasoning_content").is_none());
+}
+
+#[test]
+fn stream_preserves_interior_blank_reasoning_after_valid_start() {
+    let mut stream = ResponsesStream::new("resp_interior_blank".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": { "reasoning_content": "start" },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": { "reasoning_content": "\n\n" },
+            "finish_reason": null
+        }]
+    })));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": { "reasoning_content": "end" },
+            "finish_reason": "stop"
+        }]
+    })));
+    events.extend(stream.finish());
+
+    let deltas = named_events(&events, "response.reasoning_summary_text.delta")
+        .into_iter()
+        .filter_map(|event| event["delta"].as_str().map(str::to_string))
+        .collect::<String>();
+    let done = named_events(&events, "response.reasoning_summary_text.done");
+    assert_eq!(deltas, "start\n\nend");
+    assert_eq!(done[0]["text"], "start\n\nend");
+}
+
+#[test]
+fn stream_does_not_emit_empty_reasoning_item_when_only_blank_chunks_arrive() {
+    let mut stream = ResponsesStream::new("resp_blank_part".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": { "reasoning_content": " " },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.finish());
+
+    let joined = String::from_utf8(events.concat()).unwrap();
+    assert!(!joined.contains("response.reasoning_summary_part.added"));
+    assert!(!joined.contains("response.reasoning_summary_text.done"));
+    assert!(!joined.contains("\"type\":\"reasoning\""));
 }
 
 #[test]

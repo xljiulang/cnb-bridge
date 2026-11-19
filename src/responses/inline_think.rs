@@ -67,7 +67,7 @@ fn reasoning_holdback_len(buffer: &str) -> usize {
 }
 
 fn non_empty(text: &str) -> Option<String> {
-    (!text.is_empty()).then(|| text.to_string())
+    (!text.trim().is_empty()).then(|| text.to_string())
 }
 
 pub(super) fn split_leading_think_block(text: &str) -> Option<(String, String)> {

@@ -148,7 +148,7 @@ fn push_output_text(parts: &mut Vec<Value>, text: &str) {
 
 fn split_leading_think_block(text: &str) -> (Option<String>, String) {
     super::inline_think::split_leading_think_block(text)
-        .map(|(reasoning, answer)| ((!reasoning.is_empty()).then_some(reasoning), answer))
+        .map(|(reasoning, answer)| ((!reasoning.trim().is_empty()).then_some(reasoning), answer))
         .unwrap_or_else(|| (None, text.to_string()))
 }
 

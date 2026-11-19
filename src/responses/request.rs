@@ -460,7 +460,11 @@ pub(super) fn translate_input_items(
                 messages.push(message);
             }
             Some("reasoning") => {
-                append_reasoning(&mut reasoning, reasoning_item_text(item));
+                let text = reasoning_item_text(item);
+                append_reasoning(&mut reasoning, text.clone());
+                if text.is_none() {
+                    continue;
+                }
             }
             Some("function_call" | "custom_tool_call" | "tool_search_call") => {
                 // Media from the preceding tool turn belongs before this new
@@ -624,10 +628,7 @@ pub(super) fn translate_input_items(
 }
 
 fn append_reasoning(target: &mut Option<String>, next: Option<String>) {
-    let Some(next) = next
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
-    else {
+    let Some(next) = next.filter(|text| !text.trim().is_empty()) else {
         return;
     };
     match target {
@@ -1063,17 +1064,16 @@ pub(super) fn chat_content_part(part: &Value, options: TranslationOptions) -> Op
 }
 
 pub(super) fn reasoning_item_text(item: &Value) -> Option<String> {
-    let collect = |key: &str| {
-        let text = item
-            .get(key)
-            .and_then(Value::as_array)?
+    let collect = |parts: Option<&Vec<Value>>| {
+        let text = parts?
             .iter()
             .filter_map(|part| part.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>()
             .join("\n");
-        (!text.is_empty()).then_some(text)
+        (!text.trim().is_empty()).then_some(text)
     };
-    collect("summary").or_else(|| collect("content"))
+    collect(item.get("summary").and_then(Value::as_array))
+        .or_else(|| collect(item.get("content").and_then(Value::as_array)))
 }
 
 pub(super) fn value_to_text(value: &Value) -> String {

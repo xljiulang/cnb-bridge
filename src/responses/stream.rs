@@ -43,6 +43,7 @@ pub struct ResponsesStream {
     created: bool,
     next_index: usize,
     reasoning: Option<TextTrack>,
+    reasoning_pending: String,
     text: Option<TextTrack>,
     inline_think: InlineThinkSplitter,
     calls: BTreeMap<usize, CallTrack>,
@@ -72,6 +73,7 @@ impl ResponsesStream {
             created: false,
             next_index: 0,
             reasoning: None,
+            reasoning_pending: String::new(),
             text: None,
             inline_think: InlineThinkSplitter::default(),
             calls: BTreeMap::new(),
@@ -138,8 +140,8 @@ impl ResponsesStream {
         };
         for choice in choices {
             let delta = choice.get("delta").unwrap_or(&Value::Null);
-            if let Some(reasoning) = reasoning_text(delta) {
-                events.extend(self.reasoning_delta(&reasoning));
+            if let Some(reasoning) = raw_reasoning_text(delta) {
+                events.extend(self.reasoning_text_fragment(&reasoning));
             }
             if let Some(content) = delta.get("content").and_then(Value::as_str) {
                 if !content.is_empty() {
@@ -171,6 +173,7 @@ impl ResponsesStream {
         self.finished = true;
         let mut events = self.ensure_created();
         events.extend(self.flush_inline_think());
+        self.reasoning_pending.clear();
         if let Some(track) = self.reasoning.take() {
             events.push(sse_event(
                 "response.reasoning_summary_text.done",
@@ -623,6 +626,21 @@ impl ResponsesStream {
         events
     }
 
+    fn reasoning_text_fragment(&mut self, delta: &str) -> Vec<Bytes> {
+        let mut events = Vec::new();
+        if self.reasoning.is_none() {
+            self.reasoning_pending.push_str(delta);
+            if self.reasoning_pending.trim().is_empty() {
+                return events;
+            }
+            let pending = std::mem::take(&mut self.reasoning_pending);
+            events.extend(self.reasoning_delta(&pending));
+        } else {
+            events.extend(self.reasoning_delta(delta));
+        }
+        events
+    }
+
     fn text_delta(&mut self, delta: &str) -> Vec<Bytes> {
         let mut events = Vec::new();
         if self.text.is_none() {
@@ -894,6 +912,48 @@ pub(crate) fn reasoning_text(delta: &Value) -> Option<String> {
     delta
         .get("reasoning_content")
         .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            delta
+                .get("reasoning")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            let reasoning = delta.get("reasoning")?;
+            for key in ["content", "text", "summary"] {
+                if let Some(text) = reasoning
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    return Some(text.to_string());
+                }
+            }
+            None
+        })
+        .or_else(|| {
+            let details = delta.get("reasoning_details")?;
+            let parts = match details {
+                Value::Array(parts) => parts.iter().collect::<Vec<_>>(),
+                other => vec![other],
+            };
+            let text = parts
+                .into_iter()
+                .filter_map(reasoning_detail_text)
+                .filter(|text| !text.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            (!text.trim().is_empty()).then_some(text)
+        })
+}
+
+fn raw_reasoning_text(delta: &Value) -> Option<String> {
+    delta
+        .get("reasoning_content")
+        .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
         .map(str::to_string)
         .or_else(|| {
@@ -937,7 +997,7 @@ fn reasoning_detail_text(detail: &Value) -> Option<String> {
         if let Some(text) = detail
             .get(key)
             .and_then(Value::as_str)
-            .filter(|text| !text.is_empty())
+            .filter(|text| !text.trim().is_empty())
         {
             return Some(text.to_string());
         }
@@ -948,7 +1008,7 @@ fn reasoning_detail_text(detail: &Value) -> Option<String> {
             .filter_map(reasoning_detail_text)
             .collect::<Vec<_>>()
             .join("\n\n");
-        return (!text.is_empty()).then_some(text);
+        return (!text.trim().is_empty()).then_some(text);
     }
     None
 }
