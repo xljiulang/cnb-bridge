@@ -61,6 +61,7 @@ pub fn responses_to_chat(request: &Value, want_stream: bool) -> Result<Value, St
         "stream": want_stream
     });
     let declared = collect_declared_tools(request);
+    let shape = ToolShape::from_declared(&declared.tools);
     if !declared.tools.is_empty() {
         let translated = translate_tools(&declared.tools);
         if !translated.is_empty() {
@@ -98,11 +99,21 @@ pub fn responses_to_chat(request: &Value, want_stream: bool) -> Result<Value, St
         }
     }
     if !compaction {
-        if let Some(choice) = translate_tool_choice(request.get("tool_choice")) {
+        if let Some(choice) = translate_tool_choice(request.get("tool_choice"), &shape) {
             chat["tool_choice"] = choice;
         }
         if let Some(format) = translate_text_format(request) {
             chat["response_format"] = format;
+        }
+    }
+    if !chat
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| !tools.is_empty())
+    {
+        if let Some(object) = chat.as_object_mut() {
+            object.remove("tool_choice");
+            object.remove("parallel_tool_calls");
         }
     }
     Ok(chat)
@@ -355,6 +366,8 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
     let mut reasoning: Option<String> = None;
     // Images lifted out of tool results, emitted once the tool turn ends.
     let mut media: Vec<Value> = Vec::new();
+    let mut known_call_ids = HashSet::new();
+    let mut orphan_outputs = Vec::new();
     for item in items {
         let Some(object) = item.as_object() else {
             continue;
@@ -363,12 +376,24 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
             .get("type")
             .and_then(Value::as_str)
             .or_else(|| object.contains_key("role").then_some("message"));
+        if !matches!(
+            item_type,
+            Some("function_call_output" | "custom_tool_call_output" | "tool_search_output")
+        ) {
+            flush_orphan_outputs(messages, &mut orphan_outputs);
+        }
         match item_type {
             Some("message") => {
-                flush_pending(messages, &mut pending);
-                flush_tool_media(messages, &mut media);
                 let role = object.get("role").and_then(Value::as_str).unwrap_or("user");
                 let role = if role == "developer" { "system" } else { role };
+                if role == "assistant" {
+                    if let Some(message) = pending.as_mut() {
+                        merge_assistant_content(message, message_content(item));
+                        continue;
+                    }
+                }
+                flush_pending(messages, &mut pending);
+                flush_tool_media(messages, &mut media);
                 if role != "assistant" {
                     reasoning = None;
                 }
@@ -399,9 +424,12 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
                     .unwrap_or_else(|| raw_name.to_string());
                 let call_id = object
                     .get("call_id")
+                    .or_else(|| object.get("id"))
                     .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
+                    .filter(|call_id| !call_id.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("call_local_{}", known_call_ids.len() + 1));
+                known_call_ids.insert(call_id.clone());
                 let arguments = if item_type == Some("custom_tool_call") {
                     json!({
                         "input": object
@@ -428,6 +456,28 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
                     if let Some(calls) = message["tool_calls"].as_array_mut() {
                         calls.push(call);
                     }
+                } else if let Some(message) = messages.last_mut().filter(|message| {
+                    message.get("role").and_then(Value::as_str) == Some("assistant")
+                }) {
+                    if !message.get("tool_calls").is_some_and(Value::is_array) {
+                        message["tool_calls"] = json!([]);
+                    }
+                    message["tool_calls"]
+                        .as_array_mut()
+                        .expect("tool_calls was initialized as an array")
+                        .push(call);
+                    if message.get("content").is_none() {
+                        message["content"] = Value::Null;
+                    }
+                    if let Some(text) = reasoning.take() {
+                        if let Some(existing) =
+                            message.get("reasoning_content").and_then(Value::as_str)
+                        {
+                            message["reasoning_content"] = json!(format!("{existing}\n{text}"));
+                        } else {
+                            message["reasoning_content"] = json!(text);
+                        }
+                    }
                 } else {
                     let mut message = json!({
                         "role": "assistant",
@@ -441,8 +491,12 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
                 }
             }
             Some("function_call_output" | "custom_tool_call_output") => {
-                flush_pending(messages, &mut pending);
                 let call_id = object.get("call_id").and_then(Value::as_str).unwrap_or("");
+                if call_id.is_empty() || !known_call_ids.contains(call_id) {
+                    orphan_outputs.push(item.clone());
+                    continue;
+                }
+                flush_pending(messages, &mut pending);
                 let output = object.get("output").unwrap_or(&Value::Null);
                 let content = extract_tool_output_media(output, call_id, &mut media)
                     .unwrap_or_else(|| value_to_text(output));
@@ -480,8 +534,84 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
             _ => {}
         }
     }
+    flush_orphan_outputs(messages, &mut orphan_outputs);
     flush_pending(messages, &mut pending);
     flush_tool_media(messages, &mut media);
+}
+
+fn merge_assistant_content(message: &mut Value, content: Value) {
+    let is_empty = |value: &Value| {
+        value.is_null()
+            || value.as_str().is_some_and(str::is_empty)
+            || value.as_array().is_some_and(Vec::is_empty)
+    };
+    if is_empty(&content) {
+        return;
+    }
+    if is_empty(&message["content"]) {
+        message["content"] = content;
+        return;
+    }
+
+    let previous = message["content"].take();
+    message["content"] = match (previous, content) {
+        (Value::String(mut previous), Value::String(content)) => {
+            if !previous.is_empty() {
+                previous.push('\n');
+            }
+            previous.push_str(&content);
+            Value::String(previous)
+        }
+        (Value::Array(mut parts), Value::Array(more)) => {
+            parts.extend(more);
+            Value::Array(parts)
+        }
+        (Value::Array(mut parts), Value::String(content)) => {
+            parts.push(json!({ "type": "text", "text": content }));
+            Value::Array(parts)
+        }
+        (Value::String(previous), Value::Array(mut more)) => {
+            let mut parts = vec![json!({ "type": "text", "text": previous })];
+            parts.append(&mut more);
+            Value::Array(parts)
+        }
+        (previous, content) => {
+            let mut parts = Vec::new();
+            if !is_empty(&previous) {
+                parts.push(previous);
+            }
+            parts.push(content);
+            Value::Array(parts)
+        }
+    };
+}
+
+fn flush_orphan_outputs(messages: &mut Vec<Value>, outputs: &mut Vec<Value>) {
+    for output in std::mem::take(outputs) {
+        let call_id = output.get("call_id").and_then(Value::as_str).unwrap_or("");
+        let mut media = Vec::new();
+        let body = output
+            .get("output")
+            .map(|value| {
+                extract_tool_output_media(value, call_id, &mut media)
+                    .unwrap_or_else(|| value_to_text(value))
+            })
+            .unwrap_or_default();
+        let marker = if call_id.is_empty() {
+            "[tool_result without a matching tool_call]".to_string()
+        } else {
+            format!("[tool_result without a matching tool_call] (call_id: {call_id})")
+        };
+        let text = format!("{marker}\n{body}");
+        let content = if media.is_empty() {
+            Value::String(text)
+        } else {
+            let mut parts = vec![json!({ "type": "text", "text": text })];
+            parts.extend(media);
+            Value::Array(parts)
+        };
+        messages.push(json!({ "role": "user", "content": content }));
+    }
 }
 
 pub(super) fn flush_pending(messages: &mut Vec<Value>, pending: &mut Option<Value>) {

@@ -18,6 +18,7 @@ pub(super) struct CallTrack {
     custom: bool,
     arguments: String,
     output_index: usize,
+    added: bool,
 }
 
 /// Stateful Chat SSE chunk to Responses SSE translator.
@@ -30,6 +31,7 @@ pub struct ResponsesStream {
     reasoning: Option<TextTrack>,
     text: Option<TextTrack>,
     calls: BTreeMap<usize, CallTrack>,
+    next_call_key_to_add: usize,
     output: Vec<Value>,
     finish_reason: Option<String>,
     usage: Option<Value>,
@@ -54,6 +56,7 @@ impl ResponsesStream {
             reasoning: None,
             text: None,
             calls: BTreeMap::new(),
+            next_call_key_to_add: 0,
             output: Vec::new(),
             finish_reason: None,
             usage: None,
@@ -192,8 +195,35 @@ impl ResponsesStream {
                 })
             }));
         }
-        if self.failure.is_none() {
+        events.extend(self.flush_ready_calls());
+        for key in self.calls.keys().copied().collect::<Vec<_>>() {
+            let (added, missing_name) = self
+                .calls
+                .get(&key)
+                .map(|call| (call.added, call.display_name.is_empty()))
+                .unwrap_or((true, true));
+            if added || missing_name {
+                continue;
+            }
+            if self.calls[&key].call_id.is_empty() {
+                self.calls
+                    .get_mut(&key)
+                    .expect("call key came from self.calls")
+                    .call_id = format!("call_{key}");
+            }
+            events.extend(self.add_call_events(key));
+        }
+
+        let incomplete = self.finish_reason.as_deref() == Some("length");
+        if self.failure.is_none() && !incomplete {
             for call in self.calls.values() {
+                if call.display_name.is_empty() {
+                    self.failure = Some((
+                        "upstream_tool_call_dropped".to_string(),
+                        "upstream returned a tool call without a function name".to_string(),
+                    ));
+                    break;
+                }
                 if !call.custom && normalize_arguments(&call.arguments).1 {
                     self.failure = Some((
                         "malformed_tool_call_arguments".to_string(),
@@ -207,6 +237,17 @@ impl ResponsesStream {
             for (_, call) in std::mem::take(&mut self.calls) {
                 if call.custom {
                     let input = custom_tool_input(&call.arguments);
+                    if !input.is_empty() {
+                        events.push(sse_event(
+                            "response.custom_tool_call_input.delta",
+                            json!({
+                                "type": "response.custom_tool_call_input.delta",
+                                "item_id": call.item_id,
+                                "output_index": call.output_index,
+                                "delta": input
+                            }),
+                        ));
+                    }
                     events.push(sse_event(
                         "response.custom_tool_call_input.done",
                         json!({
@@ -222,7 +263,7 @@ impl ResponsesStream {
                             "type": "custom_tool_call",
                             "status": "completed",
                             "call_id": call.call_id,
-                                "name": call.display_name,
+                            "name": call.display_name,
                             "input": input
                         });
                         self.output.push(item.clone());
@@ -233,13 +274,19 @@ impl ResponsesStream {
                         })
                     }));
                 } else {
+                    let (arguments, repaired) = normalize_arguments(&call.arguments);
+                    let arguments = if incomplete && repaired {
+                        call.arguments.clone()
+                    } else {
+                        arguments
+                    };
                     events.push(sse_event(
                         "response.function_call_arguments.done",
                         json!({
                             "type": "response.function_call_arguments.done",
                             "item_id": call.item_id,
                             "output_index": call.output_index,
-                            "arguments": call.arguments
+                            "arguments": arguments
                         }),
                     ));
                     let mut item = json!({
@@ -248,7 +295,7 @@ impl ResponsesStream {
                         "status": "completed",
                         "call_id": call.call_id,
                         "name": call.display_name,
-                        "arguments": call.arguments
+                        "arguments": arguments
                     });
                     if let Some(namespace) = call.namespace {
                         item["namespace"] = json!(namespace);
@@ -448,89 +495,172 @@ impl ResponsesStream {
         events
     }
 
-    fn tool_delta(&mut self, call: &Value) -> Vec<Bytes> {
-        let tool_index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+    fn resolve_tool_key(&self, call: &Value) -> usize {
+        if let Some(index) = call.get("index").and_then(Value::as_u64) {
+            return usize::try_from(index).unwrap_or(usize::MAX - 1);
+        }
+
+        let last_key = self.calls.keys().next_back().copied();
+        let Some(id) = call
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            return last_key.unwrap_or(0);
+        };
+
+        if let Some((key, _)) = self.calls.iter().find(|(_, state)| state.call_id == id) {
+            return *key;
+        }
+        match last_key {
+            Some(key) => key.checked_add(1).unwrap_or(key),
+            None => 0,
+        }
+    }
+
+    fn flush_ready_calls(&mut self) -> Vec<Bytes> {
         let mut events = Vec::new();
-        if !self.calls.contains_key(&tool_index) {
-            let output_index = self.next_index;
-            self.next_index += 1;
-            let item_id = gen_id("fc");
-            let call_id = call
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let name = call
-                .pointer("/function/name")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let (display_name, namespace) = self.shape.resolve(&name);
-            let custom = self.shape.is_custom(&display_name);
-            let item = if custom {
-                json!({
-                    "id": item_id,
-                    "type": "custom_tool_call",
-                    "status": "in_progress",
-                    "call_id": call_id,
-                    "name": display_name,
-                    "input": ""
-                })
-            } else {
-                let mut item = json!({
-                    "id": item_id,
-                    "type": "function_call",
-                    "status": "in_progress",
-                    "call_id": call_id,
-                    "name": display_name,
-                    "arguments": ""
-                });
-                if let Some(namespace) = namespace.clone() {
-                    item["namespace"] = json!(namespace);
-                }
-                item
+        loop {
+            let key = self.next_call_key_to_add;
+            let Some(state) = self.calls.get(&key) else {
+                break;
             };
-            self.calls.insert(
-                tool_index,
-                CallTrack {
-                    item_id: item_id.clone(),
-                    call_id,
-                    display_name,
-                    namespace,
-                    custom,
-                    arguments: String::new(),
-                    output_index,
-                },
-            );
+            if state.added {
+                self.next_call_key_to_add = self.next_call_key_to_add.saturating_add(1);
+                continue;
+            }
+            if state.call_id.is_empty() || state.display_name.is_empty() {
+                break;
+            }
+            events.extend(self.add_call_events(key));
+            self.next_call_key_to_add = self.next_call_key_to_add.saturating_add(1);
+        }
+        events
+    }
+
+    fn add_call_events(&mut self, key: usize) -> Vec<Bytes> {
+        let Some(state) = self.calls.get(&key) else {
+            return Vec::new();
+        };
+        if state.added || state.call_id.is_empty() || state.display_name.is_empty() {
+            return Vec::new();
+        }
+
+        let raw_name = state.display_name.clone();
+        let call_id = state.call_id.clone();
+        let arguments = state.arguments.clone();
+        let (display_name, namespace) = self.shape.resolve(&raw_name);
+        let custom = self.shape.is_custom(&display_name);
+        let output_index = self.next_index;
+        self.next_index = self.next_index.saturating_add(1);
+        let item_id = gen_id(if custom { "ctc" } else { "fc" });
+
+        let Some(state) = self.calls.get_mut(&key) else {
+            return Vec::new();
+        };
+        state.added = true;
+        state.display_name = display_name.clone();
+        state.namespace = namespace.clone();
+        state.custom = custom;
+        state.output_index = output_index;
+        state.item_id = item_id.clone();
+
+        let item = if custom {
+            json!({
+                "id": item_id,
+                "type": "custom_tool_call",
+                "status": "in_progress",
+                "call_id": call_id,
+                "name": display_name,
+                "input": ""
+            })
+        } else {
+            let mut item = json!({
+                "id": item_id,
+                "type": "function_call",
+                "status": "in_progress",
+                "call_id": call_id,
+                "name": display_name,
+                "arguments": ""
+            });
+            if let Some(namespace) = namespace {
+                item["namespace"] = json!(namespace);
+            }
+            item
+        };
+
+        let mut events = vec![sse_event(
+            "response.output_item.added",
+            json!({
+                "type": "response.output_item.added",
+                "output_index": output_index,
+                "item": item
+            }),
+        )];
+        if !custom && !arguments.is_empty() {
             events.push(sse_event(
-                "response.output_item.added",
+                "response.function_call_arguments.delta",
                 json!({
-                    "type": "response.output_item.added",
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": item_id,
                     "output_index": output_index,
-                    "item": item
+                    "delta": arguments
                 }),
             ));
         }
-        if let Some(arguments) = call.pointer("/function/arguments").and_then(Value::as_str) {
-            if !arguments.is_empty() {
-                if let Some(track) = self.calls.get_mut(&tool_index) {
-                    track.arguments.push_str(arguments);
-                    let event = if track.custom {
-                        "response.custom_tool_call_input.delta"
-                    } else {
-                        "response.function_call_arguments.delta"
-                    };
-                    events.push(sse_event(
-                        event,
-                        json!({
-                            "type": event,
-                            "item_id": track.item_id,
-                            "output_index": track.output_index,
-                            "delta": arguments
-                        }),
-                    ));
-                }
+        events
+    }
+
+    fn tool_delta(&mut self, call: &Value) -> Vec<Bytes> {
+        let tool_index = self.resolve_tool_key(call);
+        let mut events = Vec::new();
+        let was_added = self.calls.get(&tool_index).is_some_and(|track| track.added);
+        let state = self.calls.entry(tool_index).or_insert_with(|| CallTrack {
+            item_id: String::new(),
+            call_id: String::new(),
+            display_name: String::new(),
+            namespace: None,
+            custom: false,
+            arguments: String::new(),
+            output_index: 0,
+            added: false,
+        });
+        if !state.added {
+            if let Some(call_id) = call
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|call_id| !call_id.is_empty())
+            {
+                state.call_id = call_id.to_string();
             }
+            if let Some(name) = call
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+            {
+                state.display_name = name.to_string();
+            }
+        }
+        let arguments = call
+            .pointer("/function/arguments")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        state.arguments.push_str(arguments);
+        let item_id = state.item_id.clone();
+        let output_index = state.output_index;
+        let custom = state.custom;
+
+        events.extend(self.flush_ready_calls());
+        if was_added && !arguments.is_empty() && !custom {
+            events.push(sse_event(
+                "response.function_call_arguments.delta",
+                json!({
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "delta": arguments
+                }),
+            ));
         }
         events
     }

@@ -17,6 +17,20 @@ fn terminal_response(events: &[Bytes], event_name: &str) -> Value {
     panic!("missing terminal event {event_name}");
 }
 
+fn named_events(events: &[Bytes], event_name: &str) -> Vec<Value> {
+    events
+        .iter()
+        .filter_map(|event| {
+            let event = std::str::from_utf8(event).ok()?;
+            if !event.starts_with(&format!("event: {event_name}\n")) {
+                return None;
+            }
+            let data = event.lines().find_map(|line| line.strip_prefix("data: "))?;
+            serde_json::from_str(data).ok()
+        })
+        .collect()
+}
+
 #[test]
 fn translates_instructions_messages_images_and_tools() {
     let request = json!({
@@ -56,7 +70,7 @@ fn translates_instructions_messages_images_and_tools() {
         chat["messages"][1]["content"][1]["image_url"]["detail"],
         "high"
     );
-    assert_eq!(chat["tools"][0]["function"]["name"], "codexui_get_usage");
+    assert_eq!(chat["tools"][0]["function"]["name"], "codexui__get_usage");
     assert_eq!(chat["tools"][1]["function"]["name"], "apply_patch");
     assert_eq!(chat["max_tokens"], 123);
     assert!(chat.get("max_completion_tokens").is_none());
@@ -86,7 +100,7 @@ fn restores_namespace_and_custom_tools_in_response() {
                     "id": "call_1",
                     "type": "function",
                     "function": {
-                        "name": "codexui_get_usage",
+                        "name": "codexui__get_usage",
                         "arguments": "{}"
                     }
                 }, {
@@ -235,6 +249,410 @@ fn completed_stream_includes_accumulated_output() {
 }
 
 #[test]
+fn streams_custom_tool_input_as_raw_text_after_complete_arguments() {
+    let patch = "*** Begin Patch\n*** Add File: note.txt\n+hello\n*** End Patch";
+    let request = json!({
+        "tools": [{
+            "type": "custom",
+            "name": "apply_patch"
+        }]
+    });
+    let mut stream = ResponsesStream::with_shape(
+        "resp_patch".to_string(),
+        "model".to_string(),
+        ToolShape::from_request(&request),
+    );
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_patch",
+                    "function": {
+                        "name": "apply_patch",
+                        "arguments": "{\"input\":\"*** Begin Patch\\n*** Add File: note.txt\\n"
+                    }
+                }]
+            },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "function": {
+                        "arguments": "+hello\\n*** End Patch\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })));
+    events.extend(stream.finish());
+
+    let deltas = named_events(&events, "response.custom_tool_call_input.delta");
+    let done = named_events(&events, "response.custom_tool_call_input.done");
+    let items = named_events(&events, "response.output_item.done");
+
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0]["delta"], patch);
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0]["input"], patch);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["item"]["type"], "custom_tool_call");
+    assert_eq!(items[0]["item"]["input"], patch);
+    assert!(
+        items[0]["item"]["id"].as_str().unwrap().starts_with("ctc_"),
+        "{}",
+        items[0]
+    );
+}
+
+#[test]
+fn maps_empty_custom_tool_arguments_to_empty_input() {
+    let request = json!({
+        "tools": [{
+            "type": "custom",
+            "name": "apply_patch"
+        }]
+    });
+    let mut stream = ResponsesStream::with_shape(
+        "resp_empty_patch".to_string(),
+        "model".to_string(),
+        ToolShape::from_request(&request),
+    );
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_empty",
+                    "function": {
+                        "name": "apply_patch",
+                        "arguments": "{}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    }));
+    events.extend(stream.finish());
+
+    assert!(named_events(&events, "response.custom_tool_call_input.delta").is_empty());
+    let done = named_events(&events, "response.custom_tool_call_input.done");
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0]["input"], "");
+    let items = named_events(&events, "response.output_item.done");
+    assert_eq!(items[0]["item"]["input"], "");
+}
+
+#[test]
+fn waits_for_late_tool_name_before_emitting_custom_item() {
+    let patch = "*** Begin Patch\n*** End Patch";
+    let request = json!({
+        "tools": [{
+            "type": "custom",
+            "name": "apply_patch"
+        }]
+    });
+    let mut stream = ResponsesStream::with_shape(
+        "resp_late_name".to_string(),
+        "model".to_string(),
+        ToolShape::from_request(&request),
+    );
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_late",
+                    "function": {
+                        "arguments": "{\"input\":\"*** Begin Patch\\n"
+                    }
+                }]
+            },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "function": {
+                        "name": "apply_patch",
+                        "arguments": "*** End Patch\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })));
+    events.extend(stream.finish());
+
+    let added = named_events(&events, "response.output_item.added");
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0]["item"]["type"], "custom_tool_call");
+    assert_eq!(added[0]["item"]["name"], "apply_patch");
+    assert!(named_events(&events, "response.function_call_arguments.delta").is_empty());
+    let done = named_events(&events, "response.custom_tool_call_input.done");
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0]["input"], patch);
+}
+
+#[test]
+fn keeps_parallel_calls_separate_when_chat_index_is_missing() {
+    let mut stream = ResponsesStream::new("resp_missing_index".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "id": "call_a",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": "{\"path\":\"a.txt\"}"
+                    }
+                }]
+            },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "id": "call_b",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": "{\"path\":\"b.txt\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })));
+    events.extend(stream.finish());
+
+    let completed = terminal_response(&events, "response.completed");
+    let output = completed["response"]["output"].as_array().unwrap();
+    assert_eq!(output.len(), 2);
+    assert_eq!(output[0]["call_id"], "call_a");
+    assert_eq!(output[0]["name"], "read_file");
+    assert_eq!(output[1]["call_id"], "call_b");
+    assert_eq!(output[1]["name"], "write_file");
+}
+
+#[test]
+fn keeps_repeated_call_id_without_index_in_one_call() {
+    let mut stream = ResponsesStream::new("resp_repeated_id".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "id": "call_a",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": "{\"path\":"
+                    }
+                }]
+            },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "id": "call_a",
+                    "function": {
+                        "arguments": "\"a.txt\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })));
+    events.extend(stream.finish());
+
+    let completed = terminal_response(&events, "response.completed");
+    let output = completed["response"]["output"].as_array().unwrap();
+    assert_eq!(output.len(), 1);
+    assert_eq!(output[0]["call_id"], "call_a");
+    assert_eq!(output[0]["arguments"], "{\"path\":\"a.txt\"}");
+}
+
+#[test]
+fn repeated_tool_headers_do_not_erase_restored_namespace() {
+    let request = json!({
+        "tools": [{
+            "type": "namespace",
+            "name": "ns",
+            "tools": [{
+                "type": "function",
+                "name": "exec",
+                "parameters": { "type": "object", "properties": {} }
+            }]
+        }]
+    });
+    let mut stream = ResponsesStream::with_shape(
+        "resp_repeated_header".to_string(),
+        "model".to_string(),
+        ToolShape::from_request(&request),
+    );
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_exec",
+                    "function": {
+                        "name": "ns__exec",
+                        "arguments": "{"
+                    }
+                }]
+            },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_exec",
+                    "function": {
+                        "name": "ns__exec",
+                        "arguments": "\"cmd\":\"ls\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })));
+    events.extend(stream.finish());
+
+    let completed = terminal_response(&events, "response.completed");
+    let item = &completed["response"]["output"][0];
+    assert_eq!(item["name"], "exec");
+    assert_eq!(item["namespace"], "ns");
+    assert_eq!(item["arguments"], "{\"cmd\":\"ls\"}");
+}
+
+#[test]
+fn emits_sparse_tool_index_in_stable_output_order() {
+    let mut stream = ResponsesStream::new("resp_sparse".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 2,
+                    "id": "call_sparse",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": "{}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    }));
+    events.extend(stream.finish());
+
+    let added = named_events(&events, "response.output_item.added");
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0]["output_index"], 0);
+    let completed = terminal_response(&events, "response.completed");
+    assert_eq!(completed["response"]["output"][0]["call_id"], "call_sparse");
+}
+
+#[test]
+fn synthesizes_call_id_when_chat_tool_call_omits_it() {
+    let mut stream = ResponsesStream::new("resp_missing_id".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "function": {
+                        "name": "read_file",
+                        "arguments": "{}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    }));
+    events.extend(stream.finish());
+
+    let completed = terminal_response(&events, "response.completed");
+    assert_eq!(completed["response"]["output"][0]["call_id"], "call_0");
+}
+
+#[test]
+fn truncated_tool_arguments_are_incomplete_not_failed() {
+    let mut stream = ResponsesStream::new("resp_truncated".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_cut",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": "{\"path\":"
+                    }
+                }]
+            },
+            "finish_reason": "length"
+        }]
+    }));
+    events.extend(stream.finish());
+
+    let incomplete = terminal_response(&events, "response.incomplete");
+    assert_eq!(incomplete["response"]["status"], "incomplete");
+    assert_eq!(
+        incomplete["response"]["output"][0]["arguments"],
+        "{\"path\":"
+    );
+    assert!(named_events(&events, "response.failed").is_empty());
+}
+
+#[test]
+fn malformed_historical_tool_call_does_not_block_the_next_turn() {
+    let request = json!({
+        "model": "model",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "call_bad",
+                "name": "read_file",
+                "arguments": "{broken"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_bad",
+                "output": "parse failed"
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": "continue"
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert_eq!(roles(messages), ["assistant", "tool", "user"]);
+    assert_eq!(messages[0]["tool_calls"][0]["function"]["arguments"], "{}");
+    assert_eq!(messages[1]["tool_call_id"], "call_bad");
+    assert_eq!(messages[2]["content"], "continue");
+}
+
+#[test]
 fn repairs_missing_tool_outputs_in_history() {
     let request = json!({
         "model": "deepseek-v4.1-flash",
@@ -261,22 +679,154 @@ fn repairs_missing_tool_outputs_in_history() {
 }
 
 #[test]
-fn removes_orphan_tool_outputs_before_translation() {
+fn preserves_orphan_tool_output_as_marked_user_message() {
     let request = json!({
         "model": "model",
         "input": [
-            { "type": "function_call_output", "call_id": "orphan", "output": "lost" },
+            {
+                "type": "function_call_output",
+                "id": "fco_1",
+                "call_id": null,
+                "output": "receipt"
+            },
             { "type": "message", "role": "user", "content": "continue" }
         ]
     });
 
     let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
 
-    assert!(chat["messages"]
-        .as_array()
+    assert_eq!(roles(messages), ["user", "user"]);
+    assert!(messages[0]["content"]
+        .as_str()
         .unwrap()
+        .contains("[tool_result without a matching tool_call]"));
+    assert!(messages[0]["content"].as_str().unwrap().contains("receipt"));
+}
+
+#[test]
+fn preserves_orphan_tool_output_media_as_user_image() {
+    let request = json!({
+        "model": "model",
+        "input": [{
+            "type": "function_call_output",
+            "id": "fco_image",
+            "call_id": null,
+            "output": {
+                "content": [{
+                    "type": "input_image",
+                    "image_url": large_image_data_url()
+                }]
+            }
+        }]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["role"], "user");
+    let parts = messages[0]["content"].as_array().unwrap();
+    assert!(parts.iter().any(|part| part["type"] == "image_url"));
+    let text = parts
         .iter()
-        .all(|message| message["role"] != "tool"));
+        .filter_map(|part| part["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!text.contains("base64"), "{text}");
+}
+
+#[test]
+fn falls_back_to_item_id_for_custom_tool_call_history() {
+    let request = json!({
+        "model": "model",
+        "input": [
+            {
+                "type": "custom_tool_call",
+                "id": "ctc_1",
+                "name": "apply_patch",
+                "input": "*** Begin Patch\n*** End Patch"
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "ctc_1",
+                "output": "ok"
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert_eq!(roles(messages), ["assistant", "tool"]);
+    assert_eq!(messages[0]["tool_calls"][0]["id"], "ctc_1");
+    assert_eq!(messages[1]["tool_call_id"], "ctc_1");
+}
+
+#[test]
+fn coalesces_assistant_text_and_tool_calls_from_the_same_turn() {
+    let request = json!({
+        "model": "model",
+        "input": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "Applying the patch." }]
+            },
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_patch",
+                "name": "apply_patch",
+                "input": "*** Begin Patch\n*** End Patch"
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_patch",
+                "output": "ok"
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert_eq!(roles(messages), ["assistant", "tool"]);
+    assert_eq!(messages[0]["content"], "Applying the patch.");
+    assert_eq!(messages[0]["tool_calls"][0]["id"], "call_patch");
+    assert_eq!(messages[1]["tool_call_id"], "call_patch");
+}
+
+#[test]
+fn coalesces_assistant_text_that_follows_tool_calls_before_their_outputs() {
+    let request = json!({
+        "model": "model",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "call_read",
+                "name": "read_file",
+                "arguments": "{\"path\":\"README.md\"}"
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "Reading the file." }]
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_read",
+                "output": "contents"
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert_eq!(roles(messages), ["assistant", "tool"]);
+    assert_eq!(messages[0]["content"], "Reading the file.");
+    assert_eq!(messages[0]["tool_calls"][0]["id"], "call_read");
+    assert_eq!(messages[1]["tool_call_id"], "call_read");
 }
 
 #[test]
@@ -603,7 +1153,7 @@ fn leaves_tool_output_without_media_unchanged() {
 
 #[test]
 fn keeps_first_declaration_when_flat_tool_names_collide() {
-    // `ns` + `exec` and the bare function `ns_exec` flatten to the same Chat
+    // `ns` + `exec` and the bare function `ns__exec` flatten to the same Chat
     // name. The first declaration is what the upstream is told about, so the
     // losing one must not reach the tool list.
     let request = json!({
@@ -627,7 +1177,7 @@ fn keeps_first_declaration_when_flat_tool_names_collide() {
             }]
         }, {
             "type": "function",
-            "name": "ns_exec",
+            "name": "ns__exec",
             "description": "from top level",
             "parameters": { "type": "object", "properties": {} }
         }]
@@ -637,7 +1187,7 @@ fn keeps_first_declaration_when_flat_tool_names_collide() {
     let tools = chat["tools"].as_array().unwrap();
 
     assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0]["function"]["name"], "ns_exec");
+    assert_eq!(tools[0]["function"]["name"], "ns__exec");
     assert_eq!(tools[0]["function"]["description"], "from namespace");
     assert!(tools[0]["function"]["parameters"]["properties"]["cmd"].is_object());
 }
@@ -651,19 +1201,19 @@ fn reverse_maps_only_surviving_flat_tool_names() {
             "tools": [{ "type": "function", "name": "exec" }]
         }, {
             "type": "function",
-            "name": "ns_exec"
+            "name": "ns__exec"
         }]
     });
     let shape = ToolShape::from_request(&namespace_first);
     assert_eq!(
-        shape.resolve("ns_exec"),
+        shape.resolve("ns__exec"),
         ("exec".to_string(), Some("ns".to_string()))
     );
 
     let function_first = json!({
         "tools": [{
             "type": "function",
-            "name": "ns_exec"
+            "name": "ns__exec"
         }, {
             "type": "namespace",
             "name": "ns",
@@ -671,7 +1221,7 @@ fn reverse_maps_only_surviving_flat_tool_names() {
         }]
     });
     let shape = ToolShape::from_request(&function_first);
-    assert_eq!(shape.resolve("ns_exec"), ("ns_exec".to_string(), None));
+    assert_eq!(shape.resolve("ns__exec"), ("ns__exec".to_string(), None));
 }
 
 #[test]
@@ -679,7 +1229,7 @@ fn reports_duplicate_flat_tool_names() {
     let request = json!({
         "tools": [{
             "type": "function",
-            "name": "ns_exec"
+            "name": "ns__exec"
         }],
         "input": [{
             "type": "additional_tools",
@@ -695,7 +1245,7 @@ fn reports_duplicate_flat_tool_names() {
     let details = ignored_feature_details(&request);
 
     assert!(
-        details.contains(&"tools.duplicate:ns_exec kept=top dropped=additional_tools".to_string()),
+        details.contains(&"tools.duplicate:ns__exec kept=top dropped=additional_tools".to_string()),
         "{details:?}"
     );
 }
@@ -979,8 +1529,62 @@ fn defers_tool_search_output_to_a_note_after_the_tool_block() {
 
     assert_eq!(roles(messages), ["assistant", "tool", "user"]);
     let note = messages[2]["content"][0]["text"].as_str().unwrap();
-    assert!(note.contains("ns_exec"), "{note}");
-    assert_eq!(chat["tools"][0]["function"]["name"], "ns_exec");
+    assert!(note.contains("ns__exec"), "{note}");
+    assert_eq!(chat["tools"][0]["function"]["name"], "ns__exec");
+}
+
+#[test]
+fn shortens_overlong_namespace_tool_names_and_restores_them() {
+    let namespace = "namespace".repeat(6);
+    let tool_name = "very_long_tool_name".repeat(4);
+    let request = json!({
+        "model": "model",
+        "input": "run",
+        "tools": [{
+            "type": "namespace",
+            "name": namespace,
+            "tools": [{
+                "type": "function",
+                "name": tool_name,
+                "parameters": { "type": "object", "properties": {} }
+            }]
+        }]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let chat_name = chat["tools"][0]["function"]["name"].as_str().unwrap();
+
+    assert!(chat_name.len() <= 64, "{chat_name}");
+    let shape = ToolShape::from_request(&request);
+    assert_eq!(
+        shape.resolve(chat_name),
+        (tool_name.clone(), Some(namespace.clone()))
+    );
+
+    let response = chat_to_responses(
+        &json!({
+            "id": "chatcmpl-long",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_long",
+                        "function": {
+                            "name": chat_name,
+                            "arguments": "{}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }),
+        "model",
+        &shape,
+    )
+    .unwrap();
+
+    assert_eq!(response["output"][0]["name"], tool_name);
+    assert_eq!(response["output"][0]["namespace"], namespace);
 }
 
 #[test]
@@ -1073,4 +1677,108 @@ fn keeps_tools_on_non_compaction_turns_with_compaction_history() {
 
     assert_eq!(chat["tools"][0]["function"]["name"], "read");
     assert_eq!(chat["response_format"]["type"], "json_object");
+}
+
+#[test]
+fn preserves_custom_tool_definition_in_chat_description() {
+    let request = json!({
+        "model": "model",
+        "input": "edit the file",
+        "tools": [{
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply a patch to files.",
+            "format": {
+                "type": "grammar",
+                "syntax": "lark",
+                "definition": "start: begin_patch hunk+ end_patch"
+            }
+        }]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let description = chat["tools"][0]["function"]["description"]
+        .as_str()
+        .unwrap();
+
+    assert!(description.contains("Apply a patch to files."));
+    assert!(description.contains("Original tool definition:"));
+    assert!(description.contains("\"format\":"));
+    assert!(description.contains("\"syntax\":\"lark\""));
+    assert!(description.contains("start: begin_patch hunk+ end_patch"));
+    assert!(description.contains("Do not wrap"));
+}
+
+#[test]
+fn translates_custom_tool_choice_to_chat_function() {
+    let request = json!({
+        "model": "model",
+        "input": "edit the file",
+        "tools": [{
+            "type": "custom",
+            "name": "apply_patch"
+        }],
+        "tool_choice": {
+            "type": "custom",
+            "name": "apply_patch"
+        }
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+
+    assert_eq!(
+        chat["tool_choice"],
+        json!({
+            "type": "function",
+            "function": { "name": "apply_patch" }
+        })
+    );
+}
+
+#[test]
+fn translates_namespaced_tool_choice_to_flattened_chat_name() {
+    let request = json!({
+        "model": "model",
+        "input": "run",
+        "tools": [{
+            "type": "namespace",
+            "name": "codexui",
+            "tools": [{
+                "type": "function",
+                "name": "get_usage",
+                "parameters": { "type": "object", "properties": {} }
+            }]
+        }],
+        "tool_choice": {
+            "type": "function",
+            "name": "get_usage",
+            "namespace": "codexui"
+        }
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+
+    assert_eq!(
+        chat["tool_choice"],
+        json!({
+            "type": "function",
+            "function": { "name": "codexui__get_usage" }
+        })
+    );
+}
+
+#[test]
+fn drops_tool_controls_when_no_tool_is_sendable() {
+    let request = json!({
+        "model": "model",
+        "input": "hello",
+        "tools": [],
+        "tool_choice": "required",
+        "parallel_tool_calls": true
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+
+    assert!(chat.get("tool_choice").is_none());
+    assert!(chat.get("parallel_tool_calls").is_none());
 }

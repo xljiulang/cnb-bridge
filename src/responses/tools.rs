@@ -1,8 +1,11 @@
 use super::*;
 
+const CHAT_TOOL_NAME_MAX_BYTES: usize = 64;
+
 #[derive(Default, Clone)]
 pub struct ToolShape {
     namespaces: HashMap<String, (String, String)>,
+    declared: HashSet<String>,
     pub(super) custom: HashSet<String>,
 }
 
@@ -175,9 +178,14 @@ impl ToolShape {
                 Some("custom") => {
                     if let Some(name) = tool.get("name").and_then(Value::as_str) {
                         shape.custom.insert(name.to_string());
+                        shape.declared.insert(name.to_string());
                     }
                 }
-                _ => {}
+                _ => {
+                    if let Some(name) = tool.get("name").and_then(Value::as_str) {
+                        shape.declared.insert(name.to_string());
+                    }
+                }
             }
         }
         shape
@@ -192,6 +200,25 @@ impl ToolShape {
 
     pub(super) fn is_custom(&self, name: &str) -> bool {
         self.custom.contains(name)
+    }
+
+    pub(super) fn chat_name_for_choice(
+        &self,
+        name: &str,
+        namespace: Option<&str>,
+    ) -> Option<String> {
+        let namespace = namespace.filter(|namespace| !namespace.is_empty());
+        if let Some(namespace) = namespace {
+            return self
+                .namespaces
+                .iter()
+                .find(|(_, (candidate_namespace, candidate_name))| {
+                    candidate_namespace == namespace && candidate_name == name
+                })
+                .map(|(chat_name, _)| chat_name.clone());
+        }
+        (self.declared.contains(name) || self.namespaces.contains_key(name))
+            .then(|| name.to_string())
     }
 }
 
@@ -222,12 +249,7 @@ pub(super) fn translate_tools(tools: &[Value]) -> Vec<Value> {
                     continue;
                 };
                 if seen.insert(name.to_string()) {
-                    let description = custom_tool_description(
-                        tool.get("description")
-                            .and_then(Value::as_str)
-                            .unwrap_or(""),
-                        name,
-                    );
+                    let description = custom_tool_description(tool, name);
                     translated.push(json!({
                         "type": "function",
                         "function": {
@@ -354,22 +376,41 @@ fn sanitize_schema_child(value: &mut Value) {
     }
 }
 
-pub(super) fn custom_tool_description(raw: &str, name: &str) -> String {
-    let hint =
-        "This is a function call. Put the complete free-form tool input in the JSON \"input\" field.";
-    if raw.trim().is_empty() {
-        format!("Run the {name} tool.\n\n{hint}")
+pub(super) fn custom_tool_description(tool: &Value, name: &str) -> String {
+    let mut sections = Vec::new();
+    if let Some(description) = tool
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|description| !description.is_empty())
+    {
+        sections.push(description.to_string());
     } else {
-        format!("{}\n\n{hint}", raw.trim())
+        sections.push(format!("Run the {name} tool."));
     }
+    sections.push(
+        "This Chat function wraps a free-form Responses tool. Pass the complete tool input as \
+         the JSON string in the \"input\" field. Preserve the input text exactly. Do not wrap the \
+         free-form payload in another object or add JSON escaping inside the string."
+            .to_string(),
+    );
+    sections.push(format!("Original tool definition:\n```json\n{}\n```", tool));
+    sections.join("\n\n")
 }
 
-pub(super) fn translate_tool_choice(choice: Option<&Value>) -> Option<Value> {
+pub(super) fn translate_tool_choice(choice: Option<&Value>, shape: &ToolShape) -> Option<Value> {
     let choice = choice.filter(|value| !value.is_null())?;
     match choice {
         Value::String(value) => Some(json!(value)),
-        Value::Object(object) if object.get("type").and_then(Value::as_str) == Some("function") => {
+        Value::Object(object)
+            if matches!(
+                object.get("type").and_then(Value::as_str),
+                Some("function" | "custom")
+            ) =>
+        {
             let name = object.get("name").and_then(Value::as_str)?;
+            let namespace = object.get("namespace").and_then(Value::as_str);
+            let name = shape.chat_name_for_choice(name, namespace)?;
             Some(json!({ "type": "function", "function": { "name": name } }))
         }
         _ => None,
@@ -407,7 +448,24 @@ pub(super) fn declared_tool_names(tools: &[Value]) -> Vec<String> {
 }
 
 pub(super) fn flat_namespace_name(namespace: &str, name: &str) -> String {
-    format!("{namespace}_{name}")
+    let full_name = format!("{namespace}__{name}");
+    if full_name.len() <= CHAT_TOOL_NAME_MAX_BYTES {
+        return full_name;
+    }
+
+    let suffix = format!(
+        "__{:016x}",
+        xxhash_rust::xxh3::xxh3_64(full_name.as_bytes())
+    );
+    let prefix_limit = CHAT_TOOL_NAME_MAX_BYTES.saturating_sub(suffix.len());
+    let mut prefix = String::with_capacity(prefix_limit);
+    for ch in full_name.chars() {
+        if prefix.len() + ch.len_utf8() > prefix_limit {
+            break;
+        }
+        prefix.push(ch);
+    }
+    format!("{prefix}{suffix}")
 }
 
 pub(super) fn normalize_arguments(raw: &str) -> (String, bool) {

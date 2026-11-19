@@ -122,13 +122,23 @@ pub(super) fn translate_tool_call(call: &Value, shape: &ToolShape) -> Result<Val
 }
 
 pub(super) fn custom_tool_input(arguments: &str) -> String {
-    serde_json::from_str::<Value>(arguments.trim())
+    let arguments = arguments.trim();
+    if arguments.is_empty() {
+        return String::new();
+    }
+    serde_json::from_str::<Value>(arguments)
         .ok()
         .and_then(|value| {
             value
                 .get("input")
                 .and_then(Value::as_str)
                 .map(str::to_string)
+                .or_else(|| {
+                    value
+                        .as_object()
+                        .filter(|object| object.is_empty())
+                        .map(|_| String::new())
+                })
         })
         .unwrap_or_else(|| arguments.to_string())
 }

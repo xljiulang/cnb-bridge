@@ -912,6 +912,122 @@ async fn responses_stream_is_translated_and_logged_without_buffering() {
 }
 
 #[tokio::test]
+async fn responses_apply_patch_round_trip_preserves_definition_and_raw_input() {
+    let captured = Arc::new(Mutex::new(None::<Value>));
+    let captured_for_upstream = Arc::clone(&captured);
+    let upstream = Router::new().route(
+        "/chat/completions",
+        post(move |body: Bytes| {
+            let captured = Arc::clone(&captured_for_upstream);
+            async move {
+                *captured.lock().unwrap() = Some(serde_json::from_slice(&body).unwrap());
+                (
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    r#"data: {"id":"chatcmpl_patch","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_patch","function":{"name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n"}}]}}]}
+
+data: {"id":"chatcmpl_patch","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"*** End Patch\"}"}}]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+"#,
+                )
+                    .into_response()
+            }
+        }),
+    );
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let upstream_task = tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+    let (_temp, _bridge, gateway) = test_gateway_with_upstream(upstream_port).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{}/v1/responses", gateway.port()))
+        .json(&json!({
+            "model": "model",
+            "input": "edit the file",
+            "stream": true,
+            "tools": [{
+                "type": "custom",
+                "name": "apply_patch",
+                "description": "Apply a patch to files.",
+                "format": {
+                    "type": "grammar",
+                    "syntax": "lark",
+                    "definition": "start: begin_patch hunk+ end_patch"
+                }
+            }],
+            "tool_choice": {
+                "type": "custom",
+                "name": "apply_patch"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let text = response.text().await.unwrap();
+    assert_eq!(text.matches("\"delta\":\"*** Begin Patch").count(), 1);
+    assert!(text.contains("*** Begin Patch\\n*** End Patch"));
+    assert!(text.contains("event: response.custom_tool_call_input.done"));
+    assert!(text.contains("\"type\":\"custom_tool_call\""));
+
+    let forwarded = captured.lock().unwrap().clone().unwrap();
+    assert_eq!(forwarded["tool_choice"]["function"]["name"], "apply_patch");
+    let description = forwarded["tools"][0]["function"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(description.contains("start: begin_patch hunk+ end_patch"));
+
+    gateway.stop().await;
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn non_stream_responses_apply_patch_unwraps_custom_input() {
+    let (_temp, gateway, upstream_task) = gateway_with_static_responses_stream(
+        r#"data: {"id":"chatcmpl_patch","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_patch","function":{"name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n*** End Patch\"}"}}]}}]}
+
+data: {"id":"chatcmpl_patch","choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}
+
+data: [DONE]
+
+"#,
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{}/v1/responses", gateway.port()))
+        .json(&json!({
+            "model": "model",
+            "input": "edit the file",
+            "stream": false,
+            "tools": [{
+                "type": "custom",
+                "name": "apply_patch"
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let payload: Value = response.json().await.unwrap();
+
+    assert_eq!(payload["output"][0]["type"], "custom_tool_call");
+    assert_eq!(
+        payload["output"][0]["input"],
+        "*** Begin Patch\n*** End Patch"
+    );
+    assert_eq!(payload["usage"]["input_tokens"], 2);
+    assert_eq!(payload["usage"]["output_tokens"], 3);
+
+    gateway.stop().await;
+    upstream_task.abort();
+}
+
+#[tokio::test]
 async fn responses_stream_reports_invalid_upstream_frames_as_failed() {
     let (_temp, gateway, upstream_task) =
         gateway_with_static_responses_stream("data: not-json\n\n").await;
