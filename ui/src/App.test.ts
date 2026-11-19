@@ -95,13 +95,13 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function mockSnapshotIpc() {
+function mockSnapshotIpc(current = snapshot) {
   mockWindows("main");
   mockIPC(
     (command) => {
       switch (command) {
         case "get_snapshot":
-          return snapshot;
+          return current;
         case "get_logs":
           return [{ time: "2026-11-17 01:00:00", level: "info", message: "ready" }];
         case "list_http_traces":
@@ -679,6 +679,45 @@ describe("App shell", () => {
       "endpoint-card",
       "model-card",
     ]);
+    wrapper.unmount();
+  });
+
+  it("shows the local endpoint as listening while the cloud bridge is idle", async () => {
+    const idleSnapshot = {
+      ...snapshot,
+      bridge: {
+        ...snapshot.bridge,
+        state: "idle",
+        baseUrl: "http://127.0.0.1:11233/v1",
+      },
+    };
+    mockSnapshotIpc(idleSnapshot);
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const endpointCard = wrapper.get(".endpoint-card");
+    expect(endpointCard.classes()).toContain("is-live");
+    expect(endpointCard.get(".badge").text()).toBe("监听中");
+    expect(endpointCard.text()).not.toContain("按需启动");
+    wrapper.unmount();
+  });
+
+  it("shows the local endpoint as unavailable when the gateway has no base URL", async () => {
+    const unavailableSnapshot = {
+      ...snapshot,
+      bridge: {
+        ...snapshot.bridge,
+        state: "idle",
+        baseUrl: null as string | null,
+      },
+    };
+    mockSnapshotIpc(unavailableSnapshot);
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const endpointCard = wrapper.get(".endpoint-card");
+    expect(endpointCard.classes()).not.toContain("is-live");
+    expect(endpointCard.get(".badge").text()).toBe("未监听");
     wrapper.unmount();
   });
 

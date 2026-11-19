@@ -153,6 +153,9 @@ export function useDesktopApp() {
       snapshot.value?.bridge.baseUrl ??
       `http://127.0.0.1:${snapshot.value?.settings.localPort ?? 11233}/v1`,
   );
+  const localEndpointReady = computed(
+    () => Boolean(snapshot.value?.bridge.baseUrl),
+  );
   const namespaceAvailable = computed(() =>
     namespaces.value.some(
       (namespace) => namespace.path === settingsDraft.repoNamespace,
@@ -769,6 +772,7 @@ export function useDesktopApp() {
     connectionDetailsVisible,
     statusLabel,
     baseUrl,
+    localEndpointReady,
     namespaceAvailable,
     filteredLogs,
     namespaceOptions,

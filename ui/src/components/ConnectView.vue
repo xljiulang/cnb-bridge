@@ -284,7 +284,7 @@ defineProps<{ app: DesktopApp }>();
 
           <article
             class="card connect-card endpoint-card"
-            :class="{ 'is-live': app.ready }"
+            :class="{ 'is-live': app.localEndpointReady }"
           >
             <div class="section-head">
               <div>
@@ -294,8 +294,11 @@ defineProps<{ app: DesktopApp }>();
                   本机 OpenAI 兼容地址
                 </h2>
               </div>
-              <span class="badge" :class="app.ready ? 'live' : 'muted'">
-                {{ app.ready ? "监听中" : app.idle ? "按需启动" : "未连接" }}
+              <span
+                class="badge"
+                :class="app.localEndpointReady ? 'live' : 'muted'"
+              >
+                {{ app.localEndpointReady ? "监听中" : "未监听" }}
               </span>
             </div>
             <code class="endpoint-url">{{ app.baseUrl }}</code>
