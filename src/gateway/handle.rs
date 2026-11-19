@@ -46,6 +46,7 @@ pub(super) fn should_disconnect_idle_tunnel(
 pub(super) struct GatewayActivity {
     active_connections: AtomicUsize,
     last_activity: Mutex<Instant>,
+    request_gate: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl GatewayActivity {
@@ -53,15 +54,19 @@ impl GatewayActivity {
         Self {
             active_connections: AtomicUsize::new(0),
             last_activity: Mutex::new(Instant::now()),
+            request_gate: Arc::new(tokio::sync::RwLock::new(())),
         }
     }
 
-    pub(super) fn enter(self: &Arc<Self>) -> ActivityGuard {
+    pub(super) async fn enter(self: &Arc<Self>) -> ActivityGuard {
         self.active_connections.fetch_add(1, Ordering::SeqCst);
         self.touch();
-        ActivityGuard {
+        let mut guard = ActivityGuard {
             activity: Arc::clone(self),
-        }
+            _lease: None,
+        };
+        guard._lease = Some(Arc::clone(&self.request_gate).read_owned().await);
+        guard
     }
 
     fn touch(&self) {
@@ -81,10 +86,20 @@ impl GatewayActivity {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .elapsed()
     }
+
+    pub(super) fn try_claim_idle_disconnect(
+        self: &Arc<Self>,
+        idle_timeout: Duration,
+    ) -> Option<IdleDisconnectGuard> {
+        let lease = Arc::clone(&self.request_gate).try_write_owned().ok()?;
+        should_disconnect_idle_tunnel(self.active_connections(), self.idle_for(), idle_timeout)
+            .then_some(IdleDisconnectGuard { _lease: lease })
+    }
 }
 
 pub(super) struct ActivityGuard {
     activity: Arc<GatewayActivity>,
+    _lease: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
 }
 
 impl Drop for ActivityGuard {
@@ -94,6 +109,10 @@ impl Drop for ActivityGuard {
             .fetch_sub(1, Ordering::SeqCst);
         self.activity.touch();
     }
+}
+
+pub(super) struct IdleDisconnectGuard {
+    _lease: tokio::sync::OwnedRwLockWriteGuard<()>,
 }
 
 /// Handle owning one gateway listener and its monitoring task.
@@ -182,15 +201,13 @@ impl GatewayHandle {
                         }
                     }
                     _ = interval.tick() => {
-                        if !should_disconnect_idle_tunnel(
-                            idle_activity.active_connections(),
-                            idle_activity.idle_for(),
-                            idle_timeout,
-                        ) {
-                            continue;
-                        }
                         let Some(bridge) = idle_bridge.upgrade() else {
                             break;
+                        };
+                        let Some(_idle_claim) =
+                            idle_activity.try_claim_idle_disconnect(idle_timeout)
+                        else {
+                            continue;
                         };
                         if bridge.disconnect_idle_tunnel().await {
                             idle_activity.touch();

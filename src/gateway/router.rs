@@ -29,7 +29,8 @@ pub(super) async fn activity_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response<Body> {
-    activity_response(next.run(request).await, state.activity.enter())
+    let guard = state.activity.enter().await;
+    activity_response(next.run(request).await, guard)
 }
 
 pub(super) fn with_cors(mut response: Response<Body>) -> Response<Body> {

@@ -178,14 +178,135 @@ fn only_stops_after_five_idle_minutes_without_active_connections() {
 #[tokio::test]
 async fn activity_tracks_requests_and_last_use() {
     let activity = Arc::new(GatewayActivity::new());
-    let first = activity.enter();
-    let second = activity.enter();
+    let first = activity.enter().await;
+    let second = activity.enter().await;
     assert_eq!(activity.active_connections(), 2);
     drop(first);
     assert_eq!(activity.active_connections(), 1);
     drop(second);
     assert_eq!(activity.active_connections(), 0);
     assert!(activity.idle_for() < Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn idle_claim_and_new_requests_are_serialized() {
+    let activity = Arc::new(GatewayActivity::new());
+    let active = activity.enter().await;
+    assert!(activity.try_claim_idle_disconnect(Duration::ZERO).is_none());
+    drop(active);
+
+    let idle_claim = activity
+        .try_claim_idle_disconnect(Duration::ZERO)
+        .expect("idle activity should allow disconnect");
+    let pending = tokio::spawn({
+        let activity = Arc::clone(&activity);
+        async move { activity.enter().await }
+    });
+    tokio::task::yield_now().await;
+    assert!(!pending.is_finished());
+    assert_eq!(activity.active_connections(), 1);
+
+    drop(idle_claim);
+    let guard = pending.await.unwrap();
+    assert_eq!(activity.active_connections(), 1);
+    drop(guard);
+    assert_eq!(activity.active_connections(), 0);
+}
+
+#[tokio::test]
+async fn cancelled_request_waiting_for_idle_claim_releases_activity() {
+    let activity = Arc::new(GatewayActivity::new());
+    let idle_claim = activity
+        .try_claim_idle_disconnect(Duration::ZERO)
+        .expect("idle activity should allow disconnect");
+    let pending = tokio::spawn({
+        let activity = Arc::clone(&activity);
+        async move { activity.enter().await }
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(activity.active_connections(), 1);
+
+    pending.abort();
+    let _ = pending.await;
+    assert_eq!(activity.active_connections(), 0);
+    drop(idle_claim);
+}
+
+#[tokio::test]
+async fn response_body_holds_activity_until_consumed() {
+    let activity = Arc::new(GatewayActivity::new());
+    let guard = activity.enter().await;
+    let response = activity_response((StatusCode::OK, "body").into_response(), guard);
+    assert_eq!(activity.active_connections(), 1);
+
+    let body = axum::body::to_bytes(response.into_body(), 16)
+        .await
+        .unwrap();
+    assert_eq!(body, "body");
+    tokio::task::yield_now().await;
+    assert_eq!(activity.active_connections(), 0);
+}
+
+#[tokio::test]
+async fn request_stays_active_while_handler_waits_for_upstream_headers() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let started_for_upstream = Arc::clone(&started);
+    let release_for_upstream = Arc::clone(&release);
+    let upstream = Router::new().route(
+        "/chat/completions",
+        post(move || {
+            let started = Arc::clone(&started_for_upstream);
+            let release = Arc::clone(&release_for_upstream);
+            async move {
+                started.notify_one();
+                release.notified().await;
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                )
+                    .into_response()
+            }
+        }),
+    );
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let upstream_task = tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+    let (_temp, _bridge, gateway) = test_gateway_with_upstream(upstream_port).await;
+    let request = tokio::spawn({
+        let url = format!("http://127.0.0.1:{}/v1/responses", gateway.port());
+        async move {
+            reqwest::Client::new()
+                .post(url)
+                .json(&json!({
+                    "model": "model",
+                    "input": "hello",
+                    "stream": false
+                }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+
+    started.notified().await;
+    assert_eq!(gateway.active_connections(), 1);
+
+    release.notify_one();
+    let response = request.await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["status"],
+        "completed"
+    );
+    tokio::task::yield_now().await;
+    assert_eq!(gateway.active_connections(), 0);
+
+    gateway.stop().await;
+    upstream_task.abort();
 }
 
 #[tokio::test]
