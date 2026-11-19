@@ -138,39 +138,52 @@ pub(super) fn custom_tool_input(arguments: &str) -> String {
 }
 
 /// Maps Chat token usage fields to Responses usage fields.
+///
+/// Responses clients read every counter unconditionally, so missing upstream
+/// usage is reported as zeros instead of an empty object. Chat-native field
+/// names win over Responses-style ones, and non-numeric values are treated as
+/// absent rather than forwarded.
 pub fn usage_to_responses(usage: Option<&Value>) -> Value {
-    let Some(usage) = usage else {
-        return json!({});
+    let Some(usage) = usage.and_then(Value::as_object) else {
+        return zero_usage();
     };
-    let mut output = json!({});
-    for (destination, source) in [
-        ("input_tokens", "prompt_tokens"),
-        ("output_tokens", "completion_tokens"),
-        ("total_tokens", "total_tokens"),
-    ] {
-        if let Some(value) = usage.get(source) {
-            output[destination] = value.clone();
-        }
-    }
-    let mut input_details = json!({});
-    if let Some(value) = usage.pointer("/prompt_tokens_details/cached_tokens") {
-        input_details["cached_tokens"] = value.clone();
-    }
-    if input_details
-        .as_object()
-        .is_some_and(|details| !details.is_empty())
-    {
-        output["input_tokens_details"] = input_details;
-    }
-    let mut output_details = json!({});
-    if let Some(value) = usage.pointer("/completion_tokens_details/reasoning_tokens") {
-        output_details["reasoning_tokens"] = value.clone();
-    }
-    if output_details
-        .as_object()
-        .is_some_and(|details| !details.is_empty())
-    {
-        output["output_tokens_details"] = output_details;
-    }
-    output
+    let input_tokens = first_number(usage, &["prompt_tokens", "input_tokens"]).unwrap_or(0);
+    let output_tokens = first_number(usage, &["completion_tokens", "output_tokens"]).unwrap_or(0);
+    let total_tokens =
+        first_number(usage, &["total_tokens"]).unwrap_or(input_tokens + output_tokens);
+    let cached_tokens = nested_number(usage, "prompt_tokens_details", "cached_tokens")
+        .or_else(|| nested_number(usage, "input_tokens_details", "cached_tokens"))
+        .unwrap_or(0);
+    let reasoning_tokens = nested_number(usage, "completion_tokens_details", "reasoning_tokens")
+        .or_else(|| nested_number(usage, "output_tokens_details", "reasoning_tokens"))
+        .unwrap_or(0);
+    json!({
+        "input_tokens": input_tokens,
+        "input_tokens_details": { "cached_tokens": cached_tokens },
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "output_tokens_details": { "reasoning_tokens": reasoning_tokens }
+    })
+}
+
+fn zero_usage() -> Value {
+    json!({
+        "input_tokens": 0,
+        "input_tokens_details": { "cached_tokens": 0 },
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "output_tokens_details": { "reasoning_tokens": 0 }
+    })
+}
+
+fn first_number(usage: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| usage.get(*key).and_then(Value::as_u64))
+}
+
+fn nested_number(usage: &serde_json::Map<String, Value>, outer: &str, inner: &str) -> Option<u64> {
+    usage
+        .get(outer)
+        .and_then(|details| details.get(inner))
+        .and_then(Value::as_u64)
 }

@@ -122,13 +122,96 @@ pub(super) fn translate_tools(tools: &[Value]) -> Vec<Value> {
 
 pub(super) fn function_tool(name: &str, source: &Value) -> Value {
     let mut function = json!({ "name": name });
-    if let Some(description) = source.get("description") {
+    if let Some(description) = source.get("description").filter(|value| !value.is_null()) {
         function["description"] = description.clone();
     }
-    if let Some(parameters) = source.get("parameters") {
-        function["parameters"] = parameters.clone();
-    }
+    function["parameters"] = normalize_parameters(source.get("parameters"));
     json!({ "type": "function", "function": function })
+}
+
+/// Normalizes a function's `parameters` JSON Schema for strict Chat upstreams.
+///
+/// Responses tools may declare `parameters: null`, `{"type": null}` or
+/// `required: null`, and some gateways reject `additionalProperties: false`
+/// without an accompanying `required` array. Only schema-bearing keywords are
+/// visited, so literal values under `default`/`examples` stay untouched.
+pub(super) fn normalize_parameters(parameters: Option<&Value>) -> Value {
+    let mut parameters = match parameters {
+        Some(Value::Object(object)) => Value::Object(object.clone()),
+        _ => return json!({ "type": "object", "properties": {} }),
+    };
+    sanitize_parameter_schema(&mut parameters, true);
+    parameters
+}
+
+fn sanitize_parameter_schema(schema: &mut Value, is_root: bool) {
+    let Value::Object(object) = schema else {
+        return;
+    };
+    if is_root && object.get("type").and_then(Value::as_str) != Some("object") {
+        object.insert("type".to_string(), json!("object"));
+    }
+    let invalid_required = object
+        .get("required")
+        .is_some_and(|required| !required.is_array());
+    let strict_object_without_required = object.get("required").is_none()
+        && object.get("additionalProperties") == Some(&Value::Bool(false));
+    if invalid_required || strict_object_without_required {
+        object.insert("required".to_string(), json!([]));
+    }
+
+    // Only keywords whose values are themselves schemas are recursed into.
+    for key in [
+        "properties",
+        "patternProperties",
+        "$defs",
+        "definitions",
+        "dependentSchemas",
+        "dependencies",
+    ] {
+        if let Some(children) = object.get_mut(key).and_then(Value::as_object_mut) {
+            for child in children.values_mut() {
+                sanitize_schema_child(child);
+            }
+        }
+    }
+    for key in [
+        "items",
+        "additionalItems",
+        "contains",
+        "propertyNames",
+        "additionalProperties",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+        "contentSchema",
+        "not",
+        "if",
+        "then",
+        "else",
+    ] {
+        if let Some(child) = object.get_mut(key) {
+            sanitize_schema_child(child);
+        }
+    }
+    for key in ["prefixItems", "allOf", "anyOf", "oneOf"] {
+        if let Some(children) = object.get_mut(key).and_then(Value::as_array_mut) {
+            for child in children {
+                sanitize_schema_child(child);
+            }
+        }
+    }
+}
+
+fn sanitize_schema_child(value: &mut Value) {
+    match value {
+        Value::Object(_) => sanitize_parameter_schema(value, false),
+        Value::Array(children) => {
+            for child in children {
+                sanitize_schema_child(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub(super) fn custom_tool_description(raw: &str, name: &str) -> String {

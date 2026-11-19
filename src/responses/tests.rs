@@ -57,7 +57,8 @@ fn translates_instructions_messages_images_and_tools() {
     );
     assert_eq!(chat["tools"][0]["function"]["name"], "codexui_get_usage");
     assert_eq!(chat["tools"][1]["function"]["name"], "apply_patch");
-    assert_eq!(chat["max_completion_tokens"], 123);
+    assert_eq!(chat["max_tokens"], 123);
+    assert!(chat.get("max_completion_tokens").is_none());
     assert_eq!(chat["stream"], true);
 }
 
@@ -288,4 +289,304 @@ fn malformed_stream_tool_arguments_fail_the_response() {
     assert!(joined.contains("event: response.failed"));
     assert!(!joined.contains("event: response.completed"));
     assert!(joined.contains("malformed_tool_call_arguments"));
+}
+
+#[test]
+fn drops_empty_user_messages_after_compaction() {
+    let request = json!({
+        "model": "model",
+        "input": [
+            { "type": "message", "role": "user", "content": [] },
+            { "type": "message", "role": "user", "content": "" },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "keep" }]
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+
+    let messages = chat["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"], "keep");
+}
+
+#[test]
+fn keeps_image_only_user_message() {
+    let request = json!({
+        "model": "model",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_image", "image_url": "https://example.test/a.png" }]
+        }]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+
+    let messages = chat["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["content"][0]["type"], "image_url");
+}
+
+#[test]
+fn normalizes_tool_parameters_for_strict_upstreams() {
+    let request = json!({
+        "model": "model",
+        "tools": [
+            { "type": "function", "name": "no_parameters" },
+            { "type": "function", "name": "null_parameters", "parameters": null },
+            {
+                "type": "function",
+                "name": "array_root",
+                "parameters": { "type": "array", "items": { "type": "string" } }
+            },
+            {
+                "type": "function",
+                "name": "bad_required",
+                "parameters": { "type": "object", "properties": {}, "required": "name" }
+            },
+            {
+                "type": "function",
+                "name": "closed_nested",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "inner": { "type": "object", "additionalProperties": false }
+                    }
+                }
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let tools = chat["tools"].as_array().unwrap();
+
+    let empty_schema = json!({ "type": "object", "properties": {} });
+    assert_eq!(tools[0]["function"]["parameters"], empty_schema);
+    assert_eq!(tools[1]["function"]["parameters"], empty_schema);
+    assert_eq!(tools[2]["function"]["parameters"]["type"], "object");
+    assert_eq!(
+        tools[2]["function"]["parameters"]["items"]["type"],
+        "string"
+    );
+    assert_eq!(tools[3]["function"]["parameters"]["required"], json!([]));
+    assert_eq!(
+        tools[4]["function"]["parameters"]["properties"]["inner"]["required"],
+        json!([])
+    );
+}
+
+#[test]
+fn leaves_schema_default_values_untouched() {
+    let request = json!({
+        "model": "model",
+        "tools": [{
+            "type": "function",
+            "name": "with_default",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "y": {
+                        "type": "object",
+                        "default": { "additionalProperties": false, "required": "nope" }
+                    }
+                }
+            }
+        }]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let default = &chat["tools"][0]["function"]["parameters"]["properties"]["y"]["default"];
+
+    assert_eq!(default["additionalProperties"], false);
+    assert_eq!(default["required"], "nope");
+}
+
+#[test]
+fn usage_defaults_to_zero_when_upstream_omits_it() {
+    let zero = json!({
+        "input_tokens": 0,
+        "input_tokens_details": { "cached_tokens": 0 },
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "output_tokens_details": { "reasoning_tokens": 0 }
+    });
+
+    assert_eq!(usage_to_responses(None), zero);
+    assert_eq!(usage_to_responses(Some(&json!({}))), zero);
+    assert_eq!(usage_to_responses(Some(&json!("oops"))), zero);
+}
+
+#[test]
+fn usage_fills_missing_details_and_accepts_responses_names() {
+    let usage = usage_to_responses(Some(&json!({
+        "input_tokens": 7,
+        "output_tokens": 4,
+        "input_tokens_details": { "cached_tokens": 2 }
+    })));
+
+    assert_eq!(usage["input_tokens"], 7);
+    assert_eq!(usage["output_tokens"], 4);
+    assert_eq!(usage["total_tokens"], 11);
+    assert_eq!(usage["input_tokens_details"]["cached_tokens"], 2);
+    assert_eq!(usage["output_tokens_details"]["reasoning_tokens"], 0);
+}
+
+fn roles(messages: &[Value]) -> Vec<&str> {
+    messages
+        .iter()
+        .filter_map(|message| message["role"].as_str())
+        .collect()
+}
+
+fn large_image_data_url() -> String {
+    format!("data:image/png;base64,{}", "A".repeat(9000))
+}
+
+#[test]
+fn moves_tool_output_image_into_following_user_message() {
+    let url = large_image_data_url();
+    let request = json!({
+        "model": "model",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "view_image",
+                "arguments": "{}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": {
+                    "content": [
+                        { "type": "input_text", "text": "screenshot" },
+                        { "type": "input_image", "image_url": url }
+                    ]
+                }
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert_eq!(roles(messages), ["assistant", "tool", "user"]);
+    let tool = messages[1]["content"].as_str().unwrap();
+    assert!(tool.contains("moved to the following user message"));
+    assert!(!tool.contains("base64"));
+    assert_eq!(messages[2]["content"][0]["type"], "text");
+    assert_eq!(messages[2]["content"][1]["type"], "image_url");
+    assert_eq!(messages[2]["content"][1]["image_url"]["url"], url);
+}
+
+#[test]
+fn keeps_parallel_tool_results_contiguous_around_media() {
+    let url = large_image_data_url();
+    let request = json!({
+        "model": "model",
+        "input": [
+            { "type": "function_call", "call_id": "c1", "name": "shot", "arguments": "{}" },
+            { "type": "function_call", "call_id": "c2", "name": "read", "arguments": "{}" },
+            {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": {
+                    "content": [{ "type": "input_image", "image_url": url }]
+                }
+            },
+            { "type": "function_call_output", "call_id": "c2", "output": "ok" }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert_eq!(roles(messages), ["assistant", "tool", "tool", "user"]);
+    assert_eq!(messages[1]["tool_call_id"], "c1");
+    assert_eq!(messages[2]["tool_call_id"], "c2");
+    assert!(messages[3]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("c1"));
+}
+
+#[test]
+fn injects_missing_tool_placeholder_before_media_message() {
+    let url = large_image_data_url();
+    let request = json!({
+        "model": "model",
+        "input": [
+            { "type": "function_call", "call_id": "c1", "name": "shot", "arguments": "{}" },
+            { "type": "function_call", "call_id": "c2", "name": "read", "arguments": "{}" },
+            {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": {
+                    "content": [{ "type": "input_image", "image_url": url }]
+                }
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert_eq!(roles(messages), ["assistant", "tool", "tool", "user"]);
+    assert_eq!(messages[1]["tool_call_id"], "c1");
+    assert_eq!(messages[2]["tool_call_id"], "c2");
+    assert_eq!(messages[2]["content"], MISSING_TOOL_OUTPUT);
+    assert_eq!(messages[3]["content"][1]["type"], "image_url");
+}
+
+#[test]
+fn extracts_nested_media_from_custom_tool_call_output() {
+    let url = large_image_data_url();
+    let output = json!({
+        "content": [{ "type": "input_image", "image_url": url }]
+    })
+    .to_string();
+    let request = json!({
+        "model": "model",
+        "input": [
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_9",
+                "name": "apply_patch",
+                "input": "*** Begin Patch"
+            },
+            { "type": "custom_tool_call_output", "call_id": "call_9", "output": output }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert_eq!(roles(messages), ["assistant", "tool", "user"]);
+    let tool = messages[1]["content"].as_str().unwrap();
+    assert!(tool.contains("moved to the following user message"));
+    assert!(!tool.contains("base64"));
+    assert!(serde_json::from_str::<Value>(tool).is_ok());
+    assert_eq!(messages[2]["content"][1]["image_url"]["url"], url);
+}
+
+#[test]
+fn leaves_tool_output_without_media_unchanged() {
+    let request = json!({
+        "model": "model",
+        "input": [
+            { "type": "function_call", "call_id": "c1", "name": "read", "arguments": "{}" },
+            { "type": "function_call_output", "call_id": "c1", "output": "ok" }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert_eq!(roles(messages), ["assistant", "tool"]);
+    assert_eq!(messages[1]["content"], "ok");
 }

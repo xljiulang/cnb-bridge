@@ -27,7 +27,7 @@ use tokio::sync::watch;
 
 const REQUEST_ID_HEADER: &str = "x-request-id";
 const BODY_LIMIT: usize = 64 * 1024 * 1024;
-const OPTIONAL_CHAT_FIELDS: [(&str, &[&str]); 6] = [
+const OPTIONAL_CHAT_FIELDS: [(&str, &[&str]); 7] = [
     ("stream_options", &["stream_options", "include_usage"]),
     (
         "reasoning_effort",
@@ -37,6 +37,7 @@ const OPTIONAL_CHAT_FIELDS: [(&str, &[&str]); 6] = [
     ("prompt_cache_key", &["prompt_cache_key"]),
     ("service_tier", &["service_tier"]),
     ("tool_choice", &["tool_choice"]),
+    ("max_tokens", &["max_tokens"]),
 ];
 
 #[derive(Debug)]

@@ -21,6 +21,7 @@ pub fn responses_to_chat(request: &Value, want_stream: bool) -> Result<Value, St
         Some(Value::Array(items)) => translate_input_items(items, &mut messages),
         _ => {}
     }
+    drop_empty_user_messages(&mut messages);
     repair_tool_pairing(&mut messages);
 
     let mut chat = json!({
@@ -35,7 +36,7 @@ pub fn responses_to_chat(request: &Value, want_stream: bool) -> Result<Value, St
         }
     }
     for (destination, source) in [
-        ("max_completion_tokens", "max_output_tokens"),
+        ("max_tokens", "max_output_tokens"),
         ("temperature", "temperature"),
         ("top_p", "top_p"),
         ("seed", "seed"),
@@ -98,6 +99,8 @@ pub fn unsupported_feature_names(request: &Value) -> Vec<&'static str> {
 pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) {
     let mut pending: Option<Value> = None;
     let mut reasoning: Option<String> = None;
+    // Images lifted out of tool results, emitted once the tool turn ends.
+    let mut media: Vec<Value> = Vec::new();
     for item in items {
         let Some(object) = item.as_object() else {
             continue;
@@ -109,6 +112,7 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
         match item_type {
             Some("message") => {
                 flush_pending(messages, &mut pending);
+                flush_tool_media(messages, &mut media);
                 let role = object.get("role").and_then(Value::as_str).unwrap_or("user");
                 let role = if role == "developer" { "system" } else { role };
                 if role != "assistant" {
@@ -129,6 +133,9 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
                 reasoning = reasoning_item_text(item);
             }
             Some("function_call" | "custom_tool_call") => {
+                // Media from the preceding tool turn belongs before this new
+                // assistant turn, not after its results.
+                flush_tool_media(messages, &mut media);
                 let raw_name = object.get("name").and_then(Value::as_str).unwrap_or("");
                 let name = object
                     .get("namespace")
@@ -181,25 +188,47 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
             }
             Some("function_call_output" | "custom_tool_call_output") => {
                 flush_pending(messages, &mut pending);
+                let call_id = object.get("call_id").and_then(Value::as_str).unwrap_or("");
+                let output = object.get("output").unwrap_or(&Value::Null);
+                let content = extract_tool_output_media(output, call_id, &mut media)
+                    .unwrap_or_else(|| value_to_text(output));
                 messages.push(json!({
                     "role": "tool",
-                    "tool_call_id": object
-                        .get("call_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or(""),
-                    "content": value_to_text(object.get("output").unwrap_or(&Value::Null))
+                    "tool_call_id": call_id,
+                    "content": content
                 }));
             }
             _ => {}
         }
     }
     flush_pending(messages, &mut pending);
+    flush_tool_media(messages, &mut media);
 }
 
 pub(super) fn flush_pending(messages: &mut Vec<Value>, pending: &mut Option<Value>) {
     if let Some(message) = pending.take() {
         messages.push(message);
     }
+}
+
+/// Drops user messages that translate to empty content.
+///
+/// Codex rebuilds history after compaction and can emit user turns that only
+/// carried media or parts this translation does not recognize. Those become an
+/// empty string, which strict Chat upstreams reject with "content cannot be
+/// empty". Messages carrying only images keep a non-empty parts array and are
+/// therefore preserved.
+pub(super) fn drop_empty_user_messages(messages: &mut Vec<Value>) {
+    messages.retain(|message| {
+        if message.get("role").and_then(Value::as_str) != Some("user") {
+            return true;
+        }
+        match message.get("content") {
+            Some(Value::String(text)) => !text.is_empty(),
+            Some(Value::Array(parts)) => !parts.is_empty(),
+            _ => true,
+        }
+    });
 }
 
 pub(super) fn repair_tool_pairing(messages: &mut Vec<Value>) {
