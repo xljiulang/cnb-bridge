@@ -51,7 +51,7 @@ defineProps<{ app: DesktopApp }>();
                     : app.startingBridge
                       ? "正在桥接"
                       : app.idle
-                        ? "待命"
+                        ? "按需连接"
                         : app.bridgeTransitioning
                           ? "处理中"
                           : "待连接"

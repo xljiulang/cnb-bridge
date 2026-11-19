@@ -52,7 +52,7 @@ describe("format helpers", () => {
   });
 
   it("labels the request-driven idle state", () => {
-    expect(bridgeLabel("idle")).toBe("空闲待命");
+    expect(bridgeLabel("idle")).toBe("按需连接");
   });
 
   it("formats command errors", () => {

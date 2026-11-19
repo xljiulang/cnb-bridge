@@ -506,6 +506,7 @@ describe("App shell", () => {
     expect(workspaceStep.text()).toContain("按需连接");
     expect(workspaceStep.text()).not.toContain("等待重连");
     expect(wrapper.text()).not.toContain("等待建立通道");
+    expect(wrapper.get(".title-row .badge").text()).toBe("按需连接");
     expect(wrapper.find(".head-actions .primary").text()).toContain("立即桥接");
     wrapper.unmount();
   });
