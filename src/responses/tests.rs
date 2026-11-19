@@ -2686,6 +2686,34 @@ fn stream_preserves_interior_blank_reasoning_after_valid_start() {
 }
 
 #[test]
+fn stream_keeps_reasoning_sources_separate_when_upstream_switches_fields() {
+    let mut stream = ResponsesStream::new("resp_source_switch".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": { "reasoning_content": "primary " },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": { "reasoning_details": [{ "text": "fallback" }] },
+            "finish_reason": "stop"
+        }]
+    })));
+    events.extend(stream.finish());
+
+    let completed = terminal_response(&events, "response.completed");
+    let reasoning: Vec<_> = completed["response"]["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "reasoning")
+        .collect();
+    assert_eq!(reasoning.len(), 1);
+    assert_eq!(reasoning[0]["summary"][0]["text"], "primary fallback");
+}
+
+#[test]
 fn stream_does_not_emit_empty_reasoning_item_when_only_blank_chunks_arrive() {
     let mut stream = ResponsesStream::new("resp_blank_part".to_string(), "model".to_string());
     let mut events = stream.push(&json!({

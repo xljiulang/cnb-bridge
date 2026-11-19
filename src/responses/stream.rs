@@ -643,7 +643,7 @@ impl ResponsesStream {
 
     fn reasoning_fragment(&self, delta: &Value) -> Option<String> {
         if self.reasoning.is_some() {
-            return raw_reasoning_whitespace(delta);
+            return raw_reasoning_text(delta).or_else(|| raw_reasoning_whitespace(delta));
         }
         raw_reasoning_text(delta).or_else(|| raw_reasoning_whitespace(delta))
     }
