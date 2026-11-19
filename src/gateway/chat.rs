@@ -70,9 +70,15 @@ pub(super) async fn handle_chat(
             aggregate_chat_stream(exchange.response, trace, status, &prepared.requested_model);
         return match tokio::time::timeout(state.non_stream_timeout, aggregate).await {
             Ok(Ok(chat)) => with_request_id(Json(chat).into_response(), &request_id),
-            Ok(Err((status, code, message))) => {
-                error_response_with_id(status, code, message, request_id)
-            }
+            Ok(Err(error)) => error_response_with_details(
+                error.status,
+                error.code,
+                error.message,
+                error.error_type,
+                error.param,
+                error.retryable,
+                request_id,
+            ),
             Err(_) => error_response_with_id(
                 StatusCode::GATEWAY_TIMEOUT,
                 "upstream_timeout",
@@ -238,6 +244,66 @@ pub(super) struct AggregateToolCall {
     kind: String,
     name: String,
     arguments: String,
+    saw_arguments: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AggregateError {
+    pub(super) code: String,
+    pub(super) error_type: String,
+    pub(super) message: String,
+    pub(super) param: Option<String>,
+}
+
+pub(super) struct AggregateHttpError {
+    pub(super) status: StatusCode,
+    pub(super) code: String,
+    pub(super) message: String,
+    pub(super) error_type: String,
+    pub(super) param: Option<String>,
+    pub(super) retryable: bool,
+}
+
+impl AggregateError {
+    fn protocol(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            code: code.to_string(),
+            error_type: "upstream_error".to_string(),
+            message: message.into(),
+            param: None,
+        }
+    }
+
+    fn sse_json(error: serde_json::Error) -> Self {
+        Self::protocol("upstream_server_error", format!("无效 SSE JSON: {error}"))
+    }
+
+    fn into_http(self) -> AggregateHttpError {
+        let status = match self.code.as_str() {
+            "context_length_exceeded" => StatusCode::BAD_REQUEST,
+            "upstream_rate_limited" => StatusCode::TOO_MANY_REQUESTS,
+            _ => StatusCode::BAD_GATEWAY,
+        };
+        let code = match self.code.as_str() {
+            "context_length_exceeded" => "context_length_exceeded".to_string(),
+            "upstream_rate_limited" => "upstream_rate_limited".to_string(),
+            _ => "upstream_server_error".to_string(),
+        };
+        let (fallback_type, retryable) = error_contract(&code, status);
+        let error_type = if self.error_type == "upstream_error" {
+            fallback_type.to_string()
+        } else {
+            self.error_type
+        };
+        AggregateHttpError {
+            status,
+            code,
+            message: self.message,
+            error_type,
+            param: self.param,
+            retryable,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -259,20 +325,36 @@ pub(super) struct ChatCompletionAccumulator {
     system_fingerprint: Option<Value>,
     usage: Option<Value>,
     choices: BTreeMap<usize, AggregateChoice>,
+    next_tool_key: usize,
     saw_done: bool,
     saw_finish: bool,
 }
 
 impl ChatCompletionAccumulator {
-    pub(super) fn push_data(&mut self, payload: &str) -> Result<(), String> {
+    pub(super) fn push_data(&mut self, payload: &str) -> Result<(), AggregateError> {
         if payload == "[DONE]" {
             self.saw_done = true;
             return Ok(());
         }
-        let chunk: Value =
-            serde_json::from_str(payload).map_err(|error| format!("无效 SSE JSON: {error}"))?;
+        let chunk: Value = serde_json::from_str(payload).map_err(AggregateError::sse_json)?;
         if let Some(error) = chunk.get("error").filter(|value| !value.is_null()) {
-            return Err(format!("上游流内错误: {error}"));
+            return Err(ChatCompletionAccumulator::normalized_error(error));
+        }
+        if chunk.get("choices").is_none() {
+            let normalized = crate::responses::normalize_chat_error(Some(&chunk));
+            let has_error_shape = chunk.get("detail").is_some()
+                || chunk.get("message").is_some()
+                || (chunk.get("base_resp").is_some() && chunk.get("usage").is_none());
+            if has_error_shape || !matches!(chunk, Value::Object(_)) {
+                return Err(AggregateError {
+                    code: normalized
+                        .code
+                        .unwrap_or_else(|| "upstream_error".to_string()),
+                    error_type: normalized.error_type,
+                    message: normalized.message,
+                    param: normalized.param,
+                });
+            }
         }
         if let Some(id) = chunk
             .get("id")
@@ -358,7 +440,8 @@ impl ChatCompletionAccumulator {
                 .into_iter()
                 .flatten()
             {
-                let tool_index = aggregate_tool_key(&state.tool_calls, tool);
+                let tool_index =
+                    aggregate_tool_key(&state.tool_calls, &mut self.next_tool_key, tool);
                 let tool_state = state.tool_calls.entry(tool_index).or_default();
                 if let Some(id) = tool
                     .get("id")
@@ -383,6 +466,7 @@ impl ChatCompletionAccumulator {
                 }
                 if let Some(arguments) = tool.pointer("/function/arguments").and_then(Value::as_str)
                 {
+                    tool_state.saw_arguments = true;
                     tool_state.arguments.push_str(arguments);
                 }
             }
@@ -391,21 +475,50 @@ impl ChatCompletionAccumulator {
                 .and_then(Value::as_str)
                 .filter(|reason| !reason.is_empty())
             {
-                state.finish_reason = Some(reason.to_string());
-                self.saw_finish = true;
+                if state.finish_reason.is_none() {
+                    state.finish_reason = Some(reason.to_string());
+                    self.saw_finish = true;
+                }
             }
         }
         Ok(())
     }
 
-    pub(super) fn finish(self, requested_model: &str) -> Result<Value, String> {
+    fn normalized_error(value: &Value) -> AggregateError {
+        let normalized = crate::responses::normalize_chat_error(Some(value));
+        AggregateError {
+            code: normalized
+                .code
+                .unwrap_or_else(|| "upstream_error".to_string()),
+            error_type: normalized.error_type,
+            message: normalized.message,
+            param: normalized.param,
+        }
+    }
+
+    pub(super) fn finish(self, requested_model: &str) -> Result<Value, AggregateError> {
         if !self.saw_done && !self.saw_finish {
-            return Err("上游 SSE 缺少完成分片或 [DONE]".to_string());
+            return Err(AggregateError::protocol(
+                "incomplete_stream",
+                "上游 SSE 缺少完成分片或 [DONE]",
+            ));
+        }
+        if self.choices.is_empty() {
+            return Err(AggregateError::protocol(
+                "incomplete_stream",
+                "上游 SSE 已完成但没有有效输出",
+            ));
         }
         let choices = self
             .choices
             .into_iter()
-            .map(|(index, choice)| {
+            .map(|(index, mut choice)| {
+                if choice.finish_reason.is_none() {
+                    return Err(AggregateError::protocol(
+                        "incomplete_stream",
+                        format!("choice {index} 有输出但缺少 finish_reason"),
+                    ));
+                }
                 let mut message = json!({
                     "role": "assistant",
                     "content": if !choice.content_parts.is_empty() {
@@ -428,27 +541,56 @@ impl ChatCompletionAccumulator {
                     message["reasoning_content"] = Value::String(choice.reasoning_content);
                 }
                 if !choice.tool_calls.is_empty() {
-                    message["tool_calls"] = Value::Array(
-                        choice
-                            .tool_calls
-                            .into_values()
-                            .map(|tool| {
-                                let arguments = if tool.arguments.trim().is_empty() {
-                                    "{}".to_string()
-                                } else {
-                                    tool.arguments
-                                };
-                                json!({
-                                    "id": tool.id,
-                                    "type": if tool.kind.is_empty() { "function" } else { tool.kind.as_str() },
-                                    "function": {
-                                        "name": tool.name,
-                                        "arguments": arguments
-                                    }
-                                })
-                            })
-                            .collect(),
-                    );
+                    let mut calls = Vec::with_capacity(choice.tool_calls.len());
+                    for tool in choice.tool_calls.into_values() {
+                        if tool.name.is_empty() {
+                            return Err(AggregateError::protocol(
+                                "upstream_tool_call_dropped",
+                                format!(
+                                    "tool call {} 缺少函数名",
+                                    if tool.id.is_empty() { "<unknown>" } else { &tool.id }
+                                ),
+                            ));
+                        }
+                        let arguments = if !tool.saw_arguments || tool.arguments.trim().is_empty() {
+                            "{}".to_string()
+                        } else {
+                            if !serde_json::from_str::<Value>(&tool.arguments)
+                                .is_ok_and(|value| value.is_object())
+                            {
+                                return Err(AggregateError::protocol(
+                                    "malformed_tool_call_arguments",
+                                    format!(
+                                        "tool call {} 参数不是合法 JSON 对象",
+                                        if tool.id.is_empty() { "<unknown>" } else { &tool.id }
+                                    ),
+                                ));
+                            }
+                            tool.arguments
+                        };
+                        calls.push(json!({
+                            "id": tool.id,
+                            "type": if tool.kind.is_empty() { "function" } else { tool.kind.as_str() },
+                            "function": {
+                                "name": tool.name,
+                                "arguments": arguments
+                            }
+                        }));
+                    }
+                    message["tool_calls"] = Value::Array(calls);
+                    if choice.finish_reason.as_deref() != Some("length")
+                        && choice.finish_reason.as_deref() != Some("content_filter")
+                    {
+                        choice.finish_reason = Some("tool_calls".to_string());
+                    }
+                } else if matches!(
+                    choice.finish_reason.as_deref(),
+                    Some("tool_calls" | "function_call")
+                ) {
+                    return Err(AggregateError::protocol(
+                        "incomplete_stream",
+                        format!("choice {index} 以 tool_calls 结束但没有工具调用"),
+                    ));
                 }
                 if let Some(function_call) = choice.legacy_function_call {
                     message["function_call"] = json!({
@@ -456,13 +598,13 @@ impl ChatCompletionAccumulator {
                         "arguments": function_call.arguments
                     });
                 }
-                json!({
+                Ok(json!({
                     "index": index,
                     "message": message,
                     "finish_reason": choice.finish_reason
-                })
+                }))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         let mut completion = json!({
             "id": self.id.unwrap_or_else(|| format!("chatcmpl_{}", new_request_id())),
             "object": "chat.completion",
@@ -480,26 +622,45 @@ impl ChatCompletionAccumulator {
     }
 }
 
-fn aggregate_tool_key(calls: &BTreeMap<usize, AggregateToolCall>, tool: &Value) -> usize {
+fn aggregate_tool_key(
+    calls: &BTreeMap<usize, AggregateToolCall>,
+    next_key: &mut usize,
+    tool: &Value,
+) -> usize {
+    let id = tool
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty());
+    if let Some(id) = id {
+        if let Some((key, _)) = calls.iter().find(|(_, state)| state.id == id) {
+            return *key;
+        }
+    }
+
     if let Some(index) = tool.get("index").and_then(Value::as_u64) {
-        return usize::try_from(index).unwrap_or(usize::MAX - 1);
+        let index = usize::try_from(index).unwrap_or(usize::MAX - 1);
+        if let Some(state) = calls.get(&index) {
+            if id.is_none() || state.id.is_empty() {
+                return index;
+            }
+        } else {
+            return index;
+        }
     }
 
     let last_key = calls.keys().next_back().copied();
-    let Some(id) = tool
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-    else {
+    if id.is_none() {
         return last_key.unwrap_or(0);
-    };
-    if let Some((key, _)) = calls.iter().find(|(_, state)| state.id == id) {
-        return *key;
     }
-    match last_key {
-        Some(key) => key.checked_add(1).unwrap_or(key),
-        None => 0,
+    if let Some(key) = last_key.and_then(|key| key.checked_add(1)) {
+        return key;
     }
+    let key = *next_key;
+    *next_key = next_key.saturating_add(1);
+    while calls.contains_key(&key) {
+        *next_key = next_key.saturating_add(1);
+    }
+    key
 }
 
 pub(super) fn aggregate_reasoning_text(delta: &Value) -> Option<String> {
@@ -515,7 +676,7 @@ pub(super) async fn aggregate_chat_stream(
     mut trace: Option<HttpTraceSession>,
     status: StatusCode,
     requested_model: &str,
-) -> Result<Value, (StatusCode, &'static str, String)> {
+) -> Result<Value, AggregateHttpError> {
     let mut chunks = response.bytes_stream();
     let mut buffer = Vec::new();
     let mut total = 0usize;
@@ -528,11 +689,14 @@ pub(super) async fn aggregate_chat_stream(
                     let elapsed = trace.elapsed();
                     trace.finish(status.as_u16(), "stream_error", elapsed).ok();
                 }
-                return Err((
-                    StatusCode::BAD_GATEWAY,
-                    "upstream_network_error",
-                    format!("failed to read upstream stream: {error}"),
-                ));
+                return Err(AggregateHttpError {
+                    status: StatusCode::BAD_GATEWAY,
+                    code: "upstream_network_error".to_string(),
+                    message: format!("failed to read upstream stream: {error}"),
+                    error_type: "server_error".to_string(),
+                    param: None,
+                    retryable: true,
+                });
             }
         };
         if aggregate_response_too_large(total, chunk.len()) {
@@ -540,11 +704,14 @@ pub(super) async fn aggregate_chat_stream(
                 let elapsed = trace.elapsed();
                 trace.finish(status.as_u16(), "failed", elapsed).ok();
             }
-            return Err((
-                StatusCode::BAD_GATEWAY,
-                "upstream_server_error",
-                "aggregated upstream response exceeds 64 MiB".to_string(),
-            ));
+            return Err(AggregateHttpError {
+                status: StatusCode::BAD_GATEWAY,
+                code: "upstream_server_error".to_string(),
+                message: "aggregated upstream response exceeds 64 MiB".to_string(),
+                error_type: "server_error".to_string(),
+                param: None,
+                retryable: true,
+            });
         }
         total += chunk.len();
         if let Some(trace) = trace.as_mut() {
@@ -585,11 +752,12 @@ pub(super) async fn aggregate_chat_stream(
         }
     }
     let chat = accumulator.finish(requested_model).map_err(|message| {
-        (
-            StatusCode::BAD_GATEWAY,
-            "upstream_server_error",
-            format!("failed to aggregate upstream chat stream: {message}"),
-        )
+        let mut error = message.into_http();
+        error.message = format!(
+            "failed to aggregate upstream chat stream: {}",
+            error.message
+        );
+        error
     })?;
     if let Some(mut trace) = trace.take() {
         let elapsed = trace.elapsed();
@@ -601,12 +769,12 @@ pub(super) async fn aggregate_chat_stream(
 pub(super) fn process_aggregate_line(
     line: &[u8],
     accumulator: &mut ChatCompletionAccumulator,
-) -> Result<(), (StatusCode, &'static str, String)> {
+) -> Result<(), AggregateHttpError> {
     let line = String::from_utf8_lossy(line);
     let Some(payload) = line.trim_end().strip_prefix("data:") else {
         return Ok(());
     };
     accumulator
         .push_data(payload.trim())
-        .map_err(|message| (StatusCode::BAD_GATEWAY, "upstream_server_error", message))
+        .map_err(AggregateError::into_http)
 }

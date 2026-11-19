@@ -929,6 +929,13 @@ async fn chat_nonstream_passes_through_unexpected_upstream_json() {
         .unwrap();
 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    );
     let payload: Value = response.json().await.unwrap();
     assert_eq!(payload["id"], "chatcmpl-json");
     assert_eq!(payload["choices"][0]["message"]["content"], "json");
@@ -983,6 +990,119 @@ async fn chat_nonstream_returns_an_error_for_in_stream_failures() {
     upstream_task.abort();
 }
 
+#[tokio::test]
+async fn chat_nonstream_preserves_request_id_for_in_stream_errors() {
+    let upstream = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            (
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                r#"data: {"error":{"message":"context length exceeded","type":"invalid_request_error","code":"context_length_exceeded","param":"messages"}}
+
+"#,
+            )
+                .into_response()
+        }),
+    );
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let upstream_task = tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+    let (_temp, _bridge, gateway) = test_gateway_with_upstream(port).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{}/v1/chat/completions",
+            gateway.port()
+        ))
+        .json(&json!({
+            "model": "hy4-flash",
+            "messages": [{ "role": "user", "content": "hello" }],
+            "stream": false
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let header_request_id = response
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let payload: Value = response.json().await.unwrap();
+    assert_eq!(payload["request_id"], header_request_id);
+    assert_eq!(payload["error"]["code"], "context_length_exceeded");
+    assert_eq!(payload["error"]["type"], "invalid_request_error");
+    assert_eq!(payload["error"]["param"], "messages");
+    assert!(payload["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("context length exceeded")));
+
+    gateway.stop().await;
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn chat_nonstream_done_survives_late_transport_error() {
+    let done = std::sync::Arc::new(Bytes::from_static(
+        b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+    ));
+    let upstream_done = std::sync::Arc::clone(&done);
+    let upstream = Router::new().route(
+        "/chat/completions",
+        post(move || {
+            let upstream_done = std::sync::Arc::clone(&upstream_done);
+            async move {
+                let first = futures_util::stream::once(async move {
+                    Ok::<Bytes, std::io::Error>((*upstream_done).clone())
+                });
+                let second = futures_util::stream::once(async move {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    Err(std::io::Error::other("late reset after done"))
+                });
+                let mut response = Response::new(Body::from_stream(first.chain(second)));
+                response.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/event-stream"),
+                );
+                response
+            }
+        }),
+    );
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let upstream_task = tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+    let (_temp, _bridge, gateway) = test_gateway_with_upstream(port).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{}/v1/chat/completions",
+            gateway.port()
+        ))
+        .json(&json!({
+            "model": "hy4-flash",
+            "messages": [{ "role": "user", "content": "hello" }],
+            "stream": false
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let payload: Value = response.json().await.unwrap();
+    assert_eq!(payload["choices"][0]["message"]["content"], "ok");
+    assert_eq!(payload["choices"][0]["finish_reason"], "stop");
+
+    gateway.stop().await;
+    upstream_task.abort();
+}
+
 #[test]
 fn chat_completion_aggregation_enforces_the_size_limit() {
     assert!(!aggregate_response_too_large(BODY_LIMIT - 1, 1));
@@ -1020,8 +1140,61 @@ fn chat_completion_aggregation_rejects_in_stream_errors() {
         .push_data(r#"{"error":{"message":"upstream exploded"}}"#)
         .unwrap_err();
 
-    assert!(error.contains("上游流内错误"));
-    assert!(error.contains("upstream exploded"));
+    assert_eq!(error.message, "upstream exploded");
+    assert_eq!(error.code, "upstream_error");
+}
+
+#[test]
+fn chat_completion_aggregation_normalizes_nested_and_flat_stream_errors() {
+    let cases = [
+        (
+            r#"{"detail":"detail failure"}"#,
+            "detail failure",
+            "upstream_error",
+        ),
+        (
+            r#"{"message":"flat failure"}"#,
+            "flat failure",
+            "upstream_error",
+        ),
+        (
+            r#"{"base_resp":{"status_code":1001,"status_msg":"base failure"}}"#,
+            "base failure",
+            "1001",
+        ),
+        (
+            r#"{"error":{"message":"context length exceeded","type":"invalid_request_error","code":"context_length_exceeded","param":"messages"}}"#,
+            "context length exceeded",
+            "context_length_exceeded",
+        ),
+    ];
+
+    for (payload, message, code) in cases {
+        let mut accumulator = ChatCompletionAccumulator::default();
+        let error = accumulator.push_data(payload).unwrap_err();
+
+        assert_eq!(error.message, message);
+        assert_eq!(error.code, code);
+    }
+}
+
+#[test]
+fn chat_completion_aggregation_accepts_usage_only_terminal_chunks() {
+    let mut accumulator = ChatCompletionAccumulator::default();
+    accumulator
+        .push_data(
+            r#"{"choices":[{"index":0,"delta":{"content":"complete"},"finish_reason":"stop"}]}"#,
+        )
+        .unwrap();
+    accumulator
+        .push_data(r#"{"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}"#)
+        .unwrap();
+    accumulator.push_data("[DONE]").unwrap();
+
+    let completion = accumulator.finish("model").unwrap();
+
+    assert_eq!(completion["choices"][0]["message"]["content"], "complete");
+    assert_eq!(completion["usage"]["total_tokens"], 3);
 }
 
 #[test]
@@ -1033,7 +1206,7 @@ fn chat_completion_aggregation_rejects_truncated_streams() {
 
     let error = accumulator.finish("hy4-flash").unwrap_err();
 
-    assert!(error.contains("缺少完成分片"));
+    assert!(error.message.contains("缺少完成分片"));
 }
 
 #[test]
@@ -1041,8 +1214,8 @@ fn chat_completion_aggregation_rejects_invalid_sse_json() {
     let mut accumulator = ChatCompletionAccumulator::default();
     let error = process_aggregate_line(b"data: not-json\n", &mut accumulator).unwrap_err();
 
-    assert_eq!(error.0, StatusCode::BAD_GATEWAY);
-    assert_eq!(error.1, "upstream_server_error");
+    assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+    assert_eq!(error.code, "upstream_server_error");
 }
 
 #[test]
@@ -1096,6 +1269,73 @@ fn chat_completion_aggregation_does_not_duplicate_repeated_tool_headers() {
 }
 
 #[test]
+fn chat_completion_aggregation_reuses_a_known_id_when_its_index_changes() {
+    let mut accumulator = ChatCompletionAccumulator::default();
+    accumulator
+        .push_data(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}"#,
+        )
+        .unwrap();
+    accumulator
+        .push_data(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":3,"id":"call_a","function":{"arguments":"\"a.txt\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        )
+        .unwrap();
+
+    let completion = accumulator.finish("model").unwrap();
+    let calls = completion["choices"][0]["message"]["tool_calls"]
+        .as_array()
+        .unwrap();
+
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["id"], "call_a");
+    assert_eq!(calls[0]["function"]["arguments"], "{\"path\":\"a.txt\"}");
+}
+
+#[test]
+fn chat_completion_aggregation_treats_a_new_id_at_the_same_index_as_new_call() {
+    let mut accumulator = ChatCompletionAccumulator::default();
+    accumulator
+        .push_data(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":null}]}"#,
+        )
+        .unwrap();
+    accumulator
+        .push_data(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_b","function":{"name":"write_file","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+        )
+        .unwrap();
+
+    let completion = accumulator.finish("model").unwrap();
+    let calls = completion["choices"][0]["message"]["tool_calls"]
+        .as_array()
+        .unwrap();
+
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0]["id"], "call_a");
+    assert_eq!(calls[1]["id"], "call_b");
+}
+
+#[test]
+fn chat_completion_aggregation_keeps_sparse_parallel_ids_separate_in_one_frame() {
+    let mut accumulator = ChatCompletionAccumulator::default();
+    accumulator
+        .push_data(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read_file","arguments":"{}"}},{"index":3,"id":"call_b","function":{"name":"write_file","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+        )
+        .unwrap();
+
+    let completion = accumulator.finish("model").unwrap();
+    let calls = completion["choices"][0]["message"]["tool_calls"]
+        .as_array()
+        .unwrap();
+
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0]["id"], "call_a");
+    assert_eq!(calls[1]["id"], "call_b");
+}
+
+#[test]
 fn chat_completion_aggregation_preserves_content_parts_and_refusal() {
     let mut accumulator = ChatCompletionAccumulator::default();
     accumulator
@@ -1133,6 +1373,157 @@ fn chat_completion_aggregation_preserves_raw_function_arguments() {
         completion["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
         "{ \"b\": 2,\n  \"a\": \"x\" }"
     );
+}
+
+#[test]
+fn chat_completion_aggregation_keeps_the_first_finish_reason() {
+    let mut accumulator = ChatCompletionAccumulator::default();
+    accumulator
+        .push_data(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+        )
+        .unwrap();
+    accumulator
+        .push_data(r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#)
+        .unwrap();
+
+    let completion = accumulator.finish("model").unwrap();
+
+    assert_eq!(completion["choices"][0]["finish_reason"], "tool_calls");
+}
+
+#[test]
+fn chat_completion_aggregation_rejects_done_without_any_output() {
+    let mut accumulator = ChatCompletionAccumulator::default();
+    accumulator.push_data("[DONE]").unwrap();
+
+    let error = accumulator.finish("model").unwrap_err();
+
+    assert!(error.message.contains("没有有效输出"));
+}
+
+#[test]
+fn chat_completion_aggregation_rejects_output_without_finish_reason() {
+    let mut accumulator = ChatCompletionAccumulator::default();
+    accumulator
+        .push_data(
+            r#"{"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}"#,
+        )
+        .unwrap();
+    accumulator.push_data("[DONE]").unwrap();
+
+    let error = accumulator.finish("model").unwrap_err();
+
+    assert!(error.message.contains("缺少 finish_reason"));
+}
+
+#[test]
+fn chat_completion_aggregation_preserves_length_and_content_filter_terminals() {
+    for finish_reason in ["length", "content_filter"] {
+        let mut accumulator = ChatCompletionAccumulator::default();
+        accumulator
+            .push_data(&format!(
+                r#"{{"choices":[{{"index":0,"delta":{{"content":"partial"}},"finish_reason":"{finish_reason}"}}]}}"#
+            ))
+            .unwrap();
+
+        let completion = accumulator.finish("model").unwrap();
+
+        assert_eq!(completion["choices"][0]["finish_reason"], finish_reason);
+    }
+}
+
+#[test]
+fn chat_completion_aggregation_marks_valid_tool_output_as_tool_calls() {
+    let mut accumulator = ChatCompletionAccumulator::default();
+    accumulator
+        .push_data(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":"stop"}]}"#,
+        )
+        .unwrap();
+
+    let completion = accumulator.finish("model").unwrap();
+
+    assert_eq!(completion["choices"][0]["finish_reason"], "tool_calls");
+}
+
+#[test]
+fn chat_completion_aggregation_rejects_tool_terminal_without_a_tool_call() {
+    let mut accumulator = ChatCompletionAccumulator::default();
+    accumulator
+        .push_data(
+            r#"{"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"tool_calls"}]}"#,
+        )
+        .unwrap();
+
+    let error = accumulator.finish("model").unwrap_err();
+
+    assert_eq!(error.code, "incomplete_stream");
+    assert!(error.message.contains("tool_calls"));
+}
+
+#[test]
+fn chat_completion_aggregation_rejects_tool_calls_without_names() {
+    let mut accumulator = ChatCompletionAccumulator::default();
+    accumulator
+        .push_data(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+        )
+        .unwrap();
+
+    let error = accumulator.finish("model").unwrap_err();
+
+    assert!(error.message.contains("缺少函数名"));
+}
+
+#[test]
+fn chat_completion_aggregation_rejects_malformed_tool_arguments() {
+    let mut accumulator = ChatCompletionAccumulator::default();
+    accumulator
+        .push_data(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"lookup","arguments":"{\"path\":"}}]},"finish_reason":"tool_calls"}]}"#,
+        )
+        .unwrap();
+
+    let error = accumulator.finish("model").unwrap_err();
+
+    assert!(error.message.contains("参数不是合法 JSON"));
+}
+
+#[test]
+fn chat_completion_aggregation_normalizes_missing_or_whitespace_tool_arguments() {
+    for arguments in [None, Some(""), Some(" \n\t ")] {
+        let mut accumulator = ChatCompletionAccumulator::default();
+        let function = match arguments {
+            Some(arguments) => json!({"name": "lookup", "arguments": arguments}),
+            None => json!({"name": "lookup"}),
+        };
+        accumulator
+            .push_data(
+                &json!({
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call_a",
+                                "function": function
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+        let completion = accumulator.finish("model").unwrap();
+
+        assert_eq!(
+            completion["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+            "{}"
+        );
+    }
 }
 
 #[tokio::test]

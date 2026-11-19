@@ -191,8 +191,16 @@ pub(super) async fn handle_responses(
         let aggregate = aggregate_chat_stream(exchange.response, trace, status, &model);
         match tokio::time::timeout(state.non_stream_timeout, aggregate).await {
             Ok(Ok(chat)) => chat,
-            Ok(Err((status, code, message))) => {
-                return error_response_with_id(status, code, message, request_id)
+            Ok(Err(error)) => {
+                return error_response_with_details(
+                    error.status,
+                    error.code,
+                    error.message,
+                    error.error_type,
+                    error.param,
+                    error.retryable,
+                    request_id,
+                )
             }
             Err(_) => {
                 return error_response_with_id(
