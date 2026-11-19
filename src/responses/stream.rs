@@ -18,6 +18,7 @@ pub(super) struct CallTrack {
     custom: bool,
     tool_search: bool,
     arguments: String,
+    emitted_arguments_len: usize,
     extra_content: Option<Value>,
     output_index: usize,
     added: bool,
@@ -383,12 +384,32 @@ impl ResponsesStream {
                         })
                     }));
                 } else {
-                    let (arguments, repaired) = normalize_arguments(&call.arguments);
-                    let arguments = if incomplete_reason.is_some() && repaired {
-                        call.arguments.clone()
+                    let arguments = if call.arguments.trim().is_empty() {
+                        "{}".to_string()
                     } else {
-                        arguments
+                        call.arguments.clone()
                     };
+                    if call.emitted_arguments_len == 0 && call.arguments.trim().is_empty() {
+                        events.push(sse_event(
+                            "response.function_call_arguments.delta",
+                            json!({
+                                "type": "response.function_call_arguments.delta",
+                                "item_id": call.item_id,
+                                "output_index": call.output_index,
+                                "delta": "{}"
+                            }),
+                        ));
+                    } else if call.emitted_arguments_len < call.arguments.len() {
+                        events.push(sse_event(
+                            "response.function_call_arguments.delta",
+                            json!({
+                                "type": "response.function_call_arguments.delta",
+                                "item_id": call.item_id,
+                                "output_index": call.output_index,
+                                "delta": &call.arguments[call.emitted_arguments_len..]
+                            }),
+                        ));
+                    }
                     events.push(sse_event(
                         "response.function_call_arguments.done",
                         json!({
@@ -776,7 +797,7 @@ impl ResponsesStream {
                 "item": item
             }),
         )];
-        if !custom && !arguments.is_empty() {
+        if !custom && !arguments.trim().is_empty() {
             events.push(sse_event(
                 "response.function_call_arguments.delta",
                 json!({
@@ -786,6 +807,7 @@ impl ResponsesStream {
                     "delta": arguments
                 }),
             ));
+            state.emitted_arguments_len = state.arguments.len();
         }
         events
     }
@@ -802,6 +824,7 @@ impl ResponsesStream {
             custom: false,
             tool_search: false,
             arguments: String::new(),
+            emitted_arguments_len: 0,
             extra_content: None,
             output_index: 0,
             added: false,
@@ -838,16 +861,24 @@ impl ResponsesStream {
         let custom = state.custom;
 
         events.extend(self.flush_ready_calls());
-        if was_added && !arguments.is_empty() && !custom {
-            events.push(sse_event(
-                "response.function_call_arguments.delta",
-                json!({
-                    "type": "response.function_call_arguments.delta",
-                    "item_id": item_id,
-                    "output_index": output_index,
-                    "delta": arguments
-                }),
-            ));
+        if was_added && !custom {
+            let state = self
+                .calls
+                .get_mut(&tool_index)
+                .expect("added tool call state must remain available");
+            let pending = &state.arguments[state.emitted_arguments_len..];
+            if !pending.trim().is_empty() {
+                events.push(sse_event(
+                    "response.function_call_arguments.delta",
+                    json!({
+                        "type": "response.function_call_arguments.delta",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "delta": pending
+                    }),
+                ));
+                state.emitted_arguments_len = state.arguments.len();
+            }
         }
         events
     }

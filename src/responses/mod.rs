@@ -27,7 +27,6 @@ pub use response::{chat_to_responses, usage_to_responses};
 pub use stream::ResponsesStream;
 pub use tools::ToolShape;
 
-pub(crate) use canonical::canonical_json_string;
 pub(crate) use error::{normalize_chat_error, normalize_chat_error_text};
 pub(crate) use stream::reasoning_text;
 

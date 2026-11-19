@@ -44,6 +44,8 @@ agent 从云会话继承 `CNB_TOKEN`，只监听 loopback。客户端侧传入�
 
 CNB Chat 上游当前只接受流式请求。桌面网关会在发送前把合法 JSON 请求统一改为 `stream:true`：客户端使用 `stream:true` 时原样回传 SSE；使用 `stream:false` 或省略 `stream` 时，网关读取上游 SSE 并聚合为标准 `chat.completion` JSON。非流式响应会合并多个 choice、文本、`reasoning_content`、工具调用分片和 usage，并保留上游实际模型 ID。
 
+Responses 回译会保留上游合法 function arguments 的原始字节，流式 delta 拼接结果与 arguments done、output item 和最终 response 完全一致；无参数调用统一为 `{}`。无法由 Chat 表达的 hosted tool 会安全丢弃并在日志记录 `tools.ignored:<type>`，例如 `tools.ignored:web_search`。`custom_tool_call(apply_patch)` 的输入和输出不会增删换行；Codex 的 `apply_patch` 在更新文件时会按工具自身语义保证文件以 LF 结束，需要保留“文件末尾无换行”的任务应在补丁完成后单独处理。
+
 模型目录通过编译内置的 `resources/models.json` 提供。`deepseek-v4.1-flash` 声明文本/图像输入、流式输出、工具调用、reasoning summary 和 1,048,576 token 上下文；推理请求仍允许显式传入其它模型 ID。
 
 ## PromptGate 兼容层

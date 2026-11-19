@@ -157,13 +157,16 @@ fn translate_legacy_function_call(function_call: &Value) -> Option<Value> {
         .get("name")
         .and_then(Value::as_str)
         .filter(|name| !name.is_empty())?;
-    let (arguments, repaired) = normalize_arguments(
-        function_call
-            .get("arguments")
-            .and_then(Value::as_str)
-            .unwrap_or(""),
-    );
-    if repaired {
+    let raw_arguments = function_call
+        .get("arguments")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let arguments = if raw_arguments.trim().is_empty() {
+        "{}".to_string()
+    } else {
+        raw_arguments.to_string()
+    };
+    if !serde_json::from_str::<Value>(&arguments).is_ok_and(|value| value.is_object()) {
         return None;
     }
     Some(json!({
@@ -220,8 +223,12 @@ pub(super) fn translate_tool_call(call: &Value, shape: &ToolShape) -> Result<Val
             "input": custom_tool_input(arguments)
         }));
     }
-    let (arguments, repaired) = normalize_arguments(arguments);
-    if repaired {
+    let arguments = if arguments.trim().is_empty() {
+        "{}".to_string()
+    } else {
+        arguments.to_string()
+    };
+    if !serde_json::from_str::<Value>(&arguments).is_ok_and(|value| value.is_object()) {
         return Err(format!(
             "tool call arguments for {name} are not a JSON object"
         ));

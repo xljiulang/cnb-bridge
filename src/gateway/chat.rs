@@ -436,13 +436,7 @@ impl ChatCompletionAccumulator {
                                 let arguments = if tool.arguments.trim().is_empty() {
                                     "{}".to_string()
                                 } else {
-                                    serde_json::from_str::<Value>(&tool.arguments)
-                                        .ok()
-                                        .filter(Value::is_object)
-                                        .map(|value| {
-                                            crate::responses::canonical_json_string(&value)
-                                        })
-                                        .unwrap_or(tool.arguments)
+                                    tool.arguments
                                 };
                                 json!({
                                     "id": tool.id,

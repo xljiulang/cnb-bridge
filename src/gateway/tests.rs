@@ -921,6 +921,28 @@ fn chat_completion_aggregation_preserves_content_parts_and_refusal() {
     assert_eq!(content[1], json!({"type": "refusal", "refusal": "blocked"}));
 }
 
+#[test]
+fn chat_completion_aggregation_preserves_raw_function_arguments() {
+    let mut accumulator = ChatCompletionAccumulator::default();
+    accumulator
+        .push_data(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_raw","type":"function","function":{"name":"lookup","arguments":"{ \"b\": 2,"}}]},"finish_reason":null}]}"#,
+        )
+        .unwrap();
+    accumulator
+        .push_data(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\n  \"a\": \"x\" }"}}]},"finish_reason":"tool_calls"}]}"#,
+        )
+        .unwrap();
+
+    let completion = accumulator.finish("model").unwrap();
+
+    assert_eq!(
+        completion["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+        "{ \"b\": 2,\n  \"a\": \"x\" }"
+    );
+}
+
 #[tokio::test]
 async fn responses_stream_is_translated_and_logged_without_buffering() {
     let upstream = Router::new().route(
@@ -1090,6 +1112,41 @@ data: [DONE]
     );
     assert_eq!(payload["usage"]["input_tokens"], 2);
     assert_eq!(payload["usage"]["output_tokens"], 3);
+
+    gateway.stop().await;
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn non_stream_responses_preserve_raw_function_arguments() {
+    let (_temp, gateway, upstream_task) = gateway_with_static_responses_stream(
+        r#"data: {"id":"chatcmpl_raw","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_raw","type":"function","function":{"name":"lookup","arguments":"{ \"b\": 2,"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_raw","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\n  \"a\": \"x\" }"}}]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+"#,
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{}/v1/responses", gateway.port()))
+        .json(&json!({
+            "model": "model",
+            "input": "look it up",
+            "stream": false
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let payload: Value = response.json().await.unwrap();
+
+    assert_eq!(
+        payload["output"][0]["arguments"],
+        "{ \"b\": 2,\n  \"a\": \"x\" }"
+    );
 
     gateway.stop().await;
     upstream_task.abort();
@@ -1961,6 +2018,7 @@ async fn responses_logs_ignored_input_features() {
         .json(&json!({
             "model": "model",
             "input": [{ "type": "web_search_call" }],
+            "tools": [{ "type": "web_search" }],
             "stream": false
         }))
         .send()
@@ -1982,6 +2040,10 @@ async fn responses_logs_ignored_input_features() {
     assert!(
         logged.contains("input.item_degraded:web_search_call"),
         "missing detail: {logged}"
+    );
+    assert!(
+        logged.contains("tools.ignored:web_search"),
+        "missing tool detail: {logged}"
     );
     gateway.stop().await;
     upstream_task.abort();

@@ -326,6 +326,33 @@ fn restores_namespace_and_custom_tools_in_response() {
 }
 
 #[test]
+fn non_stream_function_arguments_preserve_raw_bytes() {
+    let raw_arguments = "{ \"b\": 2,\n  \"a\": \"x\" }";
+    let chat = json!({
+        "id": "chatcmpl-raw",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_raw",
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "arguments": raw_arguments
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+
+    let response = chat_to_responses(&chat, "model", &ToolShape::default()).unwrap();
+
+    assert_eq!(response["output"][0]["arguments"], raw_arguments);
+}
+
+#[test]
 fn non_stream_maps_content_parts_refusal_and_upstream_model() {
     let chat = json!({
         "id": "chatcmpl-parts",
@@ -390,6 +417,29 @@ fn non_stream_maps_legacy_function_call() {
         response["output"][0]["arguments"],
         "{\"path\":\"README.md\"}"
     );
+}
+
+#[test]
+fn non_stream_legacy_function_call_preserves_raw_arguments() {
+    let raw_arguments = "{ \"path\": \"README.md\" }";
+    let chat = json!({
+        "id": "chatcmpl-legacy-raw",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "function_call": {
+                    "name": "read_file",
+                    "arguments": raw_arguments
+                }
+            },
+            "finish_reason": "function_call"
+        }]
+    });
+
+    let response = chat_to_responses(&chat, "model", &ToolShape::default()).unwrap();
+
+    assert_eq!(response["output"][0]["arguments"], raw_arguments);
 }
 
 #[test]
@@ -699,6 +749,90 @@ fn streams_custom_tool_input_as_raw_text_after_complete_arguments() {
 }
 
 #[test]
+fn preserves_apply_patch_line_endings_in_stream_and_history() {
+    let patches = [
+        "*** Begin Patch\n*** Update File: note.txt\n@@\n-old\n+new\n*** End Patch\n",
+        "*** Begin Patch\n*** Update File: tail.txt\n@@\n last\n+end\n*** End of File\n*** End Patch\n",
+    ];
+    let request = json!({
+        "tools": [{
+            "type": "custom",
+            "name": "apply_patch"
+        }]
+    });
+
+    for (index, patch) in patches.iter().enumerate() {
+        let escaped_patch = serde_json::to_string(patch).unwrap();
+        let split = escaped_patch.len() / 2;
+        let arguments_left = format!("{{\"input\":{}", &escaped_patch[..split]);
+        let arguments_tail = format!("{}}}", &escaped_patch[split..]);
+        let mut stream = ResponsesStream::with_shape(
+            format!("resp_patch_{index}"),
+            "model".to_string(),
+            ToolShape::from_request(&request),
+        );
+        let mut events = stream.push(&json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": format!("call_patch_{index}"),
+                        "function": {
+                            "name": "apply_patch",
+                            "arguments": arguments_left
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }));
+        events.extend(stream.push(&json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            "arguments": arguments_tail
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        })));
+        events.extend(stream.finish());
+
+        let delta = named_events(&events, "response.custom_tool_call_input.delta");
+        let done = named_events(&events, "response.custom_tool_call_input.done");
+        let item = named_events(&events, "response.output_item.done");
+        assert_eq!(delta[0]["delta"], *patch);
+        assert_eq!(done[0]["input"], *patch);
+        assert_eq!(item[0]["item"]["input"], *patch);
+
+        let output =
+            "Exit code: 0\nWall time: 0 seconds\nOutput:\nSuccess. Updated the following files:\nM note.txt\n"
+                .to_string();
+        let history = json!({
+            "input": [{
+                "type": "custom_tool_call",
+                "call_id": format!("call_patch_{index}"),
+                "name": "apply_patch",
+                "input": patch
+            }, {
+                "type": "custom_tool_call_output",
+                "call_id": format!("call_patch_{index}"),
+                "output": output
+            }]
+        });
+        let chat = responses_to_chat(&history, false).unwrap();
+        let tool_call = &chat["messages"][0]["tool_calls"][0];
+        let function_arguments: Value =
+            serde_json::from_str(tool_call["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(function_arguments["input"], *patch);
+        assert_eq!(chat["messages"][1]["content"], output.as_str());
+    }
+}
+
+#[test]
 fn maps_empty_custom_tool_arguments_to_empty_input() {
     let request = json!({
         "tools": [{
@@ -872,6 +1006,140 @@ fn keeps_repeated_call_id_without_index_in_one_call() {
 }
 
 #[test]
+fn stream_function_arguments_preserve_raw_bytes_across_all_outputs() {
+    let raw_arguments = "{ \"b\": 2,\n  \"a\": \"x\" }";
+    let mut stream = ResponsesStream::new("resp_raw_arguments".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_raw",
+                    "function": {
+                        "name": "lookup",
+                        "arguments": "{ \"b\": 2,"
+                    }
+                }]
+            },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "function": {
+                        "arguments": "\n  \"a\": \"x\" }"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })));
+    events.extend(stream.finish());
+
+    let deltas = named_events(&events, "response.function_call_arguments.delta")
+        .into_iter()
+        .filter_map(|event| event["delta"].as_str().map(str::to_string))
+        .collect::<String>();
+    let done = named_events(&events, "response.function_call_arguments.done");
+    let item_done = named_events(&events, "response.output_item.done");
+    let completed = terminal_response(&events, "response.completed");
+
+    assert_eq!(deltas, raw_arguments);
+    assert_eq!(done[0]["arguments"], raw_arguments);
+    assert_eq!(item_done[0]["item"]["arguments"], raw_arguments);
+    assert_eq!(
+        completed["response"]["output"][0]["arguments"],
+        raw_arguments
+    );
+}
+
+#[test]
+fn stream_empty_function_arguments_emit_one_empty_object_delta() {
+    for raw_arguments in ["", "   "] {
+        let mut stream = ResponsesStream::new(
+            format!("resp_empty_arguments_{}", raw_arguments.len()),
+            "model".to_string(),
+        );
+        let mut events = stream.push(&json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_empty",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": raw_arguments
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }));
+        events.extend(stream.finish());
+
+        let deltas = named_events(&events, "response.function_call_arguments.delta");
+        let done = named_events(&events, "response.function_call_arguments.done");
+        let item_done = named_events(&events, "response.output_item.done");
+        let completed = terminal_response(&events, "response.completed");
+
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0]["delta"], "{}");
+        assert_eq!(done[0]["arguments"], "{}");
+        assert_eq!(item_done[0]["item"]["arguments"], "{}");
+        assert_eq!(completed["response"]["output"][0]["arguments"], "{}");
+    }
+}
+
+#[test]
+fn stream_function_arguments_flush_trailing_whitespace_before_done() {
+    let raw_arguments = "{ \"a\": 1 }\n";
+    let mut stream = ResponsesStream::new("resp_trailing_space".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_space",
+                    "function": {
+                        "name": "lookup",
+                        "arguments": "{ \"a\": 1 }"
+                    }
+                }]
+            },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "function": { "arguments": "\n" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })));
+    events.extend(stream.finish());
+
+    let deltas = named_events(&events, "response.function_call_arguments.delta")
+        .into_iter()
+        .filter_map(|event| event["delta"].as_str().map(str::to_string))
+        .collect::<String>();
+    let done = named_events(&events, "response.function_call_arguments.done");
+    let completed = terminal_response(&events, "response.completed");
+    assert_eq!(deltas, raw_arguments);
+    assert_eq!(done[0]["arguments"], raw_arguments);
+    assert_eq!(
+        completed["response"]["output"][0]["arguments"],
+        raw_arguments
+    );
+}
+
+#[test]
 fn repeated_tool_headers_do_not_erase_restored_namespace() {
     let request = json!({
         "tools": [{
@@ -984,6 +1252,71 @@ fn emits_sparse_tool_index_in_stable_output_order() {
 }
 
 #[test]
+fn parallel_function_arguments_preserve_per_call_byte_parity() {
+    let mut stream = ResponsesStream::new("resp_parallel_raw".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_a",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": "{ \"path\": \"a\""
+                    }
+                }, {
+                    "index": 2,
+                    "id": "call_b",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": "{ \"path\": \"b\""
+                    }
+                }]
+            },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "function": { "arguments": " }" }
+                }, {
+                    "index": 2,
+                    "function": { "arguments": " }" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })));
+    events.extend(stream.finish());
+
+    let done = named_events(&events, "response.function_call_arguments.done");
+    let items = named_events(&events, "response.output_item.done");
+    let completed = terminal_response(&events, "response.completed");
+    for output_index in 0usize..2 {
+        let expected = if output_index == 0 {
+            "{ \"path\": \"a\" }"
+        } else {
+            "{ \"path\": \"b\" }"
+        };
+        let deltas = named_events(&events, "response.function_call_arguments.delta")
+            .into_iter()
+            .filter(|event| event["output_index"].as_u64() == Some(output_index as u64))
+            .filter_map(|event| event["delta"].as_str().map(str::to_string))
+            .collect::<String>();
+        assert_eq!(deltas, expected);
+        assert_eq!(done[output_index]["arguments"], expected);
+        assert_eq!(items[output_index]["item"]["arguments"], expected);
+        assert_eq!(
+            completed["response"]["output"][output_index]["arguments"],
+            expected
+        );
+    }
+}
+
+#[test]
 fn synthesizes_call_id_when_chat_tool_call_omits_it() {
     let mut stream = ResponsesStream::new("resp_missing_id".to_string(), "model".to_string());
     let mut events = stream.push(&json!({
@@ -1026,12 +1359,19 @@ fn truncated_tool_arguments_are_incomplete_not_failed() {
     }));
     events.extend(stream.finish());
 
+    let deltas = named_events(&events, "response.function_call_arguments.delta")
+        .into_iter()
+        .filter_map(|event| event["delta"].as_str().map(str::to_string))
+        .collect::<String>();
+    let done = named_events(&events, "response.function_call_arguments.done");
     let incomplete = terminal_response(&events, "response.incomplete");
     assert_eq!(incomplete["response"]["status"], "incomplete");
     assert_eq!(
         incomplete["response"]["output"][0]["arguments"],
         "{\"path\":"
     );
+    assert_eq!(deltas, "{\"path\":");
+    assert_eq!(done[0]["arguments"], "{\"path\":");
     assert!(named_events(&events, "response.failed").is_empty());
 }
 
@@ -1866,6 +2206,42 @@ fn reports_duplicate_flat_tool_names() {
 
     assert!(
         details.contains(&"tools.duplicate:ns__exec kept=top dropped=additional_tools".to_string()),
+        "{details:?}"
+    );
+}
+
+#[test]
+fn reports_and_drops_hosted_web_search_from_every_tool_carrier() {
+    let request = json!({
+        "tools": [{
+            "type": "web_search",
+            "external_web_access": true
+        }],
+        "input": [{
+            "type": "additional_tools",
+            "tools": [{
+                "type": "web_search",
+                "external_web_access": false
+            }]
+        }, {
+            "type": "tool_search_output",
+            "tools": [{
+                "type": "web_search",
+                "external_web_access": true
+            }]
+        }]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let details = ignored_feature_details(&request);
+
+    assert!(chat["tools"].as_array().is_none_or(Vec::is_empty));
+    assert_eq!(
+        details
+            .iter()
+            .filter(|detail| detail.as_str() == "tools.ignored:web_search")
+            .count(),
+        1,
         "{details:?}"
     );
 }

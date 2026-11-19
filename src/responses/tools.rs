@@ -93,6 +93,7 @@ fn absorb_tools(
                 let mut kept = Vec::new();
                 for child in children {
                     let Some(name) = tool_name(child) else {
+                        note_unnamed_tool(child, declared);
                         continue;
                     };
                     if admit(
@@ -118,6 +119,7 @@ fn absorb_tools(
             }
             _ => {
                 let Some(name) = tool_name(tool) else {
+                    note_unnamed_tool(tool, declared);
                     continue;
                 };
                 if admit(name, source, seen, declared) {
@@ -125,6 +127,16 @@ fn absorb_tools(
                 }
             }
         }
+    }
+}
+
+fn note_unnamed_tool(tool: &Value, declared: &mut DeclaredTools) {
+    if let Some(kind) = tool
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|kind| !kind.is_empty())
+    {
+        declared.notes.push(format!("tools.ignored:{kind}"));
     }
 }
 
