@@ -19,11 +19,7 @@ pub fn chat_to_responses(chat: &Value, model: &str, shape: &ToolShape) -> Result
             .get("finish_reason")
             .and_then(Value::as_str)
             .map(str::to_string);
-        if let Some(reasoning) = message
-            .get("reasoning_content")
-            .and_then(Value::as_str)
-            .filter(|text| !text.is_empty())
-        {
+        if let Some(reasoning) = reasoning_text(&message) {
             output.push(json!({
                 "id": gen_id("rs"),
                 "type": "reasoning",

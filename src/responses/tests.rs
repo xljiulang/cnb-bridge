@@ -1,3 +1,4 @@
+use super::request::HANDLED_INPUT_TYPES;
 use super::*;
 use bytes::Bytes;
 use serde_json::json;
@@ -589,4 +590,215 @@ fn leaves_tool_output_without_media_unchanged() {
 
     assert_eq!(roles(messages), ["assistant", "tool"]);
     assert_eq!(messages[1]["content"], "ok");
+}
+
+#[test]
+fn keeps_first_declaration_when_flat_tool_names_collide() {
+    // `ns` + `exec` and the bare function `ns_exec` flatten to the same Chat
+    // name. The first declaration is what the upstream is told about, so the
+    // losing one must not reach the tool list.
+    let request = json!({
+        "model": "model",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "hi" }]
+        }],
+        "tools": [{
+            "type": "namespace",
+            "name": "ns",
+            "tools": [{
+                "type": "function",
+                "name": "exec",
+                "description": "from namespace",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "cmd": { "type": "string" } }
+                }
+            }]
+        }, {
+            "type": "function",
+            "name": "ns_exec",
+            "description": "from top level",
+            "parameters": { "type": "object", "properties": {} }
+        }]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let tools = chat["tools"].as_array().unwrap();
+
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["function"]["name"], "ns_exec");
+    assert_eq!(tools[0]["function"]["description"], "from namespace");
+    assert!(tools[0]["function"]["parameters"]["properties"]["cmd"].is_object());
+}
+
+#[test]
+fn reverse_maps_only_surviving_flat_tool_names() {
+    let namespace_first = json!({
+        "tools": [{
+            "type": "namespace",
+            "name": "ns",
+            "tools": [{ "type": "function", "name": "exec" }]
+        }, {
+            "type": "function",
+            "name": "ns_exec"
+        }]
+    });
+    let shape = ToolShape::from_request(&namespace_first);
+    assert_eq!(
+        shape.resolve("ns_exec"),
+        ("exec".to_string(), Some("ns".to_string()))
+    );
+
+    let function_first = json!({
+        "tools": [{
+            "type": "function",
+            "name": "ns_exec"
+        }, {
+            "type": "namespace",
+            "name": "ns",
+            "tools": [{ "type": "function", "name": "exec" }]
+        }]
+    });
+    let shape = ToolShape::from_request(&function_first);
+    assert_eq!(shape.resolve("ns_exec"), ("ns_exec".to_string(), None));
+}
+
+#[test]
+fn reports_duplicate_flat_tool_names() {
+    let request = json!({
+        "tools": [{
+            "type": "function",
+            "name": "ns_exec"
+        }],
+        "input": [{
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{
+                "type": "namespace",
+                "name": "ns",
+                "tools": [{ "type": "function", "name": "exec" }]
+            }]
+        }]
+    });
+
+    let details = ignored_feature_details(&request);
+
+    assert!(
+        details.contains(&"tools.duplicate:ns_exec kept=top dropped=additional_tools".to_string()),
+        "{details:?}"
+    );
+}
+
+#[test]
+fn reads_reasoning_from_reasoning_details() {
+    assert_eq!(
+        reasoning_text(&json!({ "reasoning_details": [{ "text": "think" }] })),
+        Some("think")
+    );
+    assert_eq!(
+        reasoning_text(&json!({ "reasoning_details": [{ "summary": "short" }] })),
+        Some("short")
+    );
+    // The explicit field still wins when both are present.
+    assert_eq!(
+        reasoning_text(&json!({
+            "reasoning_content": "primary",
+            "reasoning_details": [{ "text": "secondary" }]
+        })),
+        Some("primary")
+    );
+}
+
+#[test]
+fn non_stream_message_reads_reasoning_details() {
+    let chat = json!({
+        "id": "chatcmpl-1",
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": "done",
+                "reasoning_details": [{ "text": "because" }]
+            }
+        }]
+    });
+
+    let response = chat_to_responses(&chat, "model", &ToolShape::default()).unwrap();
+
+    assert_eq!(response["output"][0]["type"], "reasoning");
+    assert_eq!(response["output"][0]["summary"][0]["text"], "because");
+}
+
+#[test]
+fn reports_ignored_input_items_and_content_parts() {
+    let request = json!({
+        "input": [
+            { "type": "web_search_call" },
+            "not-an-object",
+            { "no_type": true },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    { "type": "input_audio", "input_audio": { "data": "x" } },
+                    { "type": "input_text", "text": "kept" }
+                ]
+            },
+            { "type": "web_search_call" }
+        ]
+    });
+
+    let details = ignored_feature_details(&request);
+
+    assert_eq!(
+        details,
+        [
+            "content.part:input_audio",
+            "input.item:non_object",
+            "input.item:none",
+            "input.item:web_search_call"
+        ]
+    );
+}
+
+#[test]
+fn reports_nothing_for_fully_translated_request() {
+    let request = json!({
+        "instructions": "be brief",
+        "input": [
+            { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "hi" }] },
+            { "type": "reasoning", "summary": [{ "type": "summary_text", "text": "thinking" }] },
+            { "type": "function_call", "call_id": "c1", "name": "read", "arguments": "{}" },
+            { "type": "function_call_output", "call_id": "c1", "output": "ok" },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "done" }]
+            }
+        ],
+        "tools": [{
+            "type": "namespace",
+            "name": "ns",
+            "tools": [{ "type": "function", "name": "exec" }]
+        }]
+    });
+
+    assert_eq!(ignored_feature_details(&request), Vec::<String>::new());
+}
+
+#[test]
+fn handled_input_types_stay_in_sync() {
+    for name in HANDLED_INPUT_TYPES {
+        let request = json!({ "input": [{ "type": name, "role": "user", "content": [] }] });
+        let details = ignored_feature_details(&request);
+
+        assert!(
+            !details
+                .iter()
+                .any(|detail| detail == &format!("input.item:{name}")),
+            "handled type {name} is reported as dropped: {details:?}"
+        );
+    }
 }

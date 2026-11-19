@@ -536,7 +536,13 @@ impl ResponsesStream {
     }
 }
 
-pub(super) fn reasoning_text(delta: &Value) -> Option<&str> {
+/// Extracts reasoning text from a Chat delta or message.
+///
+/// Upstreams disagree on the field: `reasoning_content` (DeepSeek, Kimi),
+/// `reasoning` (OpenRouter) or `reasoning_details[].text` (aggregated
+/// providers). Both the streaming translator and the non-streaming aggregator
+/// use this so the two paths cannot drift apart.
+pub(crate) fn reasoning_text(delta: &Value) -> Option<&str> {
     delta
         .get("reasoning_content")
         .and_then(Value::as_str)

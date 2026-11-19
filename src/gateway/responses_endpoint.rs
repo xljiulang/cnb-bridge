@@ -43,6 +43,17 @@ pub(super) async fn handle_responses(
             ),
         );
     }
+    let ignored = ignored_feature_details(&request);
+    if !ignored.is_empty() {
+        state.logger.log(
+            "warn",
+            format!(
+                "responses.compat.ignored count={} details={}",
+                ignored.len(),
+                ignored.join(",")
+            ),
+        );
+    }
     let stream = request
         .get("stream")
         .and_then(Value::as_bool)

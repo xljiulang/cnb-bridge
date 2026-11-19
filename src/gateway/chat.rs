@@ -405,16 +405,7 @@ impl ChatCompletionAccumulator {
 }
 
 pub(super) fn aggregate_reasoning_text(delta: &Value) -> Option<&str> {
-    delta
-        .get("reasoning_content")
-        .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
-        .or_else(|| {
-            delta
-                .get("reasoning")
-                .and_then(Value::as_str)
-                .filter(|text| !text.is_empty())
-        })
+    crate::responses::reasoning_text(delta)
 }
 
 pub(super) fn aggregate_response_too_large(current: usize, additional: usize) -> bool {

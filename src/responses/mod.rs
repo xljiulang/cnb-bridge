@@ -8,16 +8,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const MISSING_TOOL_OUTPUT: &str =
     "Tool output was missing from conversation history and has been replaced by the proxy.";
 
+mod diagnostics;
 mod media;
 mod request;
 mod response;
 mod stream;
 mod tools;
 
+pub use diagnostics::ignored_feature_details;
 pub use request::{responses_to_chat, unsupported_feature_names};
 pub use response::{chat_to_responses, usage_to_responses};
 pub use stream::ResponsesStream;
 pub use tools::ToolShape;
+
+pub(crate) use stream::reasoning_text;
 
 use media::*;
 use response::*;

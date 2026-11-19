@@ -29,8 +29,9 @@ pub fn responses_to_chat(request: &Value, want_stream: bool) -> Result<Value, St
         "messages": messages,
         "stream": want_stream
     });
-    if let Some(tools) = request.get("tools").and_then(Value::as_array) {
-        let translated = translate_tools(tools);
+    let declared = collect_declared_tools(request);
+    if !declared.tools.is_empty() {
+        let translated = translate_tools(&declared.tools);
         if !translated.is_empty() {
             chat["tools"] = Value::Array(translated);
         }
@@ -94,6 +95,24 @@ pub fn unsupported_feature_names(request: &Value) -> Vec<&'static str> {
         features.push("input.items");
     }
     features
+}
+
+/// Input item types `translate_input_items` knows how to carry.
+///
+/// Diagnostics compares against this list, and a table-driven test keeps it in
+/// sync with the `match` arms so a newly handled item cannot keep being
+/// reported as dropped.
+pub(super) const HANDLED_INPUT_TYPES: &[&str] = &[
+    "message",
+    "reasoning",
+    "function_call",
+    "custom_tool_call",
+    "function_call_output",
+    "custom_tool_call_output",
+];
+
+pub(super) fn is_handled_input_type(name: &str) -> bool {
+    HANDLED_INPUT_TYPES.contains(&name)
 }
 
 pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) {

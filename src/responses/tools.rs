@@ -6,13 +6,148 @@ pub struct ToolShape {
     pub(super) custom: HashSet<String>,
 }
 
+/// Tool declarations after deduplication by their flattened Chat name.
+///
+/// `translate_tools` (what the upstream is told) and `ToolShape` (how call
+/// names are mapped back) both read this so they cannot disagree about which
+/// declaration won a name collision.
+#[derive(Default)]
+pub(super) struct DeclaredTools {
+    /// Deduplicated declarations in request order. Never reordered: the prompt
+    /// prefix must stay byte-stable for upstream prefix caching.
+    pub(super) tools: Vec<Value>,
+    /// Name collisions and unrecognized carriers, surfaced by diagnostics.
+    pub(super) notes: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolSource {
+    TopLevel,
+    AdditionalTools,
+    ToolSearchOutput,
+}
+
+impl ToolSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::TopLevel => "top",
+            Self::AdditionalTools => "additional_tools",
+            Self::ToolSearchOutput => "tool_search_output",
+        }
+    }
+}
+
+/// Collects every tool a request declares: the top-level `tools` array first,
+/// then carriers embedded in `input`.
+///
+/// Top-level declarations win over carriers, and earlier carriers win over
+/// later ones. Dropped declarations are recorded in `notes` instead of being
+/// silently merged, because the response side must never resolve a call name
+/// back to a declaration the upstream was not given.
+pub(super) fn collect_declared_tools(request: &Value) -> DeclaredTools {
+    let mut declared = DeclaredTools::default();
+    let mut seen: HashMap<String, ToolSource> = HashMap::new();
+    if let Some(tools) = request.get("tools").and_then(Value::as_array) {
+        absorb_tools(ToolSource::TopLevel, tools, &mut seen, &mut declared);
+    }
+    if let Some(items) = request.get("input").and_then(Value::as_array) {
+        for item in items {
+            let source = match item.get("type").and_then(Value::as_str) {
+                Some("additional_tools") => ToolSource::AdditionalTools,
+                Some("tool_search_output") => ToolSource::ToolSearchOutput,
+                _ => continue,
+            };
+            if let Some(tools) = item.get("tools").and_then(Value::as_array) {
+                absorb_tools(source, tools, &mut seen, &mut declared);
+            }
+        }
+    }
+    declared
+}
+
+fn absorb_tools(
+    source: ToolSource,
+    tools: &[Value],
+    seen: &mut HashMap<String, ToolSource>,
+    declared: &mut DeclaredTools,
+) {
+    for tool in tools {
+        match tool.get("type").and_then(Value::as_str) {
+            Some("namespace") => {
+                let Some(namespace) = tool.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(children) = tool.get("tools").and_then(Value::as_array) else {
+                    continue;
+                };
+                let mut kept = Vec::new();
+                for child in children {
+                    let Some(name) = child.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    if admit(
+                        &flat_namespace_name(namespace, name),
+                        source,
+                        seen,
+                        declared,
+                    ) {
+                        kept.push(child.clone());
+                    }
+                }
+                if kept.is_empty() {
+                    continue;
+                }
+                let mut clone = tool.clone();
+                clone["tools"] = Value::Array(kept);
+                declared.tools.push(clone);
+            }
+            Some("tool_search") => {
+                // Codex routes tool calls by item variant, so exposing a
+                // `tool_search` function without restoring `tool_search_call`
+                // would hand the client a name it cannot dispatch.
+                declared
+                    .notes
+                    .push("tools.untracked:tool_search".to_string());
+            }
+            _ => {
+                let Some(name) = tool.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                if admit(name, source, seen, declared) {
+                    declared.tools.push(tool.clone());
+                }
+            }
+        }
+    }
+}
+
+fn admit(
+    flat: &str,
+    source: ToolSource,
+    seen: &mut HashMap<String, ToolSource>,
+    declared: &mut DeclaredTools,
+) -> bool {
+    if let Some(kept) = seen.get(flat) {
+        declared.notes.push(format!(
+            "tools.duplicate:{flat} kept={} dropped={}",
+            kept.label(),
+            source.label()
+        ));
+        return false;
+    }
+    seen.insert(flat.to_string(), source);
+    true
+}
+
 impl ToolShape {
     /// Builds the request-local tool shape from Responses declarations.
     pub fn from_request(request: &Value) -> Self {
+        Self::from_declared(&collect_declared_tools(request).tools)
+    }
+
+    /// Builds the reverse map from declarations the upstream was actually given.
+    pub(super) fn from_declared(tools: &[Value]) -> Self {
         let mut shape = Self::default();
-        let Some(tools) = request.get("tools").and_then(Value::as_array) else {
-            return shape;
-        };
         for tool in tools {
             match tool.get("type").and_then(Value::as_str) {
                 Some("namespace") => {
@@ -26,10 +161,10 @@ impl ToolShape {
                         let Some(name) = child.get("name").and_then(Value::as_str) else {
                             continue;
                         };
-                        shape.namespaces.insert(
-                            flat_namespace_name(namespace, name),
-                            (namespace.to_string(), name.to_string()),
-                        );
+                        shape
+                            .namespaces
+                            .entry(flat_namespace_name(namespace, name))
+                            .or_insert_with(|| (namespace.to_string(), name.to_string()));
                     }
                 }
                 Some("custom") => {

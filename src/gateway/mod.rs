@@ -6,7 +6,8 @@ use crate::logging::Logger;
 use crate::model_catalog;
 use crate::prompt_gate::{apply_headers, detect_gate_block, normalize_chat, GateReport};
 use crate::responses::{
-    chat_to_responses, responses_to_chat, unsupported_feature_names, ResponsesStream, ToolShape,
+    chat_to_responses, ignored_feature_details, responses_to_chat, unsupported_feature_names,
+    ResponsesStream, ToolShape,
 };
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
