@@ -9,6 +9,7 @@ const MISSING_TOOL_OUTPUT: &str =
     "Tool output was missing from conversation history and has been replaced by the proxy.";
 
 mod diagnostics;
+mod inline_think;
 mod media;
 mod request;
 mod response;
@@ -23,6 +24,7 @@ pub use tools::ToolShape;
 
 pub(crate) use stream::reasoning_text;
 
+use inline_think::*;
 use media::*;
 use response::*;
 use stream::*;

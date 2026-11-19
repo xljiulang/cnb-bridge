@@ -17,6 +17,7 @@ pub(super) struct CallTrack {
     namespace: Option<String>,
     custom: bool,
     arguments: String,
+    extra_content: Option<Value>,
     output_index: usize,
     added: bool,
 }
@@ -25,11 +26,13 @@ pub(super) struct CallTrack {
 pub struct ResponsesStream {
     response_id: String,
     model: String,
+    created_at: u64,
     shape: ToolShape,
     created: bool,
     next_index: usize,
     reasoning: Option<TextTrack>,
     text: Option<TextTrack>,
+    inline_think: InlineThinkSplitter,
     calls: BTreeMap<usize, CallTrack>,
     next_call_key_to_add: usize,
     output: Vec<Value>,
@@ -50,11 +53,13 @@ impl ResponsesStream {
         Self {
             response_id,
             model,
+            created_at: unix_now(),
             shape,
             created: false,
             next_index: 0,
             reasoning: None,
             text: None,
+            inline_think: InlineThinkSplitter::default(),
             calls: BTreeMap::new(),
             next_call_key_to_add: 0,
             output: Vec::new(),
@@ -69,6 +74,27 @@ impl ResponsesStream {
     pub fn push(&mut self, chunk: &Value) -> Vec<Bytes> {
         if self.finished {
             return Vec::new();
+        }
+        if let Some(id) = chunk
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            self.response_id = if id.starts_with("resp_") {
+                id.to_string()
+            } else {
+                format!("resp_{}", id.strip_prefix("chatcmpl-").unwrap_or(id))
+            };
+        }
+        if let Some(model) = chunk
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.is_empty())
+        {
+            self.model = model.to_string();
+        }
+        if let Some(created) = chunk.get("created").and_then(Value::as_u64) {
+            self.created_at = created;
         }
         let mut events = self.ensure_created();
         if let Some(error) = chunk.get("error").filter(|value| !value.is_null()) {
@@ -88,10 +114,11 @@ impl ResponsesStream {
             }
             if let Some(content) = delta.get("content").and_then(Value::as_str) {
                 if !content.is_empty() {
-                    events.extend(self.text_delta(content));
+                    events.extend(self.inline_content_delta(content));
                 }
             }
             if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                events.extend(self.flush_inline_think());
                 for call in calls {
                     events.extend(self.tool_delta(call));
                 }
@@ -114,6 +141,7 @@ impl ResponsesStream {
         }
         self.finished = true;
         let mut events = self.ensure_created();
+        events.extend(self.flush_inline_think());
         if let Some(track) = self.reasoning.take() {
             events.push(sse_event(
                 "response.reasoning_summary_text.done",
@@ -214,8 +242,24 @@ impl ResponsesStream {
             events.extend(self.add_call_events(key));
         }
 
-        let incomplete = self.finish_reason.as_deref() == Some("length");
-        if self.failure.is_none() && !incomplete {
+        let missing_finish = self.finish_reason.is_none();
+        if self.failure.is_none()
+            && missing_finish
+            && self.output.is_empty()
+            && self.calls.is_empty()
+        {
+            self.failure = Some((
+                "incomplete_stream".to_string(),
+                "upstream stream ended without output or finish_reason".to_string(),
+            ));
+        }
+        let incomplete_reason = match self.finish_reason.as_deref() {
+            Some("length") => Some("max_output_tokens"),
+            Some("content_filter" | "sensitive") => Some("content_filter"),
+            None if self.failure.is_none() => Some("max_output_tokens"),
+            _ => None,
+        };
+        if self.failure.is_none() && incomplete_reason.is_none() {
             for call in self.calls.values() {
                 if call.display_name.is_empty() {
                     self.failure = Some((
@@ -275,7 +319,7 @@ impl ResponsesStream {
                     }));
                 } else {
                     let (arguments, repaired) = normalize_arguments(&call.arguments);
-                    let arguments = if incomplete && repaired {
+                    let arguments = if incomplete_reason.is_some() && repaired {
                         call.arguments.clone()
                     } else {
                         arguments
@@ -300,6 +344,9 @@ impl ResponsesStream {
                     if let Some(namespace) = call.namespace {
                         item["namespace"] = json!(namespace);
                     }
+                    if let Some(extra_content) = call.extra_content {
+                        item["extra_content"] = extra_content;
+                    }
                     events.push(sse_event(
                         "response.output_item.done",
                         {
@@ -318,6 +365,7 @@ impl ResponsesStream {
                     "response": {
                         "id": self.response_id,
                         "object": "response",
+                        "created_at": self.created_at,
                         "status": "failed",
                         "model": self.model,
                         "output": self.output,
@@ -330,7 +378,7 @@ impl ResponsesStream {
                     }
                 }),
             )
-        } else if self.finish_reason.as_deref() == Some("length") {
+        } else if let Some(reason) = incomplete_reason {
             sse_event(
                 "response.incomplete",
                 json!({
@@ -338,11 +386,12 @@ impl ResponsesStream {
                     "response": {
                         "id": self.response_id,
                         "object": "response",
+                        "created_at": self.created_at,
                         "status": "incomplete",
                         "model": self.model,
                         "output": self.output,
                         "error": null,
-                        "incomplete_details": { "reason": "max_output_tokens" },
+                        "incomplete_details": { "reason": reason },
                         "usage": usage_to_responses(self.usage.as_ref())
                     }
                 }),
@@ -355,6 +404,7 @@ impl ResponsesStream {
                     "response": {
                         "id": self.response_id,
                         "object": "response",
+                        "created_at": self.created_at,
                         "status": "completed",
                         "model": self.model,
                         "output": self.output,
@@ -382,21 +432,50 @@ impl ResponsesStream {
             return Vec::new();
         }
         self.created = true;
-        vec![sse_event(
-            "response.created",
-            json!({
-                "type": "response.created",
-                "response": {
-                    "id": self.response_id,
-                    "object": "response",
-                    "created_at": unix_now(),
-                    "status": "in_progress",
-                    "model": self.model,
-                    "output": [],
-                    "error": null
-                }
-            }),
-        )]
+        let response = json!({
+            "id": self.response_id,
+            "object": "response",
+            "created_at": self.created_at,
+            "status": "in_progress",
+            "model": self.model,
+            "output": [],
+            "error": null
+        });
+        vec![
+            sse_event(
+                "response.created",
+                json!({ "type": "response.created", "response": response }),
+            ),
+            sse_event(
+                "response.in_progress",
+                json!({ "type": "response.in_progress", "response": response }),
+            ),
+        ]
+    }
+
+    fn inline_content_delta(&mut self, delta: &str) -> Vec<Bytes> {
+        let (thinking, text) = self.inline_think.push(delta);
+        self.emit_inline_think_parts(thinking, text)
+    }
+
+    fn flush_inline_think(&mut self) -> Vec<Bytes> {
+        let (thinking, text) = self.inline_think.flush();
+        self.emit_inline_think_parts(thinking, text)
+    }
+
+    fn emit_inline_think_parts(
+        &mut self,
+        thinking: Option<String>,
+        text: Option<String>,
+    ) -> Vec<Bytes> {
+        let mut events = Vec::new();
+        if let Some(thinking) = thinking {
+            events.extend(self.reasoning_delta(&thinking));
+        }
+        if let Some(text) = text {
+            events.extend(self.text_delta(&text));
+        }
+        events
     }
 
     fn reasoning_delta(&mut self, delta: &str) -> Vec<Bytes> {
@@ -549,6 +628,7 @@ impl ResponsesStream {
         let raw_name = state.display_name.clone();
         let call_id = state.call_id.clone();
         let arguments = state.arguments.clone();
+        let extra_content = state.extra_content.clone();
         let (display_name, namespace) = self.shape.resolve(&raw_name);
         let custom = self.shape.is_custom(&display_name);
         let output_index = self.next_index;
@@ -586,6 +666,9 @@ impl ResponsesStream {
             if let Some(namespace) = namespace {
                 item["namespace"] = json!(namespace);
             }
+            if let Some(extra_content) = extra_content {
+                item["extra_content"] = extra_content;
+            }
             item
         };
 
@@ -622,6 +705,7 @@ impl ResponsesStream {
             namespace: None,
             custom: false,
             arguments: String::new(),
+            extra_content: None,
             output_index: 0,
             added: false,
         });
@@ -640,6 +724,12 @@ impl ResponsesStream {
             {
                 state.display_name = name.to_string();
             }
+        }
+        if let Some(extra) = call
+            .get("extra_content")
+            .filter(|value| value.as_object().is_some_and(|extra| !extra.is_empty()))
+        {
+            state.extra_content = Some(extra.clone());
         }
         let arguments = call
             .pointer("/function/arguments")

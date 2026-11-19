@@ -134,6 +134,94 @@ fn restores_namespace_and_custom_tools_in_response() {
 }
 
 #[test]
+fn non_stream_maps_content_parts_refusal_and_upstream_model() {
+    let chat = json!({
+        "id": "chatcmpl-parts",
+        "created": 42,
+        "model": "upstream-model",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": [
+                    { "type": "text", "text": "hello" },
+                    { "type": "refusal", "refusal": "blocked" }
+                ]
+            },
+            "finish_reason": "stop"
+        }]
+    });
+
+    let response = chat_to_responses(&chat, "requested-model", &ToolShape::default()).unwrap();
+
+    assert_eq!(response["id"], "resp_parts");
+    assert_eq!(response["created_at"], 42);
+    assert_eq!(response["model"], "upstream-model");
+    assert_eq!(
+        response["output"][0]["content"][0],
+        json!({
+            "type": "output_text",
+            "text": "hello",
+            "annotations": []
+        })
+    );
+    assert_eq!(
+        response["output"][0]["content"][1],
+        json!({
+            "type": "refusal",
+            "refusal": "blocked"
+        })
+    );
+}
+
+#[test]
+fn non_stream_maps_legacy_function_call() {
+    let chat = json!({
+        "id": "chatcmpl-legacy",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "function_call": {
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"README.md\"}"
+                }
+            },
+            "finish_reason": "function_call"
+        }]
+    });
+
+    let response = chat_to_responses(&chat, "model", &ToolShape::default()).unwrap();
+
+    assert_eq!(response["output"][0]["type"], "function_call");
+    assert_eq!(response["output"][0]["name"], "read_file");
+    assert_eq!(
+        response["output"][0]["arguments"],
+        "{\"path\":\"README.md\"}"
+    );
+}
+
+#[test]
+fn non_stream_splits_inline_think_from_content() {
+    let chat = json!({
+        "id": "chatcmpl-think",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "<think>check files</think>\nDone."
+            },
+            "finish_reason": "stop"
+        }]
+    });
+
+    let response = chat_to_responses(&chat, "model", &ToolShape::default()).unwrap();
+
+    assert_eq!(response["output"][0]["type"], "reasoning");
+    assert_eq!(response["output"][0]["summary"][0]["text"], "check files");
+    assert_eq!(response["output"][1]["type"], "message");
+    assert_eq!(response["output"][1]["content"][0]["text"], "Done.");
+}
+
+#[test]
 fn preserves_completion_metadata_and_incomplete_status() {
     let chat = json!({
         "id": "chatcmpl-meta",
@@ -154,6 +242,37 @@ fn preserves_completion_metadata_and_incomplete_status() {
         "max_output_tokens"
     );
     assert_eq!(response["system_fingerprint"], "fp_1");
+}
+
+#[test]
+fn non_stream_missing_finish_with_output_is_incomplete() {
+    let chat = json!({
+        "id": "chatcmpl-no-finish",
+        "choices": [{
+            "message": { "role": "assistant", "content": "partial" },
+            "finish_reason": null
+        }]
+    });
+
+    let response = chat_to_responses(&chat, "model", &ToolShape::default()).unwrap();
+
+    assert_eq!(response["status"], "incomplete");
+    assert_eq!(response["output"][0]["content"][0]["text"], "partial");
+}
+
+#[test]
+fn non_stream_missing_finish_without_output_fails() {
+    let chat = json!({
+        "id": "chatcmpl-empty",
+        "choices": [{
+            "message": { "role": "assistant", "content": null },
+            "finish_reason": null
+        }]
+    });
+
+    let error = chat_to_responses(&chat, "model", &ToolShape::default()).unwrap_err();
+
+    assert!(error.contains("finish_reason"));
 }
 
 #[test]
@@ -206,6 +325,7 @@ fn streams_text_and_terminal_events_in_order() {
         names,
         vec![
             "response.created",
+            "response.in_progress",
             "response.output_item.added",
             "response.content_part.added",
             "response.output_text.delta",
@@ -217,6 +337,59 @@ fn streams_text_and_terminal_events_in_order() {
     );
     assert!(joined.contains("\"input_tokens\":3"));
     assert!(joined.contains("\"output_tokens\":2"));
+}
+
+#[test]
+fn stream_uses_upstream_metadata_and_emits_in_progress() {
+    let mut stream =
+        ResponsesStream::new("resp_requested".to_string(), "requested-model".to_string());
+    let mut events = stream.push(&json!({
+        "id": "chatcmpl-upstream",
+        "created": 42,
+        "model": "upstream-model",
+        "choices": [{
+            "delta": { "content": "hello" },
+            "finish_reason": "stop"
+        }]
+    }));
+    events.extend(stream.finish());
+
+    let created = named_events(&events, "response.created");
+    let in_progress = named_events(&events, "response.in_progress");
+    let completed = terminal_response(&events, "response.completed");
+
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0]["response"]["id"], "resp_upstream");
+    assert_eq!(created[0]["response"]["model"], "upstream-model");
+    assert_eq!(created[0]["response"]["created_at"], 42);
+    assert_eq!(in_progress.len(), 1);
+    assert_eq!(completed["response"]["id"], "resp_upstream");
+    assert_eq!(completed["response"]["model"], "upstream-model");
+    assert_eq!(completed["response"]["created_at"], 42);
+}
+
+#[test]
+fn stream_splits_inline_think_without_leaking_tags() {
+    let mut stream = ResponsesStream::new("resp_think".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "content": "<think>check files</think>\nDone."
+            },
+            "finish_reason": "stop"
+        }]
+    }));
+    events.extend(stream.finish());
+
+    let completed = terminal_response(&events, "response.completed");
+    let output = completed["response"]["output"].as_array().unwrap();
+    assert_eq!(output[0]["type"], "reasoning");
+    assert_eq!(output[0]["summary"][0]["text"], "check files");
+    assert_eq!(output[1]["type"], "message");
+    assert_eq!(output[1]["content"][0]["text"], "Done.");
+    let joined = String::from_utf8(events.concat()).unwrap();
+    assert!(!joined.contains("<think>"));
+    assert!(!joined.contains("</think>"));
 }
 
 #[test]
@@ -541,6 +714,34 @@ fn repeated_tool_headers_do_not_erase_restored_namespace() {
 }
 
 #[test]
+fn stream_preserves_tool_extra_content() {
+    let extra = json!({
+        "google": { "thought_signature": "sig-stream" }
+    });
+    let mut stream = ResponsesStream::new("resp_extra".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_extra",
+                    "extra_content": extra,
+                    "function": {
+                        "name": "read_file",
+                        "arguments": "{}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    }));
+    events.extend(stream.finish());
+
+    let completed = terminal_response(&events, "response.completed");
+    assert_eq!(completed["response"]["output"][0]["extra_content"], extra);
+}
+
+#[test]
 fn emits_sparse_tool_index_in_stable_output_order() {
     let mut stream = ResponsesStream::new("resp_sparse".to_string(), "model".to_string());
     let mut events = stream.push(&json!({
@@ -620,6 +821,56 @@ fn truncated_tool_arguments_are_incomplete_not_failed() {
 }
 
 #[test]
+fn stream_done_without_finish_reason_and_output_is_incomplete() {
+    let mut stream = ResponsesStream::new("resp_no_finish".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": { "content": "partial" },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.finish());
+
+    let incomplete = terminal_response(&events, "response.incomplete");
+    assert_eq!(incomplete["response"]["status"], "incomplete");
+    assert_eq!(
+        incomplete["response"]["output"][0]["content"][0]["text"],
+        "partial"
+    );
+    assert!(named_events(&events, "response.failed").is_empty());
+}
+
+#[test]
+fn stream_done_without_finish_reason_or_output_fails() {
+    let mut stream = ResponsesStream::new("resp_empty".to_string(), "model".to_string());
+    let events = stream.finish();
+
+    let failed = terminal_response(&events, "response.failed");
+    assert_eq!(failed["response"]["status"], "failed");
+    assert_eq!(failed["response"]["error"]["code"], "incomplete_stream");
+    assert!(named_events(&events, "response.completed").is_empty());
+}
+
+#[test]
+fn stream_content_filter_is_incomplete() {
+    let mut stream = ResponsesStream::new("resp_filtered".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": { "content": "partial" },
+            "finish_reason": "content_filter"
+        }]
+    }));
+    events.extend(stream.finish());
+
+    let incomplete = terminal_response(&events, "response.incomplete");
+    assert_eq!(incomplete["response"]["status"], "incomplete");
+    assert_eq!(
+        incomplete["response"]["incomplete_details"]["reason"],
+        "content_filter"
+    );
+}
+
+#[test]
 fn malformed_historical_tool_call_does_not_block_the_next_turn() {
     let request = json!({
         "model": "model",
@@ -646,10 +897,86 @@ fn malformed_historical_tool_call_does_not_block_the_next_turn() {
     let chat = responses_to_chat(&request, false).unwrap();
     let messages = chat["messages"].as_array().unwrap();
 
-    assert_eq!(roles(messages), ["assistant", "tool", "user"]);
-    assert_eq!(messages[0]["tool_calls"][0]["function"]["arguments"], "{}");
-    assert_eq!(messages[1]["tool_call_id"], "call_bad");
-    assert_eq!(messages[2]["content"], "continue");
+    assert_eq!(roles(messages), ["assistant", "user"]);
+    assert!(messages[0].get("tool_calls").is_none());
+    let context = messages[0]["content"].as_str().unwrap();
+    assert!(context.contains("Historical tool call with invalid arguments"));
+    assert!(context.contains("{broken"));
+    assert!(context.contains("parse failed"));
+    assert_eq!(messages[1]["content"], "continue");
+}
+
+#[test]
+fn appends_multiple_reasoning_items_to_the_following_tool_call() {
+    let request = json!({
+        "model": "model",
+        "input": [
+            {
+                "type": "reasoning",
+                "summary": [{ "type": "summary_text", "text": "first" }]
+            },
+            {
+                "type": "reasoning",
+                "summary": [{ "type": "summary_text", "text": "second" }]
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "read_file",
+                "arguments": "{}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "ok"
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert_eq!(messages[0]["reasoning_content"], "first\n\nsecond");
+    assert_eq!(messages[0]["tool_calls"][0]["id"], "call_1");
+}
+
+#[test]
+fn collapses_system_messages_while_preserving_user_boundaries() {
+    let request = json!({
+        "model": "model",
+        "instructions": "root",
+        "input": [
+            {
+                "type": "message",
+                "role": "developer",
+                "content": "setup"
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": "one"
+            },
+            {
+                "type": "message",
+                "role": "developer",
+                "content": "new rules"
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": "two"
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert_eq!(roles(messages), ["system", "user", "user", "user"]);
+    assert_eq!(messages[0]["content"], "root\n\nsetup");
+    assert_eq!(messages[1]["content"], "one");
+    assert_eq!(messages[2]["content"], "new rules");
+    assert_eq!(messages[3]["content"], "two");
 }
 
 #[test]
@@ -994,6 +1321,39 @@ fn usage_fills_missing_details_and_accepts_responses_names() {
     assert_eq!(usage["total_tokens"], 11);
     assert_eq!(usage["input_tokens_details"]["cached_tokens"], 2);
     assert_eq!(usage["output_tokens_details"]["reasoning_tokens"], 0);
+}
+
+#[test]
+fn usage_maps_deepseek_cache_hit_and_cache_write() {
+    let usage = usage_to_responses(Some(&json!({
+        "prompt_tokens": 100,
+        "completion_tokens": 10,
+        "total_tokens": 110,
+        "prompt_cache_hit_tokens": 60,
+        "prompt_cache_miss_tokens": 40,
+        "prompt_tokens_details": {
+            "cache_write_tokens": 5
+        }
+    })));
+
+    assert_eq!(usage["input_tokens"], 100);
+    assert_eq!(usage["output_tokens"], 10);
+    assert_eq!(usage["input_tokens_details"]["cached_tokens"], 60);
+    assert_eq!(usage["input_tokens_details"]["cache_write_tokens"], 5);
+    assert_eq!(usage["cache_creation_input_tokens"], 5);
+}
+
+#[test]
+fn usage_prefers_direct_cache_read_over_deepseek_alias() {
+    let usage = usage_to_responses(Some(&json!({
+        "prompt_tokens": 100,
+        "completion_tokens": 10,
+        "cache_read_input_tokens": 30,
+        "prompt_cache_hit_tokens": 60
+    })));
+
+    assert_eq!(usage["input_tokens_details"]["cached_tokens"], 30);
+    assert_eq!(usage["cache_read_input_tokens"], 30);
 }
 
 fn roles(messages: &[Value]) -> Vec<&str> {
@@ -1680,6 +2040,78 @@ fn keeps_tools_on_non_compaction_turns_with_compaction_history() {
 }
 
 #[test]
+fn normalizes_trace_sized_tool_history_without_leaving_dangling_calls() {
+    let mut input = Vec::new();
+    for index in 0..9 {
+        input.push(json!({
+            "type": "message",
+            "role": "developer",
+            "content": format!("system {index}")
+        }));
+    }
+
+    let mut emitted_outputs = 0;
+    for group in 0..10 {
+        let call_count = if group == 9 { 24 } else { 18 };
+        for call in 0..call_count {
+            input.push(json!({
+                "type": "function_call",
+                "call_id": format!("call_{group}_{call}"),
+                "name": "read_file",
+                "arguments": "{}"
+            }));
+        }
+        let output_count = if emitted_outputs < 18 {
+            2
+        } else if emitted_outputs < 21 {
+            3
+        } else {
+            0
+        };
+        for call in 0..output_count {
+            input.push(json!({
+                "type": "function_call_output",
+                "call_id": format!("call_{group}_{call}"),
+                "output": "ok"
+            }));
+            emitted_outputs += 1;
+        }
+    }
+
+    let chat = responses_to_chat(
+        &json!({
+            "model": "model",
+            "input": input
+        }),
+        false,
+    )
+    .unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+    let system_count = messages
+        .iter()
+        .filter(|message| message["role"] == "system")
+        .count();
+    let assistant_count = messages
+        .iter()
+        .filter(|message| message["role"] == "assistant")
+        .count();
+    let tool_count = messages
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .count();
+    let call_count = messages
+        .iter()
+        .filter_map(|message| message["tool_calls"].as_array())
+        .flatten()
+        .count();
+
+    assert_eq!(system_count, 1);
+    assert_eq!(assistant_count, 10);
+    assert_eq!(tool_count, 186);
+    assert_eq!(call_count, 186);
+}
+
+#[test]
 fn preserves_custom_tool_definition_in_chat_description() {
     let request = json!({
         "model": "model",
@@ -1707,6 +2139,109 @@ fn preserves_custom_tool_definition_in_chat_description() {
     assert!(description.contains("\"syntax\":\"lark\""));
     assert!(description.contains("start: begin_patch hunk+ end_patch"));
     assert!(description.contains("Do not wrap"));
+}
+
+#[test]
+fn preserves_strict_flag_on_function_tools() {
+    let request = json!({
+        "model": "model",
+        "input": "run",
+        "tools": [{
+            "type": "function",
+            "name": "lookup",
+            "strict": true,
+            "parameters": {
+                "type": "object",
+                "properties": { "query": { "type": "string" } }
+            }
+        }]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+
+    assert_eq!(chat["tools"][0]["function"]["strict"], true);
+}
+
+#[test]
+fn accepts_nested_function_tool_shape() {
+    let request = json!({
+        "model": "model",
+        "input": "run",
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "nested",
+                "strict": true,
+                "parameters": {
+                    "type": "object",
+                    "properties": { "query": { "type": "string" } }
+                }
+            }
+        }]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+
+    assert_eq!(chat["tools"][0]["function"]["name"], "lookup");
+    assert_eq!(chat["tools"][0]["function"]["description"], "nested");
+    assert_eq!(chat["tools"][0]["function"]["strict"], true);
+    assert_eq!(
+        chat["tools"][0]["function"]["parameters"]["properties"]["query"]["type"],
+        "string"
+    );
+}
+
+#[test]
+fn preserves_tool_extra_content_in_history_and_response() {
+    let extra = json!({
+        "google": { "thought_signature": "sig-abc" }
+    });
+    let request = json!({
+        "model": "model",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "read_file",
+                "arguments": "{}",
+                "extra_content": extra
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "ok"
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    assert_eq!(chat["messages"][0]["tool_calls"][0]["extra_content"], extra);
+
+    let response = chat_to_responses(
+        &json!({
+            "id": "chatcmpl-extra",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "extra_content": extra,
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }),
+        "model",
+        &ToolShape::default(),
+    )
+    .unwrap();
+    assert_eq!(response["output"][0]["extra_content"], extra);
 }
 
 #[test]

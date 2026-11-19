@@ -853,6 +853,74 @@ fn chat_completion_aggregation_rejects_invalid_sse_json() {
     assert_eq!(error.1, "upstream_server_error");
 }
 
+#[test]
+fn chat_completion_aggregation_keeps_parallel_calls_separate_without_index() {
+    let mut accumulator = ChatCompletionAccumulator::default();
+    accumulator
+        .push_data(
+            r#"{"id":"chatcmpl-parallel","created":42,"model":"upstream-model","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_a","function":{"name":"read_file","arguments":"{\"path\":\"a\"}"}}]},"finish_reason":null}]}"#,
+        )
+        .unwrap();
+    accumulator
+        .push_data(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_b","function":{"name":"write_file","arguments":"{\"path\":\"b\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        )
+        .unwrap();
+
+    let completion = accumulator.finish("requested-model").unwrap();
+    let calls = completion["choices"][0]["message"]["tool_calls"]
+        .as_array()
+        .unwrap();
+
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0]["id"], "call_a");
+    assert_eq!(calls[0]["function"]["name"], "read_file");
+    assert_eq!(calls[1]["id"], "call_b");
+    assert_eq!(calls[1]["function"]["name"], "write_file");
+    assert_eq!(completion["model"], "upstream-model");
+    assert_eq!(completion["created"], 42);
+}
+
+#[test]
+fn chat_completion_aggregation_does_not_duplicate_repeated_tool_headers() {
+    let mut accumulator = ChatCompletionAccumulator::default();
+    accumulator
+        .push_data(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}"#,
+        )
+        .unwrap();
+    accumulator
+        .push_data(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"","function":{"name":"read_file","arguments":"\"a.txt\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        )
+        .unwrap();
+
+    let completion = accumulator.finish("model").unwrap();
+    let call = &completion["choices"][0]["message"]["tool_calls"][0];
+
+    assert_eq!(call["id"], "call_a");
+    assert_eq!(call["function"]["name"], "read_file");
+    assert_eq!(call["function"]["arguments"], "{\"path\":\"a.txt\"}");
+}
+
+#[test]
+fn chat_completion_aggregation_preserves_content_parts_and_refusal() {
+    let mut accumulator = ChatCompletionAccumulator::default();
+    accumulator
+        .push_data(
+            r#"{"choices":[{"index":0,"delta":{"content":[{"type":"text","text":"partial"},{"type":"refusal","refusal":"blocked"}]},"finish_reason":"stop"}]}"#,
+        )
+        .unwrap();
+
+    let completion = accumulator.finish("model").unwrap();
+    let content = completion["choices"][0]["message"]["content"]
+        .as_array()
+        .unwrap();
+
+    assert_eq!(content[0], json!({"type": "text", "text": "partial"}));
+    assert_eq!(content[1], json!({"type": "refusal", "refusal": "blocked"}));
+}
+
 #[tokio::test]
 async fn responses_stream_is_translated_and_logged_without_buffering() {
     let upstream = Router::new().route(

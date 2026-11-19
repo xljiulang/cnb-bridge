@@ -52,6 +52,8 @@ pub fn responses_to_chat(request: &Value, want_stream: bool) -> Result<Value, St
         }
         _ => {}
     }
+    preserve_invalid_tool_calls_as_text(&mut messages);
+    messages = collapse_system_messages_to_head(messages);
     drop_empty_user_messages(&mut messages);
     repair_tool_pairing(&mut messages);
 
@@ -409,7 +411,7 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
                 messages.push(message);
             }
             Some("reasoning") => {
-                reasoning = reasoning_item_text(item);
+                append_reasoning(&mut reasoning, reasoning_item_text(item));
             }
             Some("function_call" | "custom_tool_call") => {
                 // Media from the preceding tool turn belongs before this new
@@ -439,19 +441,28 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
                     })
                     .to_string()
                 } else {
-                    normalize_arguments(
-                        object
-                            .get("arguments")
-                            .and_then(Value::as_str)
-                            .unwrap_or(""),
-                    )
-                    .0
+                    let arguments = object
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim();
+                    if arguments.is_empty() {
+                        "{}".to_string()
+                    } else {
+                        arguments.to_string()
+                    }
                 };
-                let call = json!({
+                let mut call = json!({
                     "id": call_id,
                     "type": "function",
                     "function": { "name": name, "arguments": arguments }
                 });
+                if let Some(extra) = object
+                    .get("extra_content")
+                    .filter(|value| value.as_object().is_some_and(|extra| !extra.is_empty()))
+                {
+                    call["extra_content"] = extra.clone();
+                }
                 if let Some(message) = pending.as_mut() {
                     if let Some(calls) = message["tool_calls"].as_array_mut() {
                         calls.push(call);
@@ -537,6 +548,159 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
     flush_orphan_outputs(messages, &mut orphan_outputs);
     flush_pending(messages, &mut pending);
     flush_tool_media(messages, &mut media);
+}
+
+fn append_reasoning(target: &mut Option<String>, next: Option<String>) {
+    let Some(next) = next
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+    else {
+        return;
+    };
+    match target {
+        Some(existing) if !existing.is_empty() => {
+            existing.push_str("\n\n");
+            existing.push_str(&next);
+        }
+        _ => *target = Some(next),
+    }
+}
+
+fn preserve_invalid_tool_calls_as_text(messages: &mut Vec<Value>) {
+    let mut output = Vec::with_capacity(messages.len());
+    let mut invalid_owners = HashMap::<String, usize>::new();
+
+    for mut message in std::mem::take(messages) {
+        if message.get("role").and_then(Value::as_str) == Some("assistant") {
+            let mut notes = Vec::new();
+            if let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) {
+                calls.retain(|call| {
+                    let id = call.get("id").and_then(Value::as_str);
+                    if let Some(id) = id {
+                        invalid_owners.remove(id);
+                    }
+                    if arguments_are_object(call.pointer("/function/arguments")) {
+                        return true;
+                    }
+                    if let Some(id) = id.filter(|id| !id.is_empty()) {
+                        invalid_owners.insert(id.to_string(), output.len());
+                    }
+                    let name = call
+                        .pointer("/function/name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<unknown>");
+                    let arguments = call
+                        .pointer("/function/arguments")
+                        .map(value_to_text)
+                        .unwrap_or_else(|| "<missing>".to_string());
+                    notes.push(format!(
+                        "[Historical tool call with invalid arguments; context only, not a new tool invocation]\nname: {name}\ncall_id: {}\narguments: {arguments}",
+                        id.unwrap_or("<missing>")
+                    ));
+                    false
+                });
+            }
+            if message
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+            {
+                message.as_object_mut().unwrap().remove("tool_calls");
+            }
+            for note in notes {
+                append_message_text(&mut message, &note);
+            }
+        } else if message.get("role").and_then(Value::as_str) == Some("tool") {
+            if let Some((id, owner)) = message
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .and_then(|id| invalid_owners.get(id).map(|owner| (id, *owner)))
+            {
+                let result = message
+                    .get("content")
+                    .map(value_to_text)
+                    .unwrap_or_default();
+                append_message_text(
+                    &mut output[owner],
+                    &format!(
+                        "[Historical tool result for invalid call {id}; context only]\n{result}"
+                    ),
+                );
+                continue;
+            }
+        }
+        output.push(message);
+    }
+    *messages = output;
+}
+
+fn arguments_are_object(arguments: Option<&Value>) -> bool {
+    match arguments {
+        Some(Value::String(arguments)) => {
+            serde_json::from_str::<Value>(arguments).is_ok_and(|value| value.is_object())
+        }
+        Some(Value::Object(_)) => true,
+        _ => false,
+    }
+}
+
+fn append_message_text(message: &mut Value, text: &str) {
+    match message.get_mut("content") {
+        Some(Value::String(content)) => {
+            if !content.is_empty() {
+                content.push_str("\n\n");
+            }
+            content.push_str(text);
+        }
+        Some(Value::Array(parts)) => {
+            parts.push(json!({ "type": "text", "text": text }));
+        }
+        _ => message["content"] = json!(text),
+    }
+}
+
+fn collapse_system_messages_to_head(messages: Vec<Value>) -> Vec<Value> {
+    let mut head = Vec::new();
+    let mut rest = Vec::with_capacity(messages.len());
+    let mut seen_non_system = false;
+
+    for (index, message) in messages.iter().enumerate() {
+        let is_system = message.get("role").and_then(Value::as_str) == Some("system");
+        if is_system {
+            let text = message
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if text.is_empty() {
+                continue;
+            }
+            let followed_by_user = messages[index + 1..]
+                .iter()
+                .find(|next| next.get("role").and_then(Value::as_str) != Some("system"))
+                .and_then(|next| next.get("role"))
+                .and_then(Value::as_str)
+                == Some("user");
+            if seen_non_system && followed_by_user {
+                rest.push(json!({ "role": "user", "content": text }));
+            } else {
+                head.push(text.to_string());
+            }
+        } else {
+            seen_non_system = true;
+            rest.push(message.clone());
+        }
+    }
+
+    let mut output = Vec::with_capacity(rest.len() + usize::from(!head.is_empty()));
+    if !head.is_empty() {
+        output.push(json!({
+            "role": "system",
+            "content": head.join("\n\n")
+        }));
+    }
+    output.extend(rest);
+    output
 }
 
 fn merge_assistant_content(message: &mut Value, content: Value) {

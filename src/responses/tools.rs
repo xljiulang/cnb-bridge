@@ -90,7 +90,7 @@ fn absorb_tools(
                 };
                 let mut kept = Vec::new();
                 for child in children {
-                    let Some(name) = child.get("name").and_then(Value::as_str) else {
+                    let Some(name) = tool_name(child) else {
                         continue;
                     };
                     if admit(
@@ -118,7 +118,7 @@ fn absorb_tools(
                     .push("tools.untracked:tool_search".to_string());
             }
             _ => {
-                let Some(name) = tool.get("name").and_then(Value::as_str) else {
+                let Some(name) = tool_name(tool) else {
                     continue;
                 };
                 if admit(name, source, seen, declared) {
@@ -166,7 +166,7 @@ impl ToolShape {
                         continue;
                     };
                     for child in children {
-                        let Some(name) = child.get("name").and_then(Value::as_str) else {
+                        let Some(name) = tool_name(child) else {
                             continue;
                         };
                         shape
@@ -176,13 +176,13 @@ impl ToolShape {
                     }
                 }
                 Some("custom") => {
-                    if let Some(name) = tool.get("name").and_then(Value::as_str) {
+                    if let Some(name) = tool_name(tool) {
                         shape.custom.insert(name.to_string());
                         shape.declared.insert(name.to_string());
                     }
                 }
                 _ => {
-                    if let Some(name) = tool.get("name").and_then(Value::as_str) {
+                    if let Some(name) = tool_name(tool) {
                         shape.declared.insert(name.to_string());
                     }
                 }
@@ -235,7 +235,7 @@ pub(super) fn translate_tools(tools: &[Value]) -> Vec<Value> {
                     continue;
                 };
                 for child in children {
-                    let Some(name) = child.get("name").and_then(Value::as_str) else {
+                    let Some(name) = tool_name(child) else {
                         continue;
                     };
                     let flat = flat_namespace_name(namespace, name);
@@ -245,7 +245,7 @@ pub(super) fn translate_tools(tools: &[Value]) -> Vec<Value> {
                 }
             }
             Some("custom") => {
-                let Some(name) = tool.get("name").and_then(Value::as_str) else {
+                let Some(name) = tool_name(tool) else {
                     continue;
                 };
                 if seen.insert(name.to_string()) {
@@ -270,7 +270,7 @@ pub(super) fn translate_tools(tools: &[Value]) -> Vec<Value> {
                 }
             }
             _ => {
-                let Some(name) = tool.get("name").and_then(Value::as_str) else {
+                let Some(name) = tool_name(tool) else {
                     continue;
                 };
                 if seen.insert(name.to_string()) {
@@ -283,12 +283,27 @@ pub(super) fn translate_tools(tools: &[Value]) -> Vec<Value> {
 }
 
 pub(super) fn function_tool(name: &str, source: &Value) -> Value {
+    let source = tool_function(source);
     let mut function = json!({ "name": name });
     if let Some(description) = source.get("description").filter(|value| !value.is_null()) {
         function["description"] = description.clone();
     }
     function["parameters"] = normalize_parameters(source.get("parameters"));
+    if let Some(strict) = source.get("strict").filter(|value| !value.is_null()) {
+        function["strict"] = strict.clone();
+    }
     json!({ "type": "function", "function": function })
+}
+
+fn tool_function(tool: &Value) -> &Value {
+    tool.get("function").unwrap_or(tool)
+}
+
+fn tool_name(tool: &Value) -> Option<&str> {
+    tool_function(tool)
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
 }
 
 /// Normalizes a function's `parameters` JSON Schema for strict Chat upstreams.
@@ -432,13 +447,13 @@ pub(super) fn declared_tool_names(tools: &[Value]) -> Vec<String> {
                     .into_iter()
                     .flatten()
                 {
-                    if let Some(name) = child.get("name").and_then(Value::as_str) {
+                    if let Some(name) = tool_name(child) {
                         names.push(flat_namespace_name(namespace, name));
                     }
                 }
             }
             _ => {
-                if let Some(name) = tool.get("name").and_then(Value::as_str) {
+                if let Some(name) = tool_name(tool) {
                     names.push(name.to_string());
                 }
             }

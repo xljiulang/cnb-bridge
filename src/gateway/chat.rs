@@ -243,9 +243,11 @@ pub(super) struct AggregateToolCall {
 #[derive(Default)]
 pub(super) struct AggregateChoice {
     content: String,
+    content_parts: Vec<Value>,
     reasoning_content: String,
     has_content: bool,
     tool_calls: BTreeMap<usize, AggregateToolCall>,
+    legacy_function_call: Option<AggregateToolCall>,
     finish_reason: Option<String>,
 }
 
@@ -272,13 +274,21 @@ impl ChatCompletionAccumulator {
         if let Some(error) = chunk.get("error").filter(|value| !value.is_null()) {
             return Err(format!("上游流内错误: {error}"));
         }
-        if let Some(id) = chunk.get("id").and_then(Value::as_str) {
+        if let Some(id) = chunk
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
             self.id = Some(id.to_string());
         }
         if let Some(created) = chunk.get("created").and_then(Value::as_u64) {
             self.created = Some(created);
         }
-        if let Some(model) = chunk.get("model").and_then(Value::as_str) {
+        if let Some(model) = chunk
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.is_empty())
+        {
             self.model = Some(model.to_string());
         }
         if let Some(fingerprint) = chunk
@@ -302,12 +312,45 @@ impl ChatCompletionAccumulator {
                 .get("delta")
                 .or_else(|| choice.get("message"))
                 .unwrap_or(&Value::Null);
-            if let Some(content) = delta.get("content").and_then(Value::as_str) {
+            match delta.get("content") {
+                Some(Value::String(content)) => {
+                    state.has_content = true;
+                    state.content.push_str(content);
+                }
+                Some(Value::Array(parts)) => {
+                    state.has_content = true;
+                    state.content_parts.extend(parts.iter().cloned());
+                }
+                _ => {}
+            }
+            if let Some(refusal) = delta
+                .get("refusal")
+                .and_then(Value::as_str)
+                .filter(|refusal| !refusal.is_empty())
+            {
                 state.has_content = true;
-                state.content.push_str(content);
+                state.content_parts.push(json!({
+                    "type": "refusal",
+                    "refusal": refusal
+                }));
             }
             if let Some(reasoning) = aggregate_reasoning_text(delta) {
                 state.reasoning_content.push_str(reasoning);
+            }
+            if let Some(function_call) = delta.get("function_call") {
+                let legacy = state
+                    .legacy_function_call
+                    .get_or_insert_with(Default::default);
+                if let Some(name) = function_call
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                {
+                    legacy.name = name.to_string();
+                }
+                if let Some(arguments) = function_call.get("arguments").and_then(Value::as_str) {
+                    legacy.arguments.push_str(arguments);
+                }
             }
             for tool in delta
                 .get("tool_calls")
@@ -315,16 +358,28 @@ impl ChatCompletionAccumulator {
                 .into_iter()
                 .flatten()
             {
-                let tool_index = tool.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let tool_index = aggregate_tool_key(&state.tool_calls, tool);
                 let tool_state = state.tool_calls.entry(tool_index).or_default();
-                if let Some(id) = tool.get("id").and_then(Value::as_str) {
+                if let Some(id) = tool
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                {
                     tool_state.id = id.to_string();
                 }
-                if let Some(kind) = tool.get("type").and_then(Value::as_str) {
+                if let Some(kind) = tool
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .filter(|kind| !kind.is_empty())
+                {
                     tool_state.kind = kind.to_string();
                 }
-                if let Some(name) = tool.pointer("/function/name").and_then(Value::as_str) {
-                    tool_state.name.push_str(name);
+                if let Some(name) = tool
+                    .pointer("/function/name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                {
+                    tool_state.name = name.to_string();
                 }
                 if let Some(arguments) = tool.pointer("/function/arguments").and_then(Value::as_str)
                 {
@@ -353,7 +408,17 @@ impl ChatCompletionAccumulator {
             .map(|(index, choice)| {
                 let mut message = json!({
                     "role": "assistant",
-                    "content": if choice.has_content {
+                    "content": if !choice.content_parts.is_empty() {
+                        let mut parts = Vec::new();
+                        if !choice.content.is_empty() {
+                            parts.push(json!({
+                                "type": "text",
+                                "text": choice.content
+                            }));
+                        }
+                        parts.extend(choice.content_parts);
+                        Value::Array(parts)
+                    } else if choice.has_content {
                         Value::String(choice.content)
                     } else {
                         Value::Null
@@ -380,6 +445,12 @@ impl ChatCompletionAccumulator {
                             .collect(),
                     );
                 }
+                if let Some(function_call) = choice.legacy_function_call {
+                    message["function_call"] = json!({
+                        "name": function_call.name,
+                        "arguments": function_call.arguments
+                    });
+                }
                 json!({
                     "index": index,
                     "message": message,
@@ -401,6 +472,28 @@ impl ChatCompletionAccumulator {
             completion["usage"] = usage;
         }
         Ok(completion)
+    }
+}
+
+fn aggregate_tool_key(calls: &BTreeMap<usize, AggregateToolCall>, tool: &Value) -> usize {
+    if let Some(index) = tool.get("index").and_then(Value::as_u64) {
+        return usize::try_from(index).unwrap_or(usize::MAX - 1);
+    }
+
+    let last_key = calls.keys().next_back().copied();
+    let Some(id) = tool
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    else {
+        return last_key.unwrap_or(0);
+    };
+    if let Some((key, _)) = calls.iter().find(|(_, state)| state.id == id) {
+        return *key;
+    }
+    match last_key {
+        Some(key) => key.checked_add(1).unwrap_or(key),
+        None => 0,
     }
 }
 
