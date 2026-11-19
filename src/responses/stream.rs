@@ -867,7 +867,7 @@ impl ResponsesStream {
                 .get_mut(&tool_index)
                 .expect("added tool call state must remain available");
             let pending = &state.arguments[state.emitted_arguments_len..];
-            if !pending.trim().is_empty() {
+            if !pending.is_empty() {
                 events.push(sse_event(
                     "response.function_call_arguments.delta",
                     json!({

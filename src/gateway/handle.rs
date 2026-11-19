@@ -124,6 +124,13 @@ pub struct GatewayHandle {
     activity: Arc<GatewayActivity>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(super) struct IdleMonitorProbe {
+    pub(super) disconnect_started: Arc<tokio::sync::Notify>,
+    pub(super) disconnect_finished: Arc<tokio::sync::Notify>,
+}
+
 impl GatewayHandle {
     /// Binds the configured loopback port and starts serving requests.
     pub async fn start(bridge: Arc<Bridge>, config: GatewayConfig) -> Result<Self, String> {
@@ -151,6 +158,55 @@ impl GatewayHandle {
         config: GatewayConfig,
         upstream_override: Option<u16>,
         trace_root: std::path::PathBuf,
+    ) -> Result<Self, String> {
+        #[cfg(test)]
+        return Self::start_with_upstream_internal_impl(
+            bridge,
+            config,
+            upstream_override,
+            trace_root,
+            IdleMonitorProbe::default(),
+        )
+        .await;
+        #[cfg(not(test))]
+        Self::start_with_upstream_internal_impl(bridge, config, upstream_override, trace_root).await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn start_with_upstream_internal_impl(
+        bridge: Arc<Bridge>,
+        config: GatewayConfig,
+        upstream_override: Option<u16>,
+        trace_root: std::path::PathBuf,
+        idle_monitor_probe: IdleMonitorProbe,
+    ) -> Result<Self, String> {
+        Self::start_with_upstream_internal_common(
+            bridge,
+            config,
+            upstream_override,
+            trace_root,
+            idle_monitor_probe,
+        )
+        .await
+    }
+
+    #[cfg(not(test))]
+    async fn start_with_upstream_internal_impl(
+        bridge: Arc<Bridge>,
+        config: GatewayConfig,
+        upstream_override: Option<u16>,
+        trace_root: std::path::PathBuf,
+    ) -> Result<Self, String> {
+        Self::start_with_upstream_internal_common(bridge, config, upstream_override, trace_root)
+            .await
+    }
+
+    async fn start_with_upstream_internal_common(
+        bridge: Arc<Bridge>,
+        config: GatewayConfig,
+        upstream_override: Option<u16>,
+        trace_root: std::path::PathBuf,
+        #[cfg(test)] idle_monitor_probe: IdleMonitorProbe,
     ) -> Result<Self, String> {
         let listener = TcpListener::bind(("127.0.0.1", config.port))
             .await
@@ -209,8 +265,21 @@ impl GatewayHandle {
                         else {
                             continue;
                         };
-                        if bridge.disconnect_idle_tunnel().await {
-                            idle_activity.touch();
+                        #[cfg(test)]
+                        idle_monitor_probe.disconnect_started.notify_waiters();
+                        tokio::select! {
+                            changed = idle_shutdown.changed() => {
+                                if changed.is_err() || *idle_shutdown.borrow() {
+                                    break;
+                                }
+                            }
+                            disconnected = bridge.disconnect_idle_tunnel() => {
+                                #[cfg(test)]
+                                idle_monitor_probe.disconnect_finished.notify_waiters();
+                                if disconnected {
+                                    idle_activity.touch();
+                                }
+                            }
                         }
                     }
                 }

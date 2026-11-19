@@ -233,6 +233,19 @@ async fn cancelled_request_waiting_for_idle_claim_releases_activity() {
 }
 
 #[tokio::test]
+async fn activity_guard_is_released_when_request_future_is_cancelled() {
+    let activity = Arc::new(GatewayActivity::new());
+    let activity_for_request = Arc::clone(&activity);
+    let request = tokio::spawn(async move { activity_for_request.enter().await });
+    tokio::task::yield_now().await;
+    assert_eq!(activity.active_connections(), 1);
+
+    request.abort();
+    let _ = request.await;
+    assert_eq!(activity.active_connections(), 0);
+}
+
+#[tokio::test]
 async fn response_body_holds_activity_until_consumed() {
     let activity = Arc::new(GatewayActivity::new());
     let guard = activity.enter().await;
@@ -292,11 +305,16 @@ async fn request_stays_active_while_handler_waits_for_upstream_headers() {
         }
     });
 
-    started.notified().await;
+    tokio::time::timeout(Duration::from_secs(3), started.notified())
+        .await
+        .expect("upstream request did not start");
     assert_eq!(gateway.active_connections(), 1);
 
     release.notify_one();
-    let response = request.await.unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(3), request)
+        .await
+        .expect("response did not complete")
+        .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     assert_eq!(
         response.json::<Value>().await.unwrap()["status"],
@@ -307,6 +325,60 @@ async fn request_stays_active_while_handler_waits_for_upstream_headers() {
 
     gateway.stop().await;
     upstream_task.abort();
+}
+
+#[tokio::test]
+async fn stop_interrupts_blocked_idle_disconnect() {
+    let probe = IdleMonitorProbe::default();
+    let (_temp_probe, _bridge_probe, gateway) = {
+        let temp = tempfile::tempdir().unwrap();
+        let account = crate::account::AccountManager::with_store(AccountStore::new(
+            temp.path().join("account.bin"),
+        ));
+        let bridge = Arc::new(Bridge::new(
+            account,
+            {
+                let store = SettingsStore::new(temp.path().join("settings.json"));
+                store
+                    .save(&crate::settings::Settings {
+                        http_log_filter: crate::settings::HttpLogFilter::All,
+                        ..crate::settings::Settings::default()
+                    })
+                    .unwrap();
+                store
+            },
+            SshKeyStore::new(
+                temp.path().join("id_ed25519"),
+                temp.path().join("id_ed25519.pub"),
+            ),
+            Arc::new(Logger::new(32)),
+        ));
+        let gateway = GatewayHandle::start_with_upstream_internal_impl(
+            Arc::clone(&bridge),
+            GatewayConfig {
+                port: 0,
+                activation_timeout: Duration::from_secs(1),
+                idle_timeout: Duration::ZERO,
+                upstream_connect_timeout: Duration::from_secs(5),
+                upstream_read_timeout: Duration::from_secs(60),
+                non_stream_timeout: Duration::from_secs(120),
+            },
+            None,
+            temp.path().join("http-trace"),
+            probe.clone(),
+        )
+        .await
+        .unwrap();
+        (temp, bridge, gateway)
+    };
+    tokio::time::timeout(Duration::from_secs(3), probe.disconnect_started.notified())
+        .await
+        .expect("idle monitor should reach disconnect");
+
+    tokio::time::timeout(Duration::from_secs(1), gateway.stop())
+        .await
+        .expect("gateway stop should not wait for a blocked disconnect");
+    assert!(futures_util::FutureExt::now_or_never(probe.disconnect_finished.notified()).is_none());
 }
 
 #[tokio::test]

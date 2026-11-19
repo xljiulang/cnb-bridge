@@ -1140,6 +1140,123 @@ fn stream_function_arguments_flush_trailing_whitespace_before_done() {
 }
 
 #[test]
+fn stream_function_arguments_emit_whitespace_only_tail_fragments() {
+    let raw_arguments = "{ \"a\": 1 }\n \t";
+    let mut stream = ResponsesStream::new("resp_whitespace_tail".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_space_tail",
+                    "function": {
+                        "name": "lookup",
+                        "arguments": "{ \"a\": 1 }"
+                    }
+                }]
+            },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "function": { "arguments": "\n" }
+                }]
+            },
+            "finish_reason": null
+        }]
+    })));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "function": { "arguments": " \t" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })));
+    events.extend(stream.finish());
+
+    let deltas = named_events(&events, "response.function_call_arguments.delta")
+        .into_iter()
+        .filter_map(|event| event["delta"].as_str().map(str::to_string))
+        .collect::<String>();
+    let done = named_events(&events, "response.function_call_arguments.done");
+    let item = named_events(&events, "response.output_item.done");
+    let completed = terminal_response(&events, "response.completed");
+    assert_eq!(deltas, raw_arguments);
+    assert_eq!(done[0]["arguments"], raw_arguments);
+    assert_eq!(item[0]["item"]["arguments"], raw_arguments);
+    assert_eq!(
+        completed["response"]["output"][0]["arguments"],
+        raw_arguments
+    );
+}
+
+#[test]
+fn stream_function_arguments_emit_each_whitespace_fragment_immediately() {
+    let mut stream = ResponsesStream::new("resp_live_whitespace".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_live_space",
+                    "function": {
+                        "name": "lookup",
+                        "arguments": "{ \"a\": 1 }"
+                    }
+                }]
+            },
+            "finish_reason": null
+        }]
+    }));
+    let whitespace_events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "function": { "arguments": "\n" }
+                }]
+            },
+            "finish_reason": null
+        }]
+    }));
+    assert_eq!(
+        named_events(&events, "response.function_call_arguments.delta").len(),
+        1
+    );
+    assert_eq!(
+        named_events(&whitespace_events, "response.function_call_arguments.delta").len(),
+        1
+    );
+    events.extend(whitespace_events);
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "function": { "arguments": " " }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })));
+    events.extend(stream.finish());
+
+    let deltas = named_events(&events, "response.function_call_arguments.delta")
+        .into_iter()
+        .filter_map(|event| event["delta"].as_str().map(str::to_string))
+        .collect::<String>();
+    assert_eq!(deltas, "{ \"a\": 1 }\n ");
+}
+
+#[test]
 fn repeated_tool_headers_do_not_erase_restored_namespace() {
     let request = json!({
         "tools": [{
