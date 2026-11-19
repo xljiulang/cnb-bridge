@@ -6,8 +6,8 @@ use crate::logging::Logger;
 use crate::model_catalog;
 use crate::prompt_gate::{apply_headers, detect_gate_block, normalize_chat, GateReport};
 use crate::responses::{
-    chat_to_responses, ignored_feature_details, responses_to_chat, unsupported_feature_names,
-    ResponsesStream, ToolShape,
+    chat_to_responses, ignored_feature_details_with_options, responses_to_chat_with_options,
+    unsupported_feature_names, ResponsesStream, ToolShape, TranslationOptions,
 };
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
@@ -32,7 +32,7 @@ const BODY_LIMIT: usize = 64 * 1024 * 1024;
 ///
 /// Only needles unique to the field belong here: matching on `json_schema`
 /// would also fire for tool parameter errors and strip a field that was fine.
-const OPTIONAL_CHAT_FIELDS: [(&str, &[&str]); 8] = [
+const OPTIONAL_CHAT_FIELDS: [(&str, &[&str]); 17] = [
     ("stream_options", &["stream_options", "include_usage"]),
     (
         "reasoning_effort",
@@ -44,6 +44,23 @@ const OPTIONAL_CHAT_FIELDS: [(&str, &[&str]); 8] = [
     ("tool_choice", &["tool_choice"]),
     ("max_tokens", &["max_tokens"]),
     ("response_format", &["response_format", "response format"]),
+    ("frequency_penalty", &["frequency_penalty"]),
+    ("logit_bias", &["logit_bias"]),
+    ("logprobs", &["logprobs"]),
+    ("metadata", &["metadata"]),
+    ("n", &["parameter n", "field n", "\"n\""]),
+    ("presence_penalty", &["presence_penalty"]),
+    (
+        "stop",
+        &[
+            "unsupported parameter: stop",
+            "parameter stop",
+            "field stop",
+            "\"stop\"",
+        ],
+    ),
+    ("top_logprobs", &["top_logprobs"]),
+    ("user", &["parameter user", "field user", "\"user\""]),
 ];
 
 #[derive(Debug)]

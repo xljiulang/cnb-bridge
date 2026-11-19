@@ -22,9 +22,43 @@ so the summary text is unavailable. Rely on the messages that remain.]";
 
 /// Item types that only exist to carry a compaction checkpoint.
 const COMPACTION_ITEM_TYPES: [&str; 3] = ["compaction", "compaction_summary", "context_compaction"];
+const EXTENDED_CHAT_FIELDS: [&str; 9] = [
+    "frequency_penalty",
+    "logit_bias",
+    "logprobs",
+    "metadata",
+    "n",
+    "presence_penalty",
+    "stop",
+    "top_logprobs",
+    "user",
+];
+pub(super) const DEGRADED_INPUT_TYPES: [&str; 7] = [
+    "local_shell_call",
+    "local_shell_call_output",
+    "computer_call",
+    "computer_call_output",
+    "mcp_call",
+    "mcp_list_tools",
+    "web_search_call",
+];
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TranslationOptions {
+    pub supports_file_input: bool,
+    pub supports_audio_input: bool,
+}
 
 /// Translates a Responses request into a Chat Completions request.
 pub fn responses_to_chat(request: &Value, want_stream: bool) -> Result<Value, String> {
+    responses_to_chat_with_options(request, want_stream, TranslationOptions::default())
+}
+
+pub fn responses_to_chat_with_options(
+    request: &Value,
+    want_stream: bool,
+    options: TranslationOptions,
+) -> Result<Value, String> {
     if !request.is_object() {
         return Err("request body must be a JSON object".to_string());
     }
@@ -48,7 +82,11 @@ pub fn responses_to_chat(request: &Value, want_stream: bool) -> Result<Value, St
             // Compaction items are rewritten before translation so the message
             // state machine never has to know about them.
             let rewritten = rewrite_compaction_items(items);
-            translate_input_items(rewritten.as_deref().unwrap_or(items), &mut messages);
+            translate_input_items(
+                rewritten.as_deref().unwrap_or(items),
+                &mut messages,
+                options,
+            );
         }
         _ => {}
     }
@@ -96,6 +134,11 @@ pub fn responses_to_chat(request: &Value, want_stream: bool) -> Result<Value, St
         }
     }
     for field in ["prompt_cache_key", "service_tier"] {
+        if let Some(value) = request.get(field).filter(|value| !value.is_null()) {
+            chat[field] = value.clone();
+        }
+    }
+    for field in EXTENDED_CHAT_FIELDS {
         if let Some(value) = request.get(field).filter(|value| !value.is_null()) {
             chat[field] = value.clone();
         }
@@ -315,27 +358,6 @@ pub fn unsupported_feature_names(request: &Value) -> Vec<&'static str> {
     if request.get("previous_response_id").is_some() {
         features.push("previous_response_id");
     }
-    if request
-        .get("input")
-        .and_then(Value::as_array)
-        .is_some_and(|items| {
-            items.iter().any(|item| {
-                matches!(
-                    item.get("type").and_then(Value::as_str),
-                    Some(
-                        "local_shell_call"
-                            | "local_shell_call_output"
-                            | "computer_call"
-                            | "computer_call_output"
-                            | "mcp_call"
-                            | "mcp_list_tools"
-                    )
-                )
-            })
-        })
-    {
-        features.push("input.items");
-    }
     features
 }
 
@@ -349,6 +371,7 @@ pub(super) const HANDLED_INPUT_TYPES: &[&str] = &[
     "reasoning",
     "function_call",
     "custom_tool_call",
+    "tool_search_call",
     "function_call_output",
     "custom_tool_call_output",
     "additional_tools",
@@ -357,13 +380,28 @@ pub(super) const HANDLED_INPUT_TYPES: &[&str] = &[
     "compaction_summary",
     "context_compaction",
     "compaction_trigger",
+    "local_shell_call",
+    "local_shell_call_output",
+    "computer_call",
+    "computer_call_output",
+    "mcp_call",
+    "mcp_list_tools",
+    "web_search_call",
+    "input_text",
+    "input_image",
+    "input_file",
+    "input_audio",
 ];
 
 pub(super) fn is_handled_input_type(name: &str) -> bool {
     HANDLED_INPUT_TYPES.contains(&name)
 }
 
-pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) {
+pub(super) fn translate_input_items(
+    items: &[Value],
+    messages: &mut Vec<Value>,
+    options: TranslationOptions,
+) {
     let mut pending: Option<Value> = None;
     let mut reasoning: Option<String> = None;
     // Images lifted out of tool results, emitted once the tool turn ends.
@@ -382,15 +420,26 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
             item_type,
             Some("function_call_output" | "custom_tool_call_output" | "tool_search_output")
         ) {
-            flush_orphan_outputs(messages, &mut orphan_outputs);
+            flush_orphan_outputs(messages, &mut orphan_outputs, options);
         }
         match item_type {
+            Some(name) if DEGRADED_INPUT_TYPES.contains(&name) => {
+                flush_pending(messages, &mut pending);
+                flush_tool_media(messages, &mut media);
+                messages.push(json!({
+                    "role": "user",
+                    "content": format!(
+                        "[Responses item {name} cannot be represented as a Chat tool call; preserved as context]\n{}",
+                        item
+                    )
+                }));
+            }
             Some("message") => {
                 let role = object.get("role").and_then(Value::as_str).unwrap_or("user");
                 let role = if role == "developer" { "system" } else { role };
                 if role == "assistant" {
                     if let Some(message) = pending.as_mut() {
-                        merge_assistant_content(message, message_content(item));
+                        merge_assistant_content(message, message_content(item, options));
                         continue;
                     }
                 }
@@ -401,7 +450,7 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
                 }
                 let mut message = json!({
                     "role": role,
-                    "content": message_content(item)
+                    "content": message_content(item, options)
                 });
                 if role == "assistant" {
                     if let Some(text) = reasoning.take() {
@@ -413,17 +462,21 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
             Some("reasoning") => {
                 append_reasoning(&mut reasoning, reasoning_item_text(item));
             }
-            Some("function_call" | "custom_tool_call") => {
+            Some("function_call" | "custom_tool_call" | "tool_search_call") => {
                 // Media from the preceding tool turn belongs before this new
                 // assistant turn, not after its results.
                 flush_tool_media(messages, &mut media);
                 let raw_name = object.get("name").and_then(Value::as_str).unwrap_or("");
-                let name = object
-                    .get("namespace")
-                    .and_then(Value::as_str)
-                    .filter(|namespace| !namespace.is_empty())
-                    .map(|namespace| flat_namespace_name(namespace, raw_name))
-                    .unwrap_or_else(|| raw_name.to_string());
+                let name = if item_type == Some("tool_search_call") {
+                    super::tools::TOOL_SEARCH_PROXY_NAME.to_string()
+                } else {
+                    object
+                        .get("namespace")
+                        .and_then(Value::as_str)
+                        .filter(|namespace| !namespace.is_empty())
+                        .map(|namespace| flat_namespace_name(namespace, raw_name))
+                        .unwrap_or_else(|| raw_name.to_string())
+                };
                 let call_id = object
                     .get("call_id")
                     .or_else(|| object.get("id"))
@@ -440,6 +493,11 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
                             .unwrap_or_default()
                     })
                     .to_string()
+                } else if item_type == Some("tool_search_call") {
+                    object
+                        .get("arguments")
+                        .map(super::canonical::canonical_json_string)
+                        .unwrap_or_else(|| "{}".to_string())
                 } else {
                     let arguments = object
                         .get("arguments")
@@ -449,7 +507,8 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
                     if arguments.is_empty() {
                         "{}".to_string()
                     } else {
-                        arguments.to_string()
+                        super::canonical::canonicalize_object_arguments(arguments)
+                            .unwrap_or_else(|| arguments.to_string())
                     }
                 };
                 let mut call = json!({
@@ -509,7 +568,7 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
                 }
                 flush_pending(messages, &mut pending);
                 let output = object.get("output").unwrap_or(&Value::Null);
-                let content = extract_tool_output_media(output, call_id, &mut media)
+                let content = extract_tool_output_media(output, call_id, &mut media, options)
                     .unwrap_or_else(|| value_to_text(output));
                 messages.push(json!({
                     "role": "tool",
@@ -522,11 +581,15 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
                 // The carrier carries a role but no content, so letting it fall
                 // through to the message arm would emit an empty system message.
             }
+            Some("input_text" | "input_image" | "input_file" | "input_audio") => {
+                flush_pending(messages, &mut pending);
+                flush_tool_media(messages, &mut media);
+                messages.push(json!({
+                    "role": "user",
+                    "content": message_content(item, options)
+                }));
+            }
             Some("tool_search_output") => {
-                // The loaded tools were lifted as well; the receipt itself is
-                // not a Chat message. Queued on the media buffer so it lands
-                // after the whole tool turn instead of splitting a contiguous
-                // `role: tool` run that `repair_tool_pairing` walks.
                 let names = object
                     .get("tools")
                     .and_then(Value::as_array)
@@ -537,15 +600,25 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
                 } else {
                     format!("[tool search loaded: {}]", names.join(", "))
                 };
-                media.push(json!({ "type": "text", "text": text }));
+                let call_id = object.get("call_id").and_then(Value::as_str).unwrap_or("");
+                if !call_id.is_empty() && known_call_ids.contains(call_id) {
+                    flush_pending(messages, &mut pending);
+                    let output = object.get("output").map(value_to_text).unwrap_or(text);
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": output
+                    }));
+                } else {
+                    let mut orphan = item.clone();
+                    orphan["output"] = json!(text);
+                    orphan_outputs.push(orphan);
+                }
             }
-            // `tool_search` is not declared upstream, so a historical search
-            // call has no counterpart. Left unhandled on purpose so diagnostics
-            // keeps reporting it.
             _ => {}
         }
     }
-    flush_orphan_outputs(messages, &mut orphan_outputs);
+    flush_orphan_outputs(messages, &mut orphan_outputs, options);
     flush_pending(messages, &mut pending);
     flush_tool_media(messages, &mut media);
 }
@@ -750,14 +823,18 @@ fn merge_assistant_content(message: &mut Value, content: Value) {
     };
 }
 
-fn flush_orphan_outputs(messages: &mut Vec<Value>, outputs: &mut Vec<Value>) {
+fn flush_orphan_outputs(
+    messages: &mut Vec<Value>,
+    outputs: &mut Vec<Value>,
+    options: TranslationOptions,
+) {
     for output in std::mem::take(outputs) {
         let call_id = output.get("call_id").and_then(Value::as_str).unwrap_or("");
         let mut media = Vec::new();
         let body = output
             .get("output")
             .map(|value| {
-                extract_tool_output_media(value, call_id, &mut media)
+                extract_tool_output_media(value, call_id, &mut media, options)
                     .unwrap_or_else(|| value_to_text(value))
             })
             .unwrap_or_default();
@@ -865,17 +942,29 @@ pub(super) fn repair_tool_pairing(messages: &mut Vec<Value>) {
     });
 }
 
-pub(super) fn message_content(item: &Value) -> Value {
-    let Some(parts) = item.get("content").and_then(Value::as_array) else {
-        return item
-            .get("content")
-            .cloned()
-            .unwrap_or_else(|| Value::String(String::new()));
+pub(super) fn message_content(item: &Value, options: TranslationOptions) -> Value {
+    let direct_part = matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("input_text" | "input_image" | "input_file" | "input_audio")
+    );
+    let parts = if direct_part {
+        vec![item.clone()]
+    } else {
+        let Some(parts) = item.get("content").and_then(Value::as_array) else {
+            return item
+                .get("content")
+                .cloned()
+                .unwrap_or_else(|| Value::String(String::new()));
+        };
+        parts.clone()
     };
-    if !parts
-        .iter()
-        .any(|part| part.get("type").and_then(Value::as_str) == Some("input_image"))
-    {
+    let has_non_text = parts.iter().any(|part| {
+        matches!(
+            part.get("type").and_then(Value::as_str),
+            Some("input_image" | "input_file" | "input_audio")
+        )
+    });
+    if !has_non_text {
         return Value::String(
             parts
                 .iter()
@@ -886,26 +975,91 @@ pub(super) fn message_content(item: &Value) -> Value {
     }
     let content: Vec<Value> = parts
         .iter()
-        .filter_map(|part| match part.get("type").and_then(Value::as_str) {
-            Some("input_text" | "output_text") => part
-                .get("text")
-                .and_then(Value::as_str)
-                .map(|text| json!({ "type": "text", "text": text })),
-            Some("input_image") => part.get("image_url").and_then(Value::as_str).map(|url| {
-                let mut image = json!({ "url": url });
-                if let Some(detail) = part
-                    .get("detail")
-                    .and_then(Value::as_str)
-                    .filter(|detail| matches!(*detail, "auto" | "low" | "high"))
-                {
-                    image["detail"] = json!(detail);
-                }
-                json!({ "type": "image_url", "image_url": image })
-            }),
-            _ => None,
-        })
+        .filter_map(|part| chat_content_part(part, options))
         .collect();
-    Value::Array(content)
+    if content
+        .iter()
+        .all(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+    {
+        Value::String(
+            content
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    } else {
+        Value::Array(content)
+    }
+}
+
+pub(super) fn chat_content_part(part: &Value, options: TranslationOptions) -> Option<Value> {
+    match part.get("type").and_then(Value::as_str) {
+        Some("input_text" | "output_text") => part
+            .get("text")
+            .and_then(Value::as_str)
+            .map(|text| json!({ "type": "text", "text": text })),
+        Some("refusal") => part
+            .get("refusal")
+            .and_then(Value::as_str)
+            .map(|text| json!({ "type": "text", "text": text })),
+        Some("input_image") => part.get("image_url").and_then(Value::as_str).map(|url| {
+            let mut image = json!({ "url": url });
+            if let Some(detail) = part
+                .get("detail")
+                .and_then(Value::as_str)
+                .filter(|detail| matches!(*detail, "auto" | "low" | "high"))
+            {
+                image["detail"] = json!(detail);
+            }
+            json!({ "type": "image_url", "image_url": image })
+        }),
+        Some("input_file") => {
+            let filename = part
+                .get("filename")
+                .and_then(Value::as_str)
+                .unwrap_or("attachment");
+            if !options.supports_file_input {
+                return Some(json!({
+                    "type": "text",
+                    "text": format!("[file attachment omitted: {filename}; upstream model does not support file input]")
+                }));
+            }
+            let mut file = json!({ "filename": filename });
+            if let Some(file_id) = part.get("file_id").and_then(Value::as_str) {
+                file["file_id"] = json!(file_id);
+            }
+            if let Some(file_data) = part.get("file_data").and_then(Value::as_str) {
+                file["file_data"] = json!(file_data);
+            }
+            if file.get("file_id").is_none() && file.get("file_data").is_none() {
+                return Some(json!({
+                    "type": "text",
+                    "text": format!("[file attachment unavailable: {filename}]")
+                }));
+            }
+            Some(json!({ "type": "file", "file": file }))
+        }
+        Some("input_audio") => {
+            let Some(audio) = part.get("input_audio") else {
+                return Some(json!({
+                    "type": "text",
+                    "text": "[audio attachment unavailable]"
+                }));
+            };
+            if !options.supports_audio_input {
+                return Some(json!({
+                    "type": "text",
+                    "text": "[audio attachment omitted; upstream model does not support audio input]"
+                }));
+            }
+            Some(json!({
+                "type": "input_audio",
+                "input_audio": audio.clone()
+            }))
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn reasoning_item_text(item: &Value) -> Option<String> {

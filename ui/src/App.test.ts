@@ -48,6 +48,8 @@ const snapshot = {
       supportsTools: true,
       supportsStreaming: true,
       supportsReasoningSummaries: true,
+      supportsFileInput: false,
+      supportsAudioInput: false,
     },
   ],
 };

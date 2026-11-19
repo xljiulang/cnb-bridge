@@ -1980,7 +1980,7 @@ async fn responses_logs_ignored_input_features() {
         "missing ignored log: {logged}"
     );
     assert!(
-        logged.contains("input.item:web_search_call"),
+        logged.contains("input.item_degraded:web_search_call"),
         "missing detail: {logged}"
     );
     gateway.stop().await;
@@ -2031,6 +2031,61 @@ async fn response_format_is_dropped_on_upstream_400() {
             "input": "hello",
             "stream": false,
             "text": { "format": { "type": "json_object" } }
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    gateway.stop().await;
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn rejected_extended_chat_field_is_removed_and_retried_once() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_upstream = Arc::clone(&calls);
+    let upstream = Router::new().route(
+        "/chat/completions",
+        post(move |body: Bytes| {
+            let calls = Arc::clone(&calls_for_upstream);
+            async move {
+                let value: Value = serde_json::from_slice(&body).unwrap();
+                let attempt = calls.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    assert!(value.get("stop").is_some());
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": {"message": "unsupported parameter: stop"}})),
+                    )
+                        .into_response()
+                } else {
+                    assert!(value.get("stop").is_none());
+                    (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                    )
+                        .into_response()
+                }
+            }
+        }),
+    );
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let upstream_task = tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+    let (_temp, _bridge, gateway) = test_gateway_with_upstream(upstream_port).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{}/v1/responses", gateway.port()))
+        .json(&json!({
+            "model": "model",
+            "input": "hello",
+            "stream": false,
+            "stop": ["DONE"]
         }))
         .send()
         .await

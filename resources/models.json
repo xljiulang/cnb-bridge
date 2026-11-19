@@ -20,6 +20,8 @@
       "supports_images": true,
       "supports_tools": true,
       "supports_streaming": true,
+      "supports_file_input": false,
+      "supports_audio_input": false,
       "supports_parallel_tool_calls": true,
       "supports_reasoning_summaries": true,
       "visibility": "list",

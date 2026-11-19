@@ -16,10 +16,19 @@ pub(super) struct CallTrack {
     display_name: String,
     namespace: Option<String>,
     custom: bool,
+    tool_search: bool,
     arguments: String,
     extra_content: Option<Value>,
     output_index: usize,
     added: bool,
+}
+
+#[derive(Clone)]
+struct Failure {
+    error_type: String,
+    code: String,
+    message: String,
+    param: Option<String>,
 }
 
 /// Stateful Chat SSE chunk to Responses SSE translator.
@@ -27,6 +36,8 @@ pub struct ResponsesStream {
     response_id: String,
     model: String,
     created_at: u64,
+    service_tier: Option<Value>,
+    system_fingerprint: Option<Value>,
     shape: ToolShape,
     created: bool,
     next_index: usize,
@@ -38,7 +49,7 @@ pub struct ResponsesStream {
     output: Vec<Value>,
     finish_reason: Option<String>,
     usage: Option<Value>,
-    failure: Option<(String, String)>,
+    failure: Option<Failure>,
     finished: bool,
 }
 
@@ -54,6 +65,8 @@ impl ResponsesStream {
             response_id,
             model,
             created_at: unix_now(),
+            service_tier: None,
+            system_fingerprint: None,
             shape,
             created: false,
             next_index: 0,
@@ -96,9 +109,24 @@ impl ResponsesStream {
         if let Some(created) = chunk.get("created").and_then(Value::as_u64) {
             self.created_at = created;
         }
+        if let Some(service_tier) = chunk.get("service_tier").filter(|value| !value.is_null()) {
+            self.service_tier = Some(service_tier.clone());
+        }
+        if let Some(fingerprint) = chunk
+            .get("system_fingerprint")
+            .filter(|value| !value.is_null())
+        {
+            self.system_fingerprint = Some(fingerprint.clone());
+        }
         let mut events = self.ensure_created();
         if let Some(error) = chunk.get("error").filter(|value| !value.is_null()) {
-            self.failure = Some(("upstream_network_error".to_string(), error.to_string()));
+            let error = normalize_chat_error(Some(error));
+            self.failure = Some(Failure {
+                error_type: error.error_type,
+                code: error.code.unwrap_or_else(|| "upstream_error".to_string()),
+                message: error.message,
+                param: error.param,
+            });
             return events;
         }
         if let Some(usage) = chunk.get("usage").filter(|value| !value.is_null()) {
@@ -110,7 +138,7 @@ impl ResponsesStream {
         for choice in choices {
             let delta = choice.get("delta").unwrap_or(&Value::Null);
             if let Some(reasoning) = reasoning_text(delta) {
-                events.extend(self.reasoning_delta(reasoning));
+                events.extend(self.reasoning_delta(&reasoning));
             }
             if let Some(content) = delta.get("content").and_then(Value::as_str) {
                 if !content.is_empty() {
@@ -248,10 +276,12 @@ impl ResponsesStream {
             && self.output.is_empty()
             && self.calls.is_empty()
         {
-            self.failure = Some((
-                "incomplete_stream".to_string(),
-                "upstream stream ended without output or finish_reason".to_string(),
-            ));
+            self.failure = Some(Failure {
+                error_type: "upstream_error".to_string(),
+                code: "incomplete_stream".to_string(),
+                message: "upstream stream ended without output or finish_reason".to_string(),
+                param: None,
+            });
         }
         let incomplete_reason = match self.finish_reason.as_deref() {
             Some("length") => Some("max_output_tokens"),
@@ -262,17 +292,25 @@ impl ResponsesStream {
         if self.failure.is_none() && incomplete_reason.is_none() {
             for call in self.calls.values() {
                 if call.display_name.is_empty() {
-                    self.failure = Some((
-                        "upstream_tool_call_dropped".to_string(),
-                        "upstream returned a tool call without a function name".to_string(),
-                    ));
+                    self.failure = Some(Failure {
+                        error_type: "upstream_error".to_string(),
+                        code: "upstream_tool_call_dropped".to_string(),
+                        message: "upstream returned a tool call without a function name"
+                            .to_string(),
+                        param: None,
+                    });
                     break;
                 }
                 if !call.custom && normalize_arguments(&call.arguments).1 {
-                    self.failure = Some((
-                        "malformed_tool_call_arguments".to_string(),
-                        format!("tool call arguments for {} are invalid", call.display_name),
-                    ));
+                    self.failure = Some(Failure {
+                        error_type: "upstream_error".to_string(),
+                        code: "malformed_tool_call_arguments".to_string(),
+                        message: format!(
+                            "tool call arguments for {} are invalid",
+                            call.display_name
+                        ),
+                        param: None,
+                    });
                     break;
                 }
             }
@@ -310,6 +348,33 @@ impl ResponsesStream {
                             "name": call.display_name,
                             "input": input
                         });
+                        self.output.push(item.clone());
+                        json!({
+                            "type": "response.output_item.done",
+                            "output_index": call.output_index,
+                            "item": item
+                        })
+                    }));
+                } else if call.tool_search {
+                    let (arguments, repaired) = normalize_arguments(&call.arguments);
+                    let arguments = if incomplete_reason.is_some() && repaired {
+                        call.arguments.clone()
+                    } else {
+                        arguments
+                    };
+                    let arguments = serde_json::from_str::<Value>(&arguments)
+                        .ok()
+                        .filter(Value::is_object)
+                        .unwrap_or_else(|| json!({ "query": arguments }));
+                    let item = json!({
+                        "id": call.item_id,
+                        "type": "tool_search_call",
+                        "status": "completed",
+                        "call_id": call.call_id,
+                        "execution": "client",
+                        "arguments": arguments
+                    });
+                    events.push(sse_event("response.output_item.done", {
                         self.output.push(item.clone());
                         json!({
                             "type": "response.output_item.done",
@@ -357,7 +422,7 @@ impl ResponsesStream {
                 }
             }
         }
-        let terminal = if let Some((code, detail)) = self.failure.take() {
+        let terminal = if let Some(failure) = self.failure.take() {
             sse_event(
                 "response.failed",
                 json!({
@@ -368,11 +433,14 @@ impl ResponsesStream {
                         "created_at": self.created_at,
                         "status": "failed",
                         "model": self.model,
+                        "service_tier": self.service_tier,
+                        "system_fingerprint": self.system_fingerprint,
                         "output": self.output,
                         "error": {
-                            "code": code,
-                            "message": detail,
-                            "param": null,
+                            "type": failure.error_type,
+                            "code": failure.code,
+                            "message": failure.message,
+                            "param": failure.param,
                             "retryable": false
                         }
                     }
@@ -389,6 +457,8 @@ impl ResponsesStream {
                         "created_at": self.created_at,
                         "status": "incomplete",
                         "model": self.model,
+                        "service_tier": self.service_tier,
+                        "system_fingerprint": self.system_fingerprint,
                         "output": self.output,
                         "error": null,
                         "incomplete_details": { "reason": reason },
@@ -407,6 +477,8 @@ impl ResponsesStream {
                         "created_at": self.created_at,
                         "status": "completed",
                         "model": self.model,
+                        "service_tier": self.service_tier,
+                        "system_fingerprint": self.system_fingerprint,
                         "output": self.output,
                         "error": null,
                         "usage": usage_to_responses(self.usage.as_ref())
@@ -423,7 +495,12 @@ impl ResponsesStream {
         if self.finished {
             return Vec::new();
         }
-        self.failure = Some((code.into(), message.into()));
+        self.failure = Some(Failure {
+            error_type: "upstream_error".to_string(),
+            code: code.into(),
+            message: message.into(),
+            param: None,
+        });
         self.finish()
     }
 
@@ -438,6 +515,8 @@ impl ResponsesStream {
             "created_at": self.created_at,
             "status": "in_progress",
             "model": self.model,
+            "service_tier": self.service_tier,
+            "system_fingerprint": self.system_fingerprint,
             "output": [],
             "error": null
         });
@@ -631,9 +710,16 @@ impl ResponsesStream {
         let extra_content = state.extra_content.clone();
         let (display_name, namespace) = self.shape.resolve(&raw_name);
         let custom = self.shape.is_custom(&display_name);
+        let tool_search = self.shape.is_tool_search(&display_name);
         let output_index = self.next_index;
         self.next_index = self.next_index.saturating_add(1);
-        let item_id = gen_id(if custom { "ctc" } else { "fc" });
+        let item_id = gen_id(if custom {
+            "ctc"
+        } else if tool_search {
+            "tsc"
+        } else {
+            "fc"
+        });
 
         let Some(state) = self.calls.get_mut(&key) else {
             return Vec::new();
@@ -642,6 +728,7 @@ impl ResponsesStream {
         state.display_name = display_name.clone();
         state.namespace = namespace.clone();
         state.custom = custom;
+        state.tool_search = tool_search;
         state.output_index = output_index;
         state.item_id = item_id.clone();
 
@@ -653,6 +740,15 @@ impl ResponsesStream {
                 "call_id": call_id,
                 "name": display_name,
                 "input": ""
+            })
+        } else if tool_search {
+            json!({
+                "id": item_id,
+                "type": "tool_search_call",
+                "status": "in_progress",
+                "call_id": call_id,
+                "execution": "client",
+                "arguments": {}
             })
         } else {
             let mut item = json!({
@@ -704,6 +800,7 @@ impl ResponsesStream {
             display_name: String::new(),
             namespace: None,
             custom: false,
+            tool_search: false,
             arguments: String::new(),
             extra_content: None,
             output_index: 0,
@@ -762,31 +859,67 @@ impl ResponsesStream {
 /// `reasoning` (OpenRouter) or `reasoning_details[].text` (aggregated
 /// providers). Both the streaming translator and the non-streaming aggregator
 /// use this so the two paths cannot drift apart.
-pub(crate) fn reasoning_text(delta: &Value) -> Option<&str> {
+pub(crate) fn reasoning_text(delta: &Value) -> Option<String> {
     delta
         .get("reasoning_content")
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
+        .map(str::to_string)
         .or_else(|| {
             delta
                 .get("reasoning")
                 .and_then(Value::as_str)
                 .filter(|text| !text.is_empty())
+                .map(str::to_string)
         })
         .or_else(|| {
-            delta
-                .get("reasoning_details")
-                .and_then(Value::as_array)
-                .and_then(|details| {
-                    details.iter().find_map(|detail| {
-                        detail
-                            .get("text")
-                            .and_then(Value::as_str)
-                            .or_else(|| detail.get("summary").and_then(Value::as_str))
-                    })
-                })
-                .filter(|text| !text.is_empty())
+            let reasoning = delta.get("reasoning")?;
+            for key in ["content", "text", "summary"] {
+                if let Some(text) = reasoning
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                {
+                    return Some(text.to_string());
+                }
+            }
+            None
         })
+        .or_else(|| {
+            let details = delta.get("reasoning_details")?;
+            let parts = match details {
+                Value::Array(parts) => parts.iter().collect::<Vec<_>>(),
+                other => vec![other],
+            };
+            let text = parts
+                .into_iter()
+                .filter_map(reasoning_detail_text)
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            (!text.is_empty()).then_some(text)
+        })
+}
+
+fn reasoning_detail_text(detail: &Value) -> Option<String> {
+    for key in ["text", "content", "summary"] {
+        if let Some(text) = detail
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+        {
+            return Some(text.to_string());
+        }
+    }
+    if let Some(parts) = detail.get("parts").and_then(Value::as_array) {
+        let text = parts
+            .iter()
+            .filter_map(reasoning_detail_text)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        return (!text.is_empty()).then_some(text);
+    }
+    None
 }
 
 pub(super) fn sse_event(name: &str, data: Value) -> Bytes {

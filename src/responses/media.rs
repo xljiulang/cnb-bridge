@@ -29,10 +29,11 @@ pub(super) fn extract_tool_output_media(
     output: &Value,
     call_id: &str,
     media: &mut Vec<Value>,
+    options: TranslationOptions,
 ) -> Option<String> {
     let mut owned = output.clone();
     let mut parts = Vec::new();
-    if strip_media(&mut owned, &mut parts, 0) == 0 {
+    if strip_media(&mut owned, &mut parts, 0, options) == 0 {
         return None;
     }
     media.push(json!({
@@ -57,29 +58,34 @@ pub(super) fn flush_tool_media(messages: &mut Vec<Value>, media: &mut Vec<Value>
     }));
 }
 
-fn strip_media(value: &mut Value, parts: &mut Vec<Value>, depth: usize) -> usize {
+fn strip_media(
+    value: &mut Value,
+    parts: &mut Vec<Value>,
+    depth: usize,
+    options: TranslationOptions,
+) -> usize {
     if depth > MAX_MEDIA_DEPTH {
         return 0;
     }
     let current = std::mem::replace(value, Value::Null);
     let (rewritten, extracted) = match current {
-        Value::String(text) => strip_media_string(&text, parts, depth),
+        Value::String(text) => strip_media_string(&text, parts, depth, options),
         Value::Array(mut items) => {
             let mut extracted = 0;
             for item in items.iter_mut() {
-                extracted += strip_media(item, parts, depth + 1);
+                extracted += strip_media(item, parts, depth + 1, options);
             }
             (Value::Array(items), extracted)
         }
         Value::Object(mut object) => {
-            if let Some(part) = chat_media_part(&object) {
+            if let Some(part) = chat_media_part(&object, options) {
                 parts.push(part);
                 (json!({ "type": "text", "text": TOOL_MEDIA_MOVED }), 1)
             } else {
                 // Only `content` is traversed: an unrelated business payload
                 // may legitimately contain an `image_url` field.
                 let extracted = match object.get_mut("content") {
-                    Some(content) => strip_media(content, parts, depth + 1),
+                    Some(content) => strip_media(content, parts, depth + 1, options),
                     None => 0,
                 };
                 (Value::Object(object), extracted)
@@ -91,7 +97,12 @@ fn strip_media(value: &mut Value, parts: &mut Vec<Value>, depth: usize) -> usize
     extracted
 }
 
-fn strip_media_string(text: &str, parts: &mut Vec<Value>, depth: usize) -> (Value, usize) {
+fn strip_media_string(
+    text: &str,
+    parts: &mut Vec<Value>,
+    depth: usize,
+    options: TranslationOptions,
+) -> (Value, usize) {
     if let Some(part) = data_url_image(text) {
         parts.push(part);
         return (Value::String(TOOL_MEDIA_MOVED.to_string()), 1);
@@ -99,7 +110,7 @@ fn strip_media_string(text: &str, parts: &mut Vec<Value>, depth: usize) -> (Valu
     let trimmed = text.trim();
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
         if let Ok(mut parsed) = serde_json::from_str::<Value>(trimmed) {
-            let extracted = strip_media(&mut parsed, parts, depth + 1);
+            let extracted = strip_media(&mut parsed, parts, depth + 1, options);
             if extracted > 0 {
                 return (Value::String(parsed.to_string()), extracted);
             }
@@ -119,9 +130,15 @@ fn data_url_image(text: &str) -> Option<Value> {
     Some(json!({ "type": "image_url", "image_url": { "url": url } }))
 }
 
-fn chat_media_part(object: &serde_json::Map<String, Value>) -> Option<Value> {
+fn chat_media_part(
+    object: &serde_json::Map<String, Value>,
+    options: TranslationOptions,
+) -> Option<Value> {
     match object.get("type").and_then(Value::as_str) {
         Some("input_image" | "image_url") => object.get("image_url").and_then(image_url_part),
+        Some("input_file" | "input_audio") => {
+            super::request::chat_content_part(&Value::Object(object.clone()), options)
+        }
         _ => None,
     }
 }

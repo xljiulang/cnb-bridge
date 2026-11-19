@@ -19,6 +19,8 @@ pub struct ModelSummary {
     pub supports_tools: bool,
     pub supports_streaming: bool,
     pub supports_reasoning_summaries: bool,
+    pub supports_file_input: bool,
+    pub supports_audio_input: bool,
 }
 
 /// Parses and validates the embedded OpenAI-compatible model catalog.
@@ -76,6 +78,8 @@ pub fn summaries() -> Result<Vec<ModelSummary>, String> {
             supports_reasoning_summaries: model["supports_reasoning_summaries"]
                 .as_bool()
                 .unwrap_or(false),
+            supports_file_input: model["supports_file_input"].as_bool().unwrap_or(false),
+            supports_audio_input: model["supports_audio_input"].as_bool().unwrap_or(false),
             id,
         });
     }

@@ -9,14 +9,28 @@ use super::request::{is_compaction_turn, is_handled_input_type, text_format_kind
 use super::*;
 
 /// Content part types `message_content` carries into the Chat message.
-const HANDLED_CONTENT_PARTS: [&str; 3] = ["input_text", "output_text", "input_image"];
+const HANDLED_CONTENT_PARTS: [&str; 6] = [
+    "input_text",
+    "output_text",
+    "input_image",
+    "input_file",
+    "input_audio",
+    "refusal",
+];
 
 /// Lists, in a stable order, everything the translation layer accepted but
 /// could not carry into the Chat request.
 pub fn ignored_feature_details(request: &Value) -> Vec<String> {
+    ignored_feature_details_with_options(request, TranslationOptions::default())
+}
+
+pub fn ignored_feature_details_with_options(
+    request: &Value,
+    options: TranslationOptions,
+) -> Vec<String> {
     let mut details = Vec::new();
-    collect_input_items(request, &mut details);
-    collect_content_parts(request, &mut details);
+    collect_input_items(request, &mut details, options);
+    collect_content_parts(request, &mut details, options);
     details.extend(collect_declared_tools(request).notes);
     details.extend(text_format_kind(request).details());
     if is_compaction_turn(request) && request.get("tools").is_some() {
@@ -27,7 +41,7 @@ pub fn ignored_feature_details(request: &Value) -> Vec<String> {
     details
 }
 
-fn collect_input_items(request: &Value, details: &mut Vec<String>) {
+fn collect_input_items(request: &Value, details: &mut Vec<String>, options: TranslationOptions) {
     let Some(items) = request.get("input").and_then(Value::as_array) else {
         return;
     };
@@ -40,6 +54,12 @@ fn collect_input_items(request: &Value, details: &mut Vec<String>) {
             Some(name) => {
                 if !is_handled_input_type(name) {
                     details.push(format!("input.item:{name}"));
+                } else if name == "input_file" && !options.supports_file_input {
+                    details.push("input.item_degraded:input_file_unsupported".to_string());
+                } else if name == "input_audio" && !options.supports_audio_input {
+                    details.push("input.item_degraded:input_audio_unsupported".to_string());
+                } else if super::request::DEGRADED_INPUT_TYPES.contains(&name) {
+                    details.push(format!("input.item_degraded:{name}"));
                 }
             }
             // An item without a type is treated as a message only when it
@@ -50,7 +70,7 @@ fn collect_input_items(request: &Value, details: &mut Vec<String>) {
     }
 }
 
-fn collect_content_parts(request: &Value, details: &mut Vec<String>) {
+fn collect_content_parts(request: &Value, details: &mut Vec<String>, options: TranslationOptions) {
     let Some(items) = request.get("input").and_then(Value::as_array) else {
         return;
     };
@@ -63,6 +83,12 @@ fn collect_content_parts(request: &Value, details: &mut Vec<String>) {
                 continue;
             }
             match part.get("type").and_then(Value::as_str) {
+                Some("input_file") if !options.supports_file_input => {
+                    details.push("content.part:input_file_unsupported".to_string())
+                }
+                Some("input_audio") if !options.supports_audio_input => {
+                    details.push("content.part:input_audio_unsupported".to_string())
+                }
                 Some(name) if HANDLED_CONTENT_PARTS.contains(&name) => {}
                 Some(name) => details.push(format!("content.part:{name}")),
                 None => details.push("content.part:none".to_string()),

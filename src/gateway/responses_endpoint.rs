@@ -43,7 +43,28 @@ pub(super) async fn handle_responses(
             ),
         );
     }
-    let ignored = ignored_feature_details(&request);
+    let stream = request
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let model = request
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let options = model_catalog::summaries()
+        .ok()
+        .and_then(|models| {
+            models
+                .into_iter()
+                .find(|candidate| candidate.id == model)
+                .map(|candidate| TranslationOptions {
+                    supports_file_input: candidate.supports_file_input,
+                    supports_audio_input: candidate.supports_audio_input,
+                })
+        })
+        .unwrap_or_default();
+    let ignored = ignored_feature_details_with_options(&request, options);
     if !ignored.is_empty() {
         state.logger.log(
             "warn",
@@ -54,17 +75,8 @@ pub(super) async fn handle_responses(
             ),
         );
     }
-    let stream = request
-        .get("stream")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let model = request
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
     let shape = ToolShape::from_request(&request);
-    let mut chat = match responses_to_chat(&request, true) {
+    let mut chat = match responses_to_chat_with_options(&request, true, options) {
         Ok(chat) => chat,
         Err(message) => return error_response(StatusCode::BAD_REQUEST, "invalid_json", message),
     };

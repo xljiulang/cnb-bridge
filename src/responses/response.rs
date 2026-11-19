@@ -71,7 +71,7 @@ pub fn chat_to_responses(chat: &Value, model: &str, shape: &ToolShape) -> Result
             }));
         }
 
-        if let Some(reasoning) = reasoning_text(&message).or(inline_reasoning.as_deref()) {
+        if let Some(reasoning) = reasoning_text(&message).or(inline_reasoning) {
             output.push(json!({
                 "id": gen_id("rs"),
                 "type": "reasoning",
@@ -196,6 +196,20 @@ pub(super) fn translate_tool_call(call: &Value, shape: &ToolShape) -> Result<Val
         .and_then(Value::as_str)
         .unwrap_or("");
     let (name, namespace) = shape.resolve(name);
+    if shape.is_tool_search(&name) {
+        let arguments = serde_json::from_str::<Value>(arguments.trim())
+            .ok()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({ "query": arguments }));
+        return Ok(json!({
+            "id": gen_id("tsc"),
+            "type": "tool_search_call",
+            "status": "completed",
+            "call_id": call_id,
+            "execution": "client",
+            "arguments": arguments
+        }));
+    }
     if shape.is_custom(&name) || shape.custom.contains(&name) {
         return Ok(json!({
             "id": gen_id("ctc"),

@@ -19,6 +19,8 @@ fn exposes_embedded_model_catalog_for_desktop_clients() {
     assert!(model.supports_tools);
     assert!(model.supports_streaming);
     assert!(model.supports_reasoning_summaries);
+    assert!(!model.supports_file_input);
+    assert!(!model.supports_audio_input);
 }
 
 #[test]
@@ -35,4 +37,6 @@ fn serializes_model_summaries_with_camel_case_fields() {
         serde_json::json!(["text", "image"])
     );
     assert_eq!(value["supportsTools"], true);
+    assert_eq!(value["supportsFileInput"], false);
+    assert_eq!(value["supportsAudioInput"], false);
 }

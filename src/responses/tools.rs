@@ -1,12 +1,14 @@
 use super::*;
 
 const CHAT_TOOL_NAME_MAX_BYTES: usize = 64;
+pub(super) const TOOL_SEARCH_PROXY_NAME: &str = "_cyarp_tool_search";
 
 #[derive(Default, Clone)]
 pub struct ToolShape {
     namespaces: HashMap<String, (String, String)>,
     declared: HashSet<String>,
     pub(super) custom: HashSet<String>,
+    tool_search: bool,
 }
 
 /// Tool declarations after deduplication by their flattened Chat name.
@@ -110,12 +112,9 @@ fn absorb_tools(
                 declared.tools.push(clone);
             }
             Some("tool_search") => {
-                // Codex routes tool calls by item variant, so exposing a
-                // `tool_search` function without restoring `tool_search_call`
-                // would hand the client a name it cannot dispatch.
-                declared
-                    .notes
-                    .push("tools.untracked:tool_search".to_string());
+                if admit(TOOL_SEARCH_PROXY_NAME, source, seen, declared) {
+                    declared.tools.push(tool.clone());
+                }
             }
             _ => {
                 let Some(name) = tool_name(tool) else {
@@ -181,6 +180,10 @@ impl ToolShape {
                         shape.declared.insert(name.to_string());
                     }
                 }
+                Some("tool_search") => {
+                    shape.tool_search = true;
+                    shape.declared.insert(TOOL_SEARCH_PROXY_NAME.to_string());
+                }
                 _ => {
                     if let Some(name) = tool_name(tool) {
                         shape.declared.insert(name.to_string());
@@ -200,6 +203,10 @@ impl ToolShape {
 
     pub(super) fn is_custom(&self, name: &str) -> bool {
         self.custom.contains(name)
+    }
+
+    pub(super) fn is_tool_search(&self, name: &str) -> bool {
+        self.tool_search && name == TOOL_SEARCH_PROXY_NAME
     }
 
     pub(super) fn chat_name_for_choice(
@@ -264,6 +271,31 @@ pub(super) fn translate_tools(tools: &[Value]) -> Vec<Value> {
                                     }
                                 },
                                 "required": ["input"]
+                            }
+                        }
+                    }));
+                }
+            }
+            Some("tool_search") => {
+                if seen.insert(TOOL_SEARCH_PROXY_NAME.to_string()) {
+                    translated.push(json!({
+                        "type": "function",
+                        "function": {
+                            "name": TOOL_SEARCH_PROXY_NAME,
+                            "description": "Search and load Codex tools, plugins, connectors, and MCP namespaces for the current task.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "query": {
+                                        "type": "string",
+                                        "description": "Search query for tools or connectors to load."
+                                    },
+                                    "limit": {
+                                        "type": "integer",
+                                        "description": "Maximum number of tool groups to return."
+                                    }
+                                },
+                                "required": ["query"]
                             }
                         }
                     }));
@@ -428,6 +460,14 @@ pub(super) fn translate_tool_choice(choice: Option<&Value>, shape: &ToolShape) -
             let name = shape.chat_name_for_choice(name, namespace)?;
             Some(json!({ "type": "function", "function": { "name": name } }))
         }
+        Value::Object(object)
+            if object.get("type").and_then(Value::as_str) == Some("tool_search") =>
+        {
+            Some(json!({
+                "type": "function",
+                "function": { "name": TOOL_SEARCH_PROXY_NAME }
+            }))
+        }
         _ => None,
     }
 }
@@ -488,8 +528,7 @@ pub(super) fn normalize_arguments(raw: &str) -> (String, bool) {
     if raw.is_empty() {
         return ("{}".to_string(), false);
     }
-    match serde_json::from_str::<Value>(raw) {
-        Ok(Value::Object(_)) => (raw.to_string(), false),
-        _ => ("{}".to_string(), true),
-    }
+    super::canonical::canonicalize_object_arguments(raw)
+        .map(|arguments| (arguments, false))
+        .unwrap_or_else(|| ("{}".to_string(), true))
 }

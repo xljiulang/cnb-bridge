@@ -258,32 +258,40 @@ pub(super) fn upstream_error_from_text(
             request_id.to_string(),
         );
     }
-    let message = serde_json::from_str::<Value>(&text)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/error/message")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .filter(|message| !message.is_empty())
-        .unwrap_or_else(|| {
-            if text.is_empty() {
-                format!("upstream returned HTTP {}", status.as_u16())
-            } else {
-                text
-            }
-        });
-    let code = match status.as_u16() {
-        400 => "upstream_invalid_request",
-        401 => "upstream_unauthorized",
-        403 => "upstream_forbidden",
-        408 => "upstream_timeout",
-        429 => "upstream_rate_limited",
-        500..=599 => "upstream_server_error",
-        _ => "upstream_invalid_request",
+    let normalized = crate::responses::normalize_chat_error_text(&text);
+    let message = if normalized.message.is_empty() {
+        format!("upstream returned HTTP {}", status.as_u16())
+    } else {
+        normalized.message
     };
-    let mut response = error_response_with_id(status, code, message, request_id.to_string());
+    let code = if normalized.code.as_deref() == Some("context_length_exceeded") {
+        "context_length_exceeded"
+    } else {
+        match status.as_u16() {
+            400 => "upstream_invalid_request",
+            401 => "upstream_unauthorized",
+            403 => "upstream_forbidden",
+            408 => "upstream_timeout",
+            429 => "upstream_rate_limited",
+            500..=599 => "upstream_server_error",
+            _ => "upstream_invalid_request",
+        }
+    };
+    let (fallback_type, retryable) = error_contract(code, status);
+    let error_type = if normalized.error_type == "upstream_error" {
+        fallback_type.to_string()
+    } else {
+        normalized.error_type
+    };
+    let mut response = error_response_with_details(
+        status,
+        code,
+        message,
+        error_type,
+        normalized.param,
+        retryable,
+        request_id.to_string(),
+    );
     if let Some(retry_after) = retry_after {
         response
             .headers_mut()

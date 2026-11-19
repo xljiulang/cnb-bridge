@@ -78,6 +78,198 @@ fn translates_instructions_messages_images_and_tools() {
 }
 
 #[test]
+fn canonicalizes_valid_function_arguments_in_history() {
+    let request = json!({
+        "model": "model",
+        "input": [{
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "lookup",
+            "arguments": "{ \"b\": { \"z\": 2, \"a\": 1 }, \"a\": [3, { \"y\": 2, \"x\": 1 }] }"
+        }]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+
+    assert_eq!(
+        chat["messages"][0]["tool_calls"][0]["function"]["arguments"],
+        "{\"a\":[3,{\"x\":1,\"y\":2}],\"b\":{\"a\":1,\"z\":2}}"
+    );
+}
+
+#[test]
+fn preserves_custom_freeform_input_exactly() {
+    let request = json!({
+        "model": "model",
+        "input": [{
+            "type": "custom_tool_call",
+            "call_id": "call_patch",
+            "name": "apply_patch",
+            "input": "*** Begin Patch\n*** End Patch"
+        }]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let arguments = chat["messages"][0]["tool_calls"][0]["function"]["arguments"]
+        .as_str()
+        .unwrap();
+    let parsed: Value = serde_json::from_str(arguments).unwrap();
+
+    assert_eq!(parsed["input"], "*** Begin Patch\n*** End Patch");
+}
+
+#[test]
+fn degrades_file_and_audio_parts_when_model_capabilities_are_absent() {
+    let request = json!({
+        "model": "model",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [
+                { "type": "input_text", "text": "inspect" },
+                {
+                    "type": "input_file",
+                    "filename": "report.pdf",
+                    "file_data": "data:application/pdf;base64,AA=="
+                },
+                {
+                    "type": "input_audio",
+                    "input_audio": { "data": "AAAA", "format": "wav" }
+                }
+            ]
+        }]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let content = chat["messages"][0]["content"].as_str().unwrap();
+    assert!(content.contains("file attachment omitted"));
+    assert!(content.contains("report.pdf"));
+    assert!(content.contains("audio attachment omitted"));
+    let details = ignored_feature_details_with_options(&request, TranslationOptions::default());
+    assert!(details.contains(&"content.part:input_file_unsupported".to_string()));
+    assert!(details.contains(&"content.part:input_audio_unsupported".to_string()));
+}
+
+#[test]
+fn maps_supported_file_and_audio_parts() {
+    let request = json!({
+        "model": "model",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_file",
+                    "filename": "report.pdf",
+                    "file_data": "data:application/pdf;base64,AA=="
+                },
+                {
+                    "type": "input_audio",
+                    "input_audio": { "data": "AAAA", "format": "wav" }
+                }
+            ]
+        }]
+    });
+
+    let chat = responses_to_chat_with_options(
+        &request,
+        false,
+        TranslationOptions {
+            supports_file_input: true,
+            supports_audio_input: true,
+        },
+    )
+    .unwrap();
+    let content = chat["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(content[0]["type"], "file");
+    assert_eq!(content[0]["file"]["filename"], "report.pdf");
+    assert_eq!(
+        content[0]["file"]["file_data"],
+        "data:application/pdf;base64,AA=="
+    );
+    assert_eq!(content[1]["type"], "input_audio");
+    assert_eq!(content[1]["input_audio"]["format"], "wav");
+}
+
+#[test]
+fn maps_top_level_input_file_item() {
+    let request = json!({
+        "model": "model",
+        "input": [{
+            "type": "input_file",
+            "filename": "report.pdf",
+            "file_data": "data:application/pdf;base64,AA=="
+        }]
+    });
+
+    let chat = responses_to_chat_with_options(
+        &request,
+        false,
+        TranslationOptions {
+            supports_file_input: true,
+            supports_audio_input: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(chat["messages"][0]["role"], "user");
+    assert_eq!(chat["messages"][0]["content"][0]["type"], "file");
+}
+
+#[test]
+fn normalizes_base_resp_and_context_length_errors() {
+    let base_resp = normalize_chat_error(Some(&json!({
+        "base_resp": {
+            "status_code": 2013,
+            "status_msg": "invalid params"
+        }
+    })));
+    assert_eq!(base_resp.message, "invalid params");
+    assert_eq!(base_resp.code.as_deref(), Some("2013"));
+
+    let context = normalize_chat_error(Some(&json!({
+        "detail": "input token count exceeds the maximum number of tokens allowed"
+    })));
+    assert_eq!(context.code.as_deref(), Some("context_length_exceeded"));
+
+    let standard = normalize_chat_error(Some(&json!({
+        "error": {
+            "message": "bad input",
+            "type": "invalid_request_error",
+            "code": "E_BAD",
+            "param": "input"
+        }
+    })));
+    assert_eq!(standard.error_type, "invalid_request_error");
+    assert_eq!(standard.code.as_deref(), Some("E_BAD"));
+    assert_eq!(standard.param.as_deref(), Some("input"));
+
+    let plain = normalize_chat_error_text("plain upstream failure");
+    assert_eq!(plain.message, "plain upstream failure");
+
+    let missing = normalize_chat_error(None);
+    assert!(missing.message.contains("empty error response"));
+}
+
+#[test]
+fn stream_error_uses_normalized_upstream_code_and_message() {
+    let mut stream = ResponsesStream::new("resp_error".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "error": {
+            "base_resp": {
+                "status_code": 2013,
+                "status_msg": "invalid params"
+            }
+        }
+    }));
+    events.extend(stream.finish());
+
+    let failed = terminal_response(&events, "response.failed");
+    assert_eq!(failed["response"]["error"]["code"], "2013");
+    assert_eq!(failed["response"]["error"]["message"], "invalid params");
+}
+
+#[test]
 fn restores_namespace_and_custom_tools_in_response() {
     let request = json!({
         "tools": [{
@@ -287,12 +479,12 @@ fn reports_unsupported_responses_features_without_rejecting_them() {
     // carry (no schema) shows up as an ignored detail.
     assert_eq!(
         unsupported_feature_names(&request),
-        ["previous_response_id", "input.items"]
+        ["previous_response_id"]
     );
     assert_eq!(
         ignored_feature_details(&request),
         [
-            "input.item:mcp_call",
+            "input.item_degraded:mcp_call",
             "text.format.type:json_schema_without_schema"
         ]
     );
@@ -366,6 +558,29 @@ fn stream_uses_upstream_metadata_and_emits_in_progress() {
     assert_eq!(completed["response"]["id"], "resp_upstream");
     assert_eq!(completed["response"]["model"], "upstream-model");
     assert_eq!(completed["response"]["created_at"], 42);
+}
+
+#[test]
+fn stream_preserves_service_tier_and_system_fingerprint() {
+    let mut stream = ResponsesStream::new("resp_meta".to_string(), "requested-model".to_string());
+    let mut events = stream.push(&json!({
+        "id": "chatcmpl-meta",
+        "model": "upstream-model",
+        "service_tier": "priority",
+        "system_fingerprint": "fp-stream",
+        "choices": [{
+            "delta": { "content": "hello" },
+            "finish_reason": "stop"
+        }]
+    }));
+    events.extend(stream.finish());
+
+    let created = named_events(&events, "response.created");
+    let completed = terminal_response(&events, "response.completed");
+    assert_eq!(created[0]["response"]["service_tier"], "priority");
+    assert_eq!(created[0]["response"]["system_fingerprint"], "fp-stream");
+    assert_eq!(completed["response"]["service_tier"], "priority");
+    assert_eq!(completed["response"]["system_fingerprint"], "fp-stream");
 }
 
 #[test]
@@ -1495,6 +1710,51 @@ fn extracts_nested_media_from_custom_tool_call_output() {
 }
 
 #[test]
+fn moves_supported_tool_output_file_to_following_user_message() {
+    let request = json!({
+        "model": "model",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "call_file",
+                "name": "read_file",
+                "arguments": "{}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_file",
+                "output": {
+                    "content": [{
+                        "type": "input_file",
+                        "filename": "report.pdf",
+                        "file_data": "data:application/pdf;base64,AA=="
+                    }]
+                }
+            }
+        ]
+    });
+
+    let chat = responses_to_chat_with_options(
+        &request,
+        false,
+        TranslationOptions {
+            supports_file_input: true,
+            supports_audio_input: false,
+        },
+    )
+    .unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert_eq!(roles(messages), ["assistant", "tool", "user"]);
+    assert!(messages[1]["content"].as_str().unwrap().contains("moved"));
+    assert!(messages[2]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|part| part["type"] == "file"));
+}
+
+#[test]
 fn leaves_tool_output_without_media_unchanged() {
     let request = json!({
         "model": "model",
@@ -1613,11 +1873,11 @@ fn reports_duplicate_flat_tool_names() {
 #[test]
 fn reads_reasoning_from_reasoning_details() {
     assert_eq!(
-        reasoning_text(&json!({ "reasoning_details": [{ "text": "think" }] })),
+        reasoning_text(&json!({ "reasoning_details": [{ "text": "think" }] })).as_deref(),
         Some("think")
     );
     assert_eq!(
-        reasoning_text(&json!({ "reasoning_details": [{ "summary": "short" }] })),
+        reasoning_text(&json!({ "reasoning_details": [{ "summary": "short" }] })).as_deref(),
         Some("short")
     );
     // The explicit field still wins when both are present.
@@ -1625,8 +1885,45 @@ fn reads_reasoning_from_reasoning_details() {
         reasoning_text(&json!({
             "reasoning_content": "primary",
             "reasoning_details": [{ "text": "secondary" }]
-        })),
+        }))
+        .as_deref(),
         Some("primary")
+    );
+}
+
+#[test]
+fn reads_reasoning_object_and_joins_multiple_details() {
+    assert_eq!(
+        reasoning_text(&json!({
+            "reasoning": { "content": "object content" }
+        }))
+        .as_deref(),
+        Some("object content")
+    );
+    assert_eq!(
+        reasoning_text(&json!({
+            "reasoning": { "text": "object text" }
+        }))
+        .as_deref(),
+        Some("object text")
+    );
+    assert_eq!(
+        reasoning_text(&json!({
+            "reasoning": { "summary": "object summary" }
+        }))
+        .as_deref(),
+        Some("object summary")
+    );
+    assert_eq!(
+        reasoning_text(&json!({
+            "reasoning_details": [
+                { "text": "first" },
+                { "content": "second" },
+                { "summary": "third" }
+            ]
+        }))
+        .as_deref(),
+        Some("first\n\nsecond\n\nthird")
     );
 }
 
@@ -1674,12 +1971,56 @@ fn reports_ignored_input_items_and_content_parts() {
     assert_eq!(
         details,
         [
-            "content.part:input_audio",
+            "content.part:input_audio_unsupported",
             "input.item:non_object",
             "input.item:none",
-            "input.item:web_search_call"
+            "input.item_degraded:web_search_call"
         ]
     );
+}
+
+#[test]
+fn degrades_unrepresentable_hosted_items_to_text_context() {
+    let request = json!({
+        "model": "model",
+        "input": [
+            {
+                "type": "web_search_call",
+                "id": "ws_1",
+                "status": "completed"
+            },
+            {
+                "type": "computer_call",
+                "call_id": "computer_1",
+                "action": { "type": "click" }
+            },
+            {
+                "type": "mcp_call",
+                "name": "lookup"
+            },
+            {
+                "type": "local_shell_call",
+                "command": ["dir"]
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let text = chat["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message.get("content").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("web_search_call"));
+    assert!(text.contains("computer_call"));
+    assert!(text.contains("mcp_call"));
+    assert!(text.contains("local_shell_call"));
+
+    let details = ignored_feature_details(&request);
+    assert!(details.contains(&"input.item_degraded:web_search_call".to_string()));
+    assert!(!details.contains(&"input.item:web_search_call".to_string()));
 }
 
 #[test]
@@ -1720,6 +2061,37 @@ fn handled_input_types_stay_in_sync() {
             "handled type {name} is reported as dropped: {details:?}"
         );
     }
+}
+
+#[test]
+fn passes_extended_chat_fields_and_ignores_nulls() {
+    let request = json!({
+        "model": "model",
+        "input": "hello",
+        "frequency_penalty": 0.5,
+        "logit_bias": { "42": -5 },
+        "logprobs": true,
+        "metadata": { "trace": "abc" },
+        "n": 1,
+        "presence_penalty": 0.25,
+        "stop": ["DONE"],
+        "top_logprobs": 3,
+        "user": "user-1",
+        "seed": null
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+
+    assert_eq!(chat["frequency_penalty"], 0.5);
+    assert_eq!(chat["logit_bias"]["42"], -5);
+    assert_eq!(chat["logprobs"], true);
+    assert_eq!(chat["metadata"]["trace"], "abc");
+    assert_eq!(chat["n"], 1);
+    assert_eq!(chat["presence_penalty"], 0.25);
+    assert_eq!(chat["stop"], json!(["DONE"]));
+    assert_eq!(chat["top_logprobs"], 3);
+    assert_eq!(chat["user"], "user-1");
+    assert!(chat.get("seed").is_none());
 }
 
 #[test]
@@ -1888,7 +2260,7 @@ fn defers_tool_search_output_to_a_note_after_the_tool_block() {
     let messages = chat["messages"].as_array().unwrap();
 
     assert_eq!(roles(messages), ["assistant", "tool", "user"]);
-    let note = messages[2]["content"][0]["text"].as_str().unwrap();
+    let note = messages[2]["content"].as_str().unwrap();
     assert!(note.contains("ns__exec"), "{note}");
     assert_eq!(chat["tools"][0]["function"]["name"], "ns__exec");
 }
@@ -2300,6 +2672,123 @@ fn translates_namespaced_tool_choice_to_flattened_chat_name() {
             "function": { "name": "codexui__get_usage" }
         })
     );
+}
+
+#[test]
+fn maps_tool_search_declaration_and_choice_to_proxy_function() {
+    let request = json!({
+        "model": "model",
+        "input": "find tools",
+        "tools": [{ "type": "tool_search" }],
+        "tool_choice": { "type": "tool_search" }
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+
+    assert_eq!(chat["tools"][0]["function"]["name"], "_cyarp_tool_search");
+    assert_eq!(
+        chat["tools"][0]["function"]["parameters"]["required"][0],
+        "query"
+    );
+    assert_eq!(
+        chat["tool_choice"]["function"]["name"],
+        "_cyarp_tool_search"
+    );
+}
+
+#[test]
+fn restores_tool_search_call_in_streaming_and_non_streaming_responses() {
+    let request = json!({
+        "tools": [{ "type": "tool_search" }]
+    });
+    let shape = ToolShape::from_request(&request);
+    let chat = json!({
+        "id": "chatcmpl-search",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_search",
+                    "type": "function",
+                    "function": {
+                        "name": "_cyarp_tool_search",
+                        "arguments": "{\"query\":\"mail\",\"limit\":10}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+    let response = chat_to_responses(&chat, "model", &shape).unwrap();
+    assert_eq!(response["output"][0]["type"], "tool_search_call");
+    assert_eq!(response["output"][0]["arguments"]["query"], "mail");
+    assert_eq!(response["output"][0]["arguments"]["limit"], 10);
+
+    let mut stream =
+        ResponsesStream::with_shape("resp_search".to_string(), "model".to_string(), shape);
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_search",
+                    "function": {
+                        "name": "_cyarp_tool_search",
+                        "arguments": "{\"query\":\"mail\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    }));
+    events.extend(stream.finish());
+    let completed = terminal_response(&events, "response.completed");
+    assert_eq!(
+        completed["response"]["output"][0]["type"],
+        "tool_search_call"
+    );
+    assert_eq!(
+        completed["response"]["output"][0]["arguments"]["query"],
+        "mail"
+    );
+}
+
+#[test]
+fn converts_paired_tool_search_history_to_function_call_and_tool_result() {
+    let request = json!({
+        "model": "model",
+        "input": [
+            {
+                "type": "tool_search_call",
+                "call_id": "call_search",
+                "arguments": { "query": "mail" }
+            },
+            {
+                "type": "tool_search_output",
+                "call_id": "call_search",
+                "tools": [{
+                    "type": "function",
+                    "name": "search_mail",
+                    "parameters": { "type": "object", "properties": {} }
+                }]
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert_eq!(roles(messages), ["assistant", "tool"]);
+    assert_eq!(
+        messages[0]["tool_calls"][0]["function"]["name"],
+        "_cyarp_tool_search"
+    );
+    assert_eq!(
+        messages[0]["tool_calls"][0]["function"]["arguments"],
+        "{\"query\":\"mail\"}"
+    );
+    assert_eq!(messages[1]["tool_call_id"], "call_search");
+    assert_eq!(chat["tools"][0]["function"]["name"], "search_mail");
 }
 
 #[test]

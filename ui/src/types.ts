@@ -76,6 +76,8 @@ export interface ModelSummary {
   supportsTools: boolean;
   supportsStreaming: boolean;
   supportsReasoningSummaries: boolean;
+  supportsFileInput: boolean;
+  supportsAudioInput: boolean;
 }
 
 export interface CnbUsageSummary {

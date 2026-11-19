@@ -335,7 +335,7 @@ impl ChatCompletionAccumulator {
                 }));
             }
             if let Some(reasoning) = aggregate_reasoning_text(delta) {
-                state.reasoning_content.push_str(reasoning);
+                state.reasoning_content.push_str(&reasoning);
             }
             if let Some(function_call) = delta.get("function_call") {
                 let legacy = state
@@ -433,12 +433,23 @@ impl ChatCompletionAccumulator {
                             .tool_calls
                             .into_values()
                             .map(|tool| {
+                                let arguments = if tool.arguments.trim().is_empty() {
+                                    "{}".to_string()
+                                } else {
+                                    serde_json::from_str::<Value>(&tool.arguments)
+                                        .ok()
+                                        .filter(Value::is_object)
+                                        .map(|value| {
+                                            crate::responses::canonical_json_string(&value)
+                                        })
+                                        .unwrap_or(tool.arguments)
+                                };
                                 json!({
                                     "id": tool.id,
                                     "type": if tool.kind.is_empty() { "function" } else { tool.kind.as_str() },
                                     "function": {
                                         "name": tool.name,
-                                        "arguments": tool.arguments
+                                        "arguments": arguments
                                     }
                                 })
                             })
@@ -497,7 +508,7 @@ fn aggregate_tool_key(calls: &BTreeMap<usize, AggregateToolCall>, tool: &Value) 
     }
 }
 
-pub(super) fn aggregate_reasoning_text(delta: &Value) -> Option<&str> {
+pub(super) fn aggregate_reasoning_text(delta: &Value) -> Option<String> {
     crate::responses::reasoning_text(delta)
 }
 

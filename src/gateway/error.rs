@@ -22,7 +22,7 @@ pub(super) struct ErrorEnvelope {
 pub(super) struct ErrorDetail {
     message: String,
     #[serde(rename = "type")]
-    error_type: &'static str,
+    error_type: String,
     code: String,
     param: Option<String>,
     retryable: bool,
@@ -44,12 +44,33 @@ pub(super) fn error_response_with_id(
 ) -> Response<Body> {
     let code = code.into();
     let (error_type, retryable) = error_contract(&code, status);
+    error_response_with_details(
+        status,
+        code,
+        message.into(),
+        error_type,
+        None,
+        retryable,
+        request_id,
+    )
+}
+
+pub(super) fn error_response_with_details(
+    status: StatusCode,
+    code: impl Into<String>,
+    message: String,
+    error_type: impl Into<String>,
+    param: Option<String>,
+    retryable: bool,
+    request_id: String,
+) -> Response<Body> {
+    let code = code.into();
     let payload = ErrorEnvelope {
         error: ErrorDetail {
-            message: message.into(),
-            error_type,
+            message,
+            error_type: error_type.into(),
             code,
-            param: None,
+            param,
             retryable,
         },
         request_id: request_id.clone(),
