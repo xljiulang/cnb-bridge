@@ -140,7 +140,7 @@ impl ResponsesStream {
         };
         for choice in choices {
             let delta = choice.get("delta").unwrap_or(&Value::Null);
-            if let Some(reasoning) = raw_reasoning_text(delta) {
+            if let Some(reasoning) = self.reasoning_fragment(delta) {
                 events.extend(self.reasoning_text_fragment(&reasoning));
             }
             if let Some(content) = delta.get("content").and_then(Value::as_str) {
@@ -641,6 +641,13 @@ impl ResponsesStream {
         events
     }
 
+    fn reasoning_fragment(&self, delta: &Value) -> Option<String> {
+        if self.reasoning.is_some() {
+            return raw_reasoning_whitespace(delta);
+        }
+        raw_reasoning_text(delta).or_else(|| raw_reasoning_whitespace(delta))
+    }
+
     fn text_delta(&mut self, delta: &str) -> Vec<Bytes> {
         let mut events = Vec::new();
         if self.text.is_none() {
@@ -951,44 +958,19 @@ pub(crate) fn reasoning_text(delta: &Value) -> Option<String> {
 }
 
 fn raw_reasoning_text(delta: &Value) -> Option<String> {
+    reasoning_text(delta)
+}
+
+fn raw_reasoning_whitespace(delta: &Value) -> Option<String> {
     delta
         .get("reasoning_content")
         .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
         .map(str::to_string)
         .or_else(|| {
             delta
                 .get("reasoning")
                 .and_then(Value::as_str)
-                .filter(|text| !text.is_empty())
                 .map(str::to_string)
-        })
-        .or_else(|| {
-            let reasoning = delta.get("reasoning")?;
-            for key in ["content", "text", "summary"] {
-                if let Some(text) = reasoning
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .filter(|text| !text.is_empty())
-                {
-                    return Some(text.to_string());
-                }
-            }
-            None
-        })
-        .or_else(|| {
-            let details = delta.get("reasoning_details")?;
-            let parts = match details {
-                Value::Array(parts) => parts.iter().collect::<Vec<_>>(),
-                other => vec![other],
-            };
-            let text = parts
-                .into_iter()
-                .filter_map(reasoning_detail_text)
-                .filter(|text| !text.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            (!text.is_empty()).then_some(text)
         })
 }
 

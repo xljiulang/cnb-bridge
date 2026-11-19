@@ -2406,6 +2406,35 @@ fn reasoning_text_ignores_whitespace_only_sources() {
         .as_deref(),
         Some("fallback")
     );
+    assert_eq!(
+        reasoning_text(&json!({
+            "reasoning": " ",
+            "reasoning_details": [{ "text": "fallback detail" }]
+        }))
+        .as_deref(),
+        Some("fallback detail")
+    );
+}
+
+#[test]
+fn stream_reasoning_uses_fallback_when_preferred_field_is_blank() {
+    let mut stream = ResponsesStream::new("resp_fallback_think".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "reasoning": " ",
+                "reasoning_details": [{ "text": "fallback detail" }]
+            },
+            "finish_reason": "stop"
+        }]
+    }));
+    events.extend(stream.finish());
+
+    let delta = named_events(&events, "response.reasoning_summary_text.delta")
+        .into_iter()
+        .filter_map(|event| event["delta"].as_str().map(str::to_string))
+        .collect::<String>();
+    assert_eq!(delta, "fallback detail");
 }
 
 #[test]
