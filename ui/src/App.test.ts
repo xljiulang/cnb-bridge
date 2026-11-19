@@ -95,7 +95,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function mockSnapshotIpc(current = snapshot) {
+function mockSnapshotIpc(current: unknown = snapshot) {
   mockWindows("main");
   mockIPC(
     (command) => {
