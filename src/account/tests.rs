@@ -443,6 +443,57 @@ fn account_bridge_settings_follow_the_active_account() {
 }
 
 #[test]
+fn active_account_switches_without_logging_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = AccountStore::new(dir.path().join("account-auth.bin"));
+    let manager = AccountManager::with_store(store.clone());
+    manager
+        .complete_token_login(
+            "alice-token",
+            Some("alice".to_string()),
+            None,
+            None,
+            Some(AccountBridgeSettings {
+                repo_namespace: "alice-team".to_string(),
+                repo_name: "alice-bridge".to_string(),
+            }),
+        )
+        .unwrap();
+    manager
+        .complete_token_login(
+            "bob-token",
+            Some("bob".to_string()),
+            None,
+            None,
+            Some(AccountBridgeSettings {
+                repo_namespace: "bob-team".to_string(),
+                repo_name: "bob-bridge".to_string(),
+            }),
+        )
+        .unwrap();
+    manager.activate_account("alice", None).unwrap();
+
+    let status = manager.activate_account("bob", None).unwrap();
+
+    assert_eq!(status.state, AccountState::Connected);
+    assert_eq!(status.username.as_deref(), Some("bob"));
+    assert_eq!(
+        manager.active_credentials().unwrap().access_token,
+        "bob-token"
+    );
+    assert_eq!(
+        manager.active_bridge_settings(),
+        Some(AccountBridgeSettings {
+            repo_namespace: "bob-team".to_string(),
+            repo_name: "bob-bridge".to_string(),
+        })
+    );
+    let accounts = AccountManager::with_store(store).accounts();
+    assert_eq!(accounts[0].username, "bob");
+    assert_eq!(accounts[1].username, "alice");
+}
+
+#[test]
 fn active_account_settings_updates_persist_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let store = AccountStore::new(dir.path().join("account-auth.bin"));

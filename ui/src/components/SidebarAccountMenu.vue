@@ -42,6 +42,9 @@ const open = ref(false);
 const panelStyle = ref<Record<string, string>>({});
 
 const hasActiveAccount = computed(() => props.activeAccount);
+const switchableAccounts = computed(() =>
+  props.accounts.filter((account) => !account.active),
+);
 const triggerName = computed(() => {
   if (props.displayName.trim()) return props.displayName;
   if (props.accountState === "signingIn") return "正在登录";
@@ -51,9 +54,10 @@ const triggerName = computed(() => {
 async function positionPanel() {
   const rect = trigger.value?.getBoundingClientRect();
   if (!rect) return;
-  const preferredWidth = hasActiveAccount.value
-    ? Math.max(176, rect.width)
-    : Math.max(320, rect.width);
+  const preferredWidth =
+    hasActiveAccount.value && switchableAccounts.value.length === 0
+      ? Math.max(176, rect.width)
+      : Math.max(320, rect.width);
   const width = Math.min(preferredWidth, window.innerWidth - 16);
   const height = panel.value?.offsetHeight || 52;
   const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
@@ -75,7 +79,11 @@ async function show() {
   open.value = true;
   await nextTick();
   await positionPanel();
-  panel.value?.querySelector<HTMLButtonElement>(".sidebar-logout-action")?.focus();
+  panel.value
+    ?.querySelector<HTMLButtonElement>(
+      ".account-menu-list .account-choice, .logout-account-action",
+    )
+    ?.focus();
 }
 
 function close(returnFocus = false) {
@@ -187,14 +195,62 @@ onBeforeUnmount(() => {
         :style="panelStyle"
       >
         <template v-if="hasActiveAccount">
-          <button
-            type="button"
-            class="sidebar-logout-action"
-            @click="logout"
+          <template v-if="switchableAccounts.length">
+            <header class="account-menu-head">
+              <strong>切换账号</strong>
+              <span>{{ switchableAccounts.length }}</span>
+            </header>
+
+            <div class="account-menu-list">
+              <div
+                v-for="account in switchableAccounts"
+                :key="account.username"
+                class="account-menu-row switch-account-row"
+              >
+                <button
+                  type="button"
+                  class="account-choice"
+                  :disabled="Boolean(busyUsername)"
+                  :aria-label="`切换到账号 ${account.displayName}`"
+                  @click="choose(account.username)"
+                >
+                  <span class="account-choice-avatar" aria-hidden="true">
+                    <LoaderCircle
+                      v-if="busyUsername === account.username"
+                      class="spin"
+                      :size="18"
+                    />
+                    <AccountAvatar
+                      v-else
+                      :avatar-url="account.avatarUrl"
+                      :size="19"
+                    />
+                  </span>
+                  <span class="account-choice-copy">
+                    <strong>{{ account.displayName }}</strong>
+                  </span>
+                </button>
+              </div>
+            </div>
+          </template>
+
+          <footer
+            class="account-menu-footer"
+            :class="{ 'footer-only': switchableAccounts.length === 0 }"
           >
-            <LogOut :size="15" aria-hidden="true" />
-            退出登录
-          </button>
+            <button
+              type="button"
+              class="account-choice add-account-action logout-account-action"
+              @click="logout"
+            >
+              <span class="account-choice-avatar" aria-hidden="true">
+                <LogOut :size="19" />
+              </span>
+              <span class="account-choice-copy">
+                <strong>退出登录</strong>
+              </span>
+            </button>
+          </footer>
         </template>
         <template v-else>
           <header class="account-menu-head">

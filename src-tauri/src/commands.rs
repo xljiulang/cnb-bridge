@@ -99,6 +99,10 @@ pub async fn start_login(state: State<'_, DesktopState>) -> Result<AccountStatus
 
 #[tauri::command]
 pub async fn logout(state: State<'_, DesktopState>) -> Result<AccountStatus, CommandError> {
+    end_active_session(&state).await
+}
+
+async fn end_active_session(state: &DesktopState) -> Result<AccountStatus, CommandError> {
     let _ = state.bridge.disconnect().await;
     auth_webview::clear_web_data(&state.app);
     let status = state
@@ -114,14 +118,30 @@ pub async fn login_with_account(
     state: State<'_, DesktopState>,
     username: String,
 ) -> Result<AccountStatus, CommandError> {
-    if state.account.active_credentials().is_some()
-        || state.account.status().state == AccountState::SigningIn
-    {
+    let current_status = state.account.status();
+    let switching = state.account.active_credentials().is_some();
+    if current_status.state == AccountState::SigningIn {
         return Err(CommandError::new(
-            "logout_required",
-            "请先退出当前账号再选择其他账号",
+            "login_in_progress",
+            "已有账号登录正在进行",
         ));
     }
+    if switching
+        && current_status
+            .username
+            .as_deref()
+            .is_some_and(|active| active.eq_ignore_ascii_case(username.trim()))
+    {
+        return Err(CommandError::new(
+            "account_already_active",
+            "当前已是该账号",
+        ));
+    }
+
+    if switching {
+        end_active_session(&state).await?;
+    }
+
     let credentials = state
         .account
         .credentials_for(&username)
@@ -398,6 +418,20 @@ mod tests {
         (temp, manager)
     }
 
+    fn active_manager_with_alice_and_bob() -> (tempfile::TempDir, std::sync::Arc<AccountManager>) {
+        let temp = tempfile::tempdir().unwrap();
+        let manager =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account-auth.bin")));
+        manager
+            .complete_token_login("alice-token", Some("alice".to_string()), None, None, None)
+            .unwrap();
+        manager
+            .complete_token_login("bob-token", Some("bob".to_string()), None, None, None)
+            .unwrap();
+        manager.activate_account("alice", None).unwrap();
+        (temp, manager)
+    }
+
     #[test]
     fn allows_any_well_formed_http_or_https_url() {
         assert!(is_allowed_external_url(
@@ -480,6 +514,58 @@ mod tests {
         assert_eq!(manager.accounts().len(), 1);
         assert_eq!(manager.status().state, AccountState::Failed);
         assert_eq!(manager.status().username.as_deref(), Some("alice"));
+        assert!(message.contains("offline"));
+    }
+
+    #[test]
+    fn failed_switch_after_logout_removes_the_rejected_target() {
+        let (_temp, manager) = active_manager_with_alice_and_bob();
+        manager.logout().unwrap();
+        manager.begin_account_login("bob").unwrap();
+
+        let message = apply_account_validation_error(
+            &manager,
+            "bob",
+            ApiError::Remote {
+                status: StatusCode::UNAUTHORIZED,
+                code: None,
+                message: "expired".to_string(),
+            },
+        );
+
+        assert_eq!(
+            manager
+                .accounts()
+                .iter()
+                .map(|account| account.username.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alice"]
+        );
+        assert_eq!(manager.status().state, AccountState::Failed);
+        assert_eq!(manager.status().username, None);
+        assert!(message.contains("失效"));
+    }
+
+    #[test]
+    fn transient_switch_failure_keeps_the_target_but_leaves_a_signed_out() {
+        let (_temp, manager) = active_manager_with_alice_and_bob();
+        manager.logout().unwrap();
+        manager.begin_account_login("bob").unwrap();
+
+        let message = apply_account_validation_error(
+            &manager,
+            "bob",
+            ApiError::Remote {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: None,
+                message: "offline".to_string(),
+            },
+        );
+
+        assert_eq!(manager.accounts().len(), 2);
+        assert_eq!(manager.status().state, AccountState::Failed);
+        assert_eq!(manager.status().username.as_deref(), Some("bob"));
+        assert!(manager.active_credentials().is_none());
         assert!(message.contains("offline"));
     }
 }

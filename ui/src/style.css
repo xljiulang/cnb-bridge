@@ -395,28 +395,6 @@ button:disabled {
   margin-top: 22px;
 }
 
-.sidebar-logout-action {
-  width: 100%;
-  min-height: 36px;
-  justify-content: flex-start;
-  padding: 8px 10px;
-  border-color: transparent;
-  background: transparent;
-  color: var(--muted-strong);
-  font-size: 12px;
-  text-align: left;
-}
-
-.sidebar-logout-action svg {
-  color: var(--danger);
-}
-
-.sidebar-logout-action:hover:not(:disabled) {
-  border-color: rgba(255, 107, 120, 0.24);
-  background: var(--danger-soft);
-  color: var(--danger-text);
-}
-
 @keyframes account-menu-enter {
   from {
     opacity: 0;
@@ -888,6 +866,10 @@ small {
   border-radius: 11px;
 }
 
+.account-menu-row.switch-account-row {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .account-menu-row:hover,
 .account-menu-row:focus-within {
   background: var(--panel-raised);
@@ -982,6 +964,11 @@ small {
   border-top: 1px solid var(--line);
 }
 
+.account-menu-footer.footer-only {
+  padding-top: 0;
+  border-top: 0;
+}
+
 .add-account-action {
   display: flex;
   width: 100%;
@@ -1005,6 +992,21 @@ small {
 .add-account-action:hover:not(:disabled) {
   background: var(--panel-raised);
   color: var(--text);
+}
+
+.logout-account-action {
+  color: var(--muted-strong);
+}
+
+.logout-account-action .account-choice-avatar {
+  border-color: rgba(255, 107, 120, 0.24);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.logout-account-action:hover:not(:disabled) {
+  background: var(--danger-soft);
+  color: var(--danger-text);
 }
 
 .organization-intro {

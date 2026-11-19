@@ -33,8 +33,59 @@ describe("SidebarAccountMenu", () => {
     expect(panel?.querySelector("img")).toBeNull();
     expect((panel as HTMLElement).style.width).toBe("176px");
     expect(document.activeElement).toBe(
-      panel?.querySelector(".sidebar-logout-action"),
+      panel?.querySelector(".logout-account-action"),
     );
+    wrapper.unmount();
+  });
+
+  it("lists only switchable accounts and keeps logout in the footer", async () => {
+    const wrapper = mount(SidebarAccountMenu, {
+      attachTo: document.body,
+      props: {
+        ...props,
+        accounts: [
+          {
+            username: "alice",
+            displayName: "爱丽丝",
+            avatarUrl: null,
+            lastLoginAt: 200,
+            active: true,
+          },
+          {
+            username: "bob",
+            displayName: "鲍勃",
+            avatarUrl: null,
+            lastLoginAt: 100,
+            active: false,
+          },
+        ],
+      },
+    });
+
+    await wrapper.get(".sidebar-status").trigger("click");
+    const panel = document.body.querySelector(
+      ".sidebar-account-menu",
+    ) as HTMLElement;
+    const rows = [...panel.querySelectorAll<HTMLElement>(".account-menu-row")];
+
+    expect(panel.textContent).toContain("切换账号");
+    expect(panel.textContent).toContain("1");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].textContent).toContain("鲍勃");
+    expect(panel.textContent).not.toContain("爱丽丝");
+    expect(rows[0].querySelector(".remove-saved-account")).toBeNull();
+    expect(panel.style.width).toBe("320px");
+    expect(document.activeElement).toBe(
+      rows[0].querySelector(".account-choice"),
+    );
+
+    const logout = panel.querySelector(".account-menu-footer .logout-account-action");
+    expect(logout?.textContent).toContain("退出登录");
+    expect(panel.querySelector(".account-menu-list .logout-account-action")).toBeNull();
+
+    (rows[0].querySelector(".account-choice") as HTMLElement).click();
+    await wrapper.vm.$nextTick();
+    expect(wrapper.emitted("login")).toEqual([["bob"]]);
     wrapper.unmount();
   });
 
@@ -80,7 +131,7 @@ describe("SidebarAccountMenu", () => {
     await wrapper.vm.$nextTick();
 
     (
-      document.body.querySelector(".sidebar-logout-action") as HTMLElement
+      document.body.querySelector(".logout-account-action") as HTMLElement
     ).click();
     await wrapper.vm.$nextTick();
 

@@ -779,6 +779,196 @@ describe("App shell", () => {
     wrapper.unmount();
   });
 
+  it("switches directly to another saved account without logging out", async () => {
+    const switchableSnapshot = {
+      ...snapshot,
+      accounts: [
+        {
+          username: "tester",
+          displayName: "Tester 昵称",
+          avatarUrl: null,
+          lastLoginAt: 200,
+          active: true,
+        },
+        {
+          username: "bob",
+          displayName: "鲍勃",
+          avatarUrl: null,
+          lastLoginAt: 100,
+          active: false,
+        },
+      ],
+    };
+    const calls: { command: string; args: unknown }[] = [];
+    mockWindows("main");
+    mockIPC(
+      (command, args) => {
+        calls.push({ command, args });
+        switch (command) {
+          case "get_snapshot":
+            return switchableSnapshot;
+          case "get_logs":
+          case "list_http_traces":
+          case "list_namespaces":
+            return [];
+          case "get_cnb_usage":
+            return null;
+          default:
+            return null;
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper.get(".sidebar-status").trigger("click");
+    const rows = [
+      ...document.body.querySelectorAll<HTMLElement>(".account-menu-row"),
+    ];
+    const panel = document.body.querySelector(
+      ".sidebar-account-menu",
+    ) as HTMLElement;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].textContent).toContain("鲍勃");
+    expect(panel.textContent).not.toContain("Tester 昵称");
+    (rows[0].querySelector(".account-choice") as HTMLElement).click();
+    await flushPromises();
+
+    expect(calls.some((call) => call.command === "logout")).toBe(false);
+    expect(
+      calls.find((call) => call.command === "login_with_account")?.args,
+    ).toEqual({ username: "bob" });
+    wrapper.unmount();
+  });
+
+  it("reloads credits after switching accounts and ignores the previous account response", async () => {
+    const bobAccount = {
+      ...account,
+      username: "bob",
+      displayName: "鲍勃",
+      avatarUrl: null,
+    };
+    const initialSnapshot = {
+      ...snapshot,
+      accounts: [
+        {
+          username: "tester",
+          displayName: "Tester 昵称",
+          avatarUrl: "https://cnb.cool/users/tester/avatar/l",
+          lastLoginAt: 200,
+          active: true,
+        },
+        {
+          username: "bob",
+          displayName: "鲍勃",
+          avatarUrl: null,
+          lastLoginAt: 100,
+          active: false,
+        },
+      ],
+    };
+    const switchedSnapshot = {
+      ...initialSnapshot,
+      account: bobAccount,
+      bridge: {
+        ...initialSnapshot.bridge,
+        account: bobAccount,
+        username: "bob",
+        repoSlug: null,
+      },
+      accounts: [
+        {
+          ...initialSnapshot.accounts[0],
+          active: false,
+        },
+        {
+          ...initialSnapshot.accounts[1],
+          active: true,
+        },
+      ],
+    };
+    let currentSnapshot: unknown = initialSnapshot;
+    let resolvePreviousUsage!: (value: {
+      namespace: string;
+      month: string;
+      devCpuUsedSeconds: number;
+      devCpuTotalSeconds: number;
+      creditsUsedMilli: number;
+      creditsTotalMilli: number;
+      fetchedAt: string;
+    }) => void;
+    const previousUsage = new Promise<Parameters<typeof resolvePreviousUsage>[0]>(
+      (resolve) => {
+        resolvePreviousUsage = resolve;
+      },
+    );
+    let usageRequests = 0;
+
+    mockWindows("main");
+    mockIPC(
+      (command) => {
+        switch (command) {
+          case "get_snapshot":
+            return currentSnapshot;
+          case "login_with_account":
+            currentSnapshot = switchedSnapshot;
+            return bobAccount;
+          case "get_cnb_usage":
+            usageRequests += 1;
+            if (usageRequests === 1) return previousUsage;
+            return {
+              namespace: "bob-org",
+              month: "2026-11",
+              devCpuUsedSeconds: 0,
+              devCpuTotalSeconds: 5_760_000,
+              creditsUsedMilli: 900_000,
+              creditsTotalMilli: 1_000_000,
+              fetchedAt: "2026-11-19T00:00:00Z",
+            };
+          case "get_logs":
+          case "list_http_traces":
+          case "list_namespaces":
+            return [];
+          default:
+            return null;
+        }
+      },
+      { shouldMockEvents: true },
+    );
+
+    const wrapper = mount(App);
+    await flushPromises();
+    expect(usageRequests).toBe(1);
+
+    await wrapper.get(".sidebar-status").trigger("click");
+    const bobRow = document.body.querySelector<HTMLElement>(
+      ".account-menu-row",
+    );
+    expect(bobRow?.textContent).toContain("鲍勃");
+    bobRow?.querySelector<HTMLElement>(".account-choice")?.click();
+    await flushPromises();
+
+    expect(wrapper.get(".usage-amount").text()).toBe("900 / 1000 Credits");
+    expect(wrapper.get(".usage-percent").text()).toBe("90%");
+    expect(usageRequests).toBe(2);
+
+    resolvePreviousUsage({
+      namespace: "tester",
+      month: "2026-11",
+      devCpuUsedSeconds: 1_370_366,
+      devCpuTotalSeconds: 5_760_000,
+      creditsUsedMilli: 214_720,
+      creditsTotalMilli: 1_166_000,
+      fetchedAt: "2026-11-17T00:00:00Z",
+    });
+    await flushPromises();
+
+    expect(wrapper.get(".usage-amount").text()).toBe("900 / 1000 Credits");
+    expect(wrapper.get(".usage-percent").text()).toBe("90%");
+    wrapper.unmount();
+  });
+
   it("derives the sidebar login status from the account while authorization is pending", async () => {
     const pendingSnapshot = {
       ...signedOutSnapshot,

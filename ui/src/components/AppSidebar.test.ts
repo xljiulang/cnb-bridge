@@ -227,7 +227,7 @@ describe("AppSidebar", () => {
 
     await wrapper.get(".sidebar-status").trigger("click");
     const logoutButton = document.body.querySelector(
-      ".sidebar-logout-action",
+      ".logout-account-action",
     ) as HTMLElement;
     expect(logoutButton.textContent).toContain("退出登录");
     logoutButton.click();
@@ -246,6 +246,7 @@ describe("AppSidebar", () => {
         app: app({
           accountConnected: false,
           accountState: "failed",
+          accounts: [],
           statusLabel: "登录失败",
           logout,
         }),

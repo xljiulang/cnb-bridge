@@ -126,6 +126,14 @@ export function useDesktopApp() {
   const organizationReady = computed(
     () => accountConnected.value && !organizationRequired.value,
   );
+  const usageAccountIdentity = computed(() => {
+    if (!organizationReady.value) return null;
+    return (
+      snapshot.value?.account.username ??
+      activeAccount.value?.username ??
+      null
+    );
+  });
   const settingsDirty = computed(() => {
     const persisted = snapshot.value?.settings;
     return persisted ? !settingsEqual(settingsDraft, persisted) : false;
@@ -686,7 +694,6 @@ export function useDesktopApp() {
 
   onMounted(async () => {
     await refresh();
-    if (organizationReady.value) void loadUsage();
     await Promise.all([loadLogs(), loadHttpTraces()]);
     logTimer = window.setInterval(() => {
       if (document.visibilityState !== "visible") return;
@@ -714,23 +721,13 @@ export function useDesktopApp() {
   });
 
   watch(
-    [accountState, organizationRequired],
-    ([state, needsOrganization]) => {
-      if (state === "connected" && !needsOrganization) {
-        void loadUsage();
-        return;
-      }
-      if (state === "connected" && needsOrganization) {
-        usageGeneration += 1;
-        usage.value = null;
-        usageError.value = null;
-        usageLoading.value = false;
-        return;
-      }
+    usageAccountIdentity,
+    (identity) => {
       usageGeneration += 1;
       usage.value = null;
       usageError.value = null;
       usageLoading.value = false;
+      if (identity) void loadUsage();
     },
     { immediate: true },
   );

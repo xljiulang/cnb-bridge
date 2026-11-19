@@ -597,6 +597,7 @@ impl Bridge {
         runtime.username = None;
         runtime.repo_slug = None;
         runtime.workspace_sn = None;
+        runtime.detail = None;
         runtime.error = None;
         runtime.repo_creation_url = None;
         runtime.manual_creation_pending = false;
@@ -1106,6 +1107,51 @@ mod tests {
         assert_eq!(snapshot.workspace_sn.as_deref(), Some("ws-stopped"));
         assert!(tokio::net::TcpListener::bind(address).await.is_ok());
         assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn signing_out_clears_the_previous_workspace_session_and_releases_tunnel() {
+        let temp = tempfile::tempdir().unwrap();
+        let account =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account.bin")));
+        account
+            .complete_token_login("token", Some("alice".to_string()), None, None, None)
+            .unwrap();
+        let bridge = Bridge::new(
+            account,
+            SettingsStore::new(temp.path().join("settings.json")),
+            SshKeyStore::new(
+                temp.path().join("id_ed25519"),
+                temp.path().join("id_ed25519.pub"),
+            ),
+            Arc::new(Logger::new(32)),
+        );
+        let (tunnel, address) = TunnelHandle::test_handle().await;
+        {
+            let mut runtime = bridge.runtime.lock().await;
+            runtime.state = Some(BridgeState::Ready);
+            runtime.username = Some("alice".to_string());
+            runtime.repo_slug = Some("alice/repo".to_string());
+            runtime.workspace_sn = Some("ws-alice".to_string());
+            runtime.detail = Some(crate::api::WorkspaceDetail {
+                remote_ssh: Some("ssh.example.com".to_string()),
+                ssh: None,
+                webide: None,
+                jump_url: None,
+            });
+            runtime.tunnel = Some(tunnel);
+        }
+
+        bridge.disconnect().await;
+        bridge.account_signed_out().await;
+
+        let snapshot = bridge.snapshot().await;
+        assert_eq!(snapshot.state, BridgeState::SignedOut);
+        assert_eq!(snapshot.username, None);
+        assert_eq!(snapshot.repo_slug, None);
+        assert_eq!(snapshot.workspace_sn, None);
+        assert!(bridge.runtime.lock().await.detail.is_none());
+        assert!(tokio::net::TcpListener::bind(address).await.is_ok());
     }
 
     #[tokio::test]
