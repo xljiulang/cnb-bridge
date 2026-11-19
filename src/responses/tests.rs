@@ -31,6 +31,18 @@ fn named_events(events: &[Bytes], event_name: &str) -> Vec<Value> {
         .collect()
 }
 
+fn event_names(events: &[Bytes]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| {
+            std::str::from_utf8(event)
+                .ok()?
+                .lines()
+                .find_map(|line| line.strip_prefix("event: ").map(str::to_string))
+        })
+        .collect()
+}
+
 #[test]
 fn translates_instructions_messages_images_and_tools() {
     let request = json!({
@@ -2572,6 +2584,79 @@ fn reads_reasoning_object_and_joins_multiple_details() {
 }
 
 #[test]
+fn reasoning_details_ignores_blank_entries_and_keeps_valid_order() {
+    assert_eq!(
+        reasoning_text(&json!({
+            "reasoning_details": [
+                { "text": " " },
+                { "text": "first" },
+                { "text": "\n" },
+                { "text": "second" }
+            ]
+        }))
+        .as_deref(),
+        Some("first\n\nsecond")
+    );
+}
+
+#[test]
+fn stream_reasoning_blank_source_switch_emits_only_non_blank_values() {
+    let mut stream = ResponsesStream::new("resp_blank_switch".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": { "reasoning_content": " " },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": { "reasoning_details": [{ "text": "valid" }] },
+            "finish_reason": "stop"
+        }]
+    })));
+    events.extend(stream.finish());
+
+    let deltas = named_events(&events, "response.reasoning_summary_text.delta")
+        .into_iter()
+        .filter_map(|event| event["delta"].as_str().map(str::to_string))
+        .collect::<String>();
+    assert_eq!(deltas, " valid");
+}
+
+#[test]
+fn history_keeps_reasoning_with_the_assistant_turn_that_follows_it() {
+    let request = json!({
+        "model": "model",
+        "input": [
+            { "type": "reasoning", "summary": [{ "type": "summary_text", "text": "before call" }] },
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "read_file",
+                "arguments": "{}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "ok"
+            },
+            { "type": "reasoning", "summary": [{ "type": "summary_text", "text": "after result" }] },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "done" }]
+            }
+        ]
+    });
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+    assert_eq!(roles(messages), ["assistant", "tool", "assistant"]);
+    assert_eq!(messages[0]["reasoning_content"], "before call");
+    assert_eq!(messages[2]["reasoning_content"], "after result");
+    assert_eq!(messages[2]["content"], "done");
+}
+
+#[test]
 fn non_stream_message_reads_reasoning_details() {
     let chat = json!({
         "id": "chatcmpl-1",
@@ -2686,7 +2771,7 @@ fn stream_preserves_interior_blank_reasoning_after_valid_start() {
 }
 
 #[test]
-fn stream_keeps_reasoning_sources_separate_when_upstream_switches_fields() {
+fn stream_merges_reasoning_source_switch_within_one_item() {
     let mut stream = ResponsesStream::new("resp_source_switch".to_string(), "model".to_string());
     let mut events = stream.push(&json!({
         "choices": [{
@@ -2711,6 +2796,181 @@ fn stream_keeps_reasoning_sources_separate_when_upstream_switches_fields() {
         .collect();
     assert_eq!(reasoning.len(), 1);
     assert_eq!(reasoning[0]["summary"][0]["text"], "primary fallback");
+    let deltas = named_events(&events, "response.reasoning_summary_text.delta")
+        .into_iter()
+        .filter_map(|event| event["delta"].as_str().map(str::to_string))
+        .collect::<String>();
+    let done = named_events(&events, "response.reasoning_summary_text.done");
+    assert_eq!(deltas, "primary fallback");
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0]["text"], "primary fallback");
+}
+
+#[test]
+fn stream_separates_reasoning_after_a_completed_tool_call() {
+    let mut stream = ResponsesStream::new("resp_two_turns".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": { "reasoning_content": "first thought" },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_1",
+                    "function": { "name": "read_file", "arguments": "{}" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": { "reasoning_content": "second thought" },
+            "finish_reason": null
+        }]
+    })));
+    events.extend(stream.push(&json!({
+        "choices": [{
+            "delta": { "content": "done" },
+            "finish_reason": "stop"
+        }]
+    })));
+    events.extend(stream.finish());
+
+    let output = terminal_response(&events, "response.completed")["response"]["output"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let kinds = output
+        .iter()
+        .map(|item| item["type"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        ["reasoning", "function_call", "reasoning", "message"]
+    );
+    assert_eq!(output[0]["summary"][0]["text"], "first thought");
+    assert_eq!(output[2]["summary"][0]["text"], "second thought");
+
+    let names = event_names(&events);
+    let first_done = names
+        .iter()
+        .position(|name| name == "response.output_item.done")
+        .unwrap();
+    let added_positions = names
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| name.as_str() == "response.output_item.added")
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    assert_eq!(added_positions.len(), 4);
+    assert!(added_positions[1] < first_done);
+    assert!(first_done < added_positions[2]);
+}
+
+#[test]
+fn stream_completes_tool_calls_before_later_reasoning() {
+    let mut stream =
+        ResponsesStream::new("resp_tool_then_reasoning".to_string(), "model".to_string());
+    let first = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_1",
+                    "function": { "name": "read_file", "arguments": "{\"path\":\"a\"}" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    }));
+    let call_done = named_events(&first, "response.output_item.done");
+    assert_eq!(call_done.len(), 1);
+    assert_eq!(call_done[0]["item"]["type"], "function_call");
+    assert_eq!(call_done[0]["item"]["call_id"], "call_1");
+}
+
+#[test]
+fn stream_keeps_late_tool_identity_for_finish() {
+    let mut stream = ResponsesStream::new("resp_late_identity".to_string(), "model".to_string());
+    let first = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "function": { "arguments": "{}" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    }));
+    assert!(named_events(&first, "response.output_item.done").is_empty());
+    let mut events = first;
+    events.extend(stream.finish());
+    let failed = terminal_response(&events, "response.failed");
+    assert_eq!(
+        failed["response"]["error"]["code"],
+        "upstream_tool_call_dropped"
+    );
+}
+
+#[test]
+fn stream_closes_same_delta_reasoning_before_tool_item_done() {
+    let mut stream = ResponsesStream::new("resp_same_delta".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": {
+                "reasoning_content": "use a tool",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_1",
+                    "function": { "name": "read_file", "arguments": "{}" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    }));
+    events.extend(stream.finish());
+
+    let names = event_names(&events);
+    let first_reasoning_done = names
+        .iter()
+        .position(|name| name == "response.reasoning_summary_text.done")
+        .unwrap();
+    let first_tool_done = names
+        .iter()
+        .position(|name| name == "response.output_item.done")
+        .unwrap();
+    assert!(first_reasoning_done < first_tool_done);
+    assert!(
+        named_events(&events, "response.reasoning_summary_text.delta")[0]["delta"]
+            .as_str()
+            .unwrap()
+            .contains("use a tool")
+    );
+}
+
+#[test]
+fn stream_finishes_open_reasoning_before_incomplete_terminal() {
+    let mut stream = ResponsesStream::new("resp_missing_finish".to_string(), "model".to_string());
+    let mut events = stream.push(&json!({
+        "choices": [{
+            "delta": { "reasoning_content": "partial thought" },
+            "finish_reason": null
+        }]
+    }));
+    events.extend(stream.finish());
+
+    let incomplete = terminal_response(&events, "response.incomplete");
+    assert_eq!(incomplete["response"]["output"][0]["type"], "reasoning");
+    assert_eq!(
+        incomplete["response"]["output"][0]["summary"][0]["text"],
+        "partial thought"
+    );
 }
 
 #[test]

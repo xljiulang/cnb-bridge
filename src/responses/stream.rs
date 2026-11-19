@@ -161,6 +161,15 @@ impl ResponsesStream {
             {
                 self.finish_reason = Some(reason.to_string());
             }
+            if matches!(
+                choice.get("finish_reason").and_then(Value::as_str),
+                Some("tool_calls" | "function_call")
+            ) {
+                events.extend(self.flush_ready_calls());
+                events.extend(self.reasoning_done());
+                events.extend(self.finish_text());
+                events.extend(self.finish_added_calls());
+            }
         }
         events
     }
@@ -173,88 +182,8 @@ impl ResponsesStream {
         self.finished = true;
         let mut events = self.ensure_created();
         events.extend(self.flush_inline_think());
-        self.reasoning_pending.clear();
-        if let Some(track) = self.reasoning.take() {
-            events.push(sse_event(
-                "response.reasoning_summary_text.done",
-                json!({
-                    "type": "response.reasoning_summary_text.done",
-                    "item_id": track.id,
-                    "output_index": track.index,
-                    "summary_index": 0,
-                    "text": track.text
-                }),
-            ));
-            events.push(sse_event(
-                "response.reasoning_summary_part.done",
-                json!({
-                    "type": "response.reasoning_summary_part.done",
-                    "item_id": track.id,
-                    "output_index": track.index,
-                    "summary_index": 0,
-                    "part": { "type": "summary_text", "text": track.text }
-                }),
-            ));
-            events.push(sse_event("response.output_item.done", {
-                let item = json!({
-                    "id": track.id,
-                    "type": "reasoning",
-                    "summary": [{ "type": "summary_text", "text": track.text }]
-                });
-                self.output.push(item.clone());
-                json!({
-                    "type": "response.output_item.done",
-                    "output_index": track.index,
-                    "item": item
-                })
-            }));
-        }
-        if let Some(track) = self.text.take() {
-            events.push(sse_event(
-                "response.output_text.done",
-                json!({
-                    "type": "response.output_text.done",
-                    "item_id": track.id,
-                    "output_index": track.index,
-                    "content_index": 0,
-                    "text": track.text,
-                    "annotations": []
-                }),
-            ));
-            events.push(sse_event(
-                "response.content_part.done",
-                json!({
-                    "type": "response.content_part.done",
-                    "item_id": track.id,
-                    "output_index": track.index,
-                    "content_index": 0,
-                    "part": {
-                        "type": "output_text",
-                        "text": track.text,
-                        "annotations": []
-                    }
-                }),
-            ));
-            events.push(sse_event("response.output_item.done", {
-                let item = json!({
-                    "id": track.id,
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [{
-                        "type": "output_text",
-                        "text": track.text,
-                        "annotations": []
-                    }]
-                });
-                self.output.push(item.clone());
-                json!({
-                    "type": "response.output_item.done",
-                    "output_index": track.index,
-                    "item": item
-                })
-            }));
-        }
+        events.extend(self.reasoning_done());
+        events.extend(self.finish_text());
         events.extend(self.flush_ready_calls());
         for key in self.calls.keys().copied().collect::<Vec<_>>() {
             let (added, missing_name) = self
@@ -320,131 +249,8 @@ impl ResponsesStream {
             }
         }
         if self.failure.is_none() {
-            for (_, call) in std::mem::take(&mut self.calls) {
-                if call.custom {
-                    let input = custom_tool_input(&call.arguments);
-                    if !input.is_empty() {
-                        events.push(sse_event(
-                            "response.custom_tool_call_input.delta",
-                            json!({
-                                "type": "response.custom_tool_call_input.delta",
-                                "item_id": call.item_id,
-                                "output_index": call.output_index,
-                                "delta": input
-                            }),
-                        ));
-                    }
-                    events.push(sse_event(
-                        "response.custom_tool_call_input.done",
-                        json!({
-                            "type": "response.custom_tool_call_input.done",
-                            "item_id": call.item_id,
-                            "output_index": call.output_index,
-                            "input": input
-                        }),
-                    ));
-                    events.push(sse_event("response.output_item.done", {
-                        let item = json!({
-                            "id": call.item_id,
-                            "type": "custom_tool_call",
-                            "status": "completed",
-                            "call_id": call.call_id,
-                            "name": call.display_name,
-                            "input": input
-                        });
-                        self.output.push(item.clone());
-                        json!({
-                            "type": "response.output_item.done",
-                            "output_index": call.output_index,
-                            "item": item
-                        })
-                    }));
-                } else if call.tool_search {
-                    let (arguments, repaired) = normalize_arguments(&call.arguments);
-                    let arguments = if incomplete_reason.is_some() && repaired {
-                        call.arguments.clone()
-                    } else {
-                        arguments
-                    };
-                    let arguments = serde_json::from_str::<Value>(&arguments)
-                        .ok()
-                        .filter(Value::is_object)
-                        .unwrap_or_else(|| json!({ "query": arguments }));
-                    let item = json!({
-                        "id": call.item_id,
-                        "type": "tool_search_call",
-                        "status": "completed",
-                        "call_id": call.call_id,
-                        "execution": "client",
-                        "arguments": arguments
-                    });
-                    events.push(sse_event("response.output_item.done", {
-                        self.output.push(item.clone());
-                        json!({
-                            "type": "response.output_item.done",
-                            "output_index": call.output_index,
-                            "item": item
-                        })
-                    }));
-                } else {
-                    let arguments = if call.arguments.trim().is_empty() {
-                        "{}".to_string()
-                    } else {
-                        call.arguments.clone()
-                    };
-                    if call.emitted_arguments_len == 0 && call.arguments.trim().is_empty() {
-                        events.push(sse_event(
-                            "response.function_call_arguments.delta",
-                            json!({
-                                "type": "response.function_call_arguments.delta",
-                                "item_id": call.item_id,
-                                "output_index": call.output_index,
-                                "delta": "{}"
-                            }),
-                        ));
-                    } else if call.emitted_arguments_len < call.arguments.len() {
-                        events.push(sse_event(
-                            "response.function_call_arguments.delta",
-                            json!({
-                                "type": "response.function_call_arguments.delta",
-                                "item_id": call.item_id,
-                                "output_index": call.output_index,
-                                "delta": &call.arguments[call.emitted_arguments_len..]
-                            }),
-                        ));
-                    }
-                    events.push(sse_event(
-                        "response.function_call_arguments.done",
-                        json!({
-                            "type": "response.function_call_arguments.done",
-                            "item_id": call.item_id,
-                            "output_index": call.output_index,
-                            "arguments": arguments
-                        }),
-                    ));
-                    let mut item = json!({
-                        "id": call.item_id,
-                        "type": "function_call",
-                        "status": "completed",
-                        "call_id": call.call_id,
-                        "name": call.display_name,
-                        "arguments": arguments
-                    });
-                    if let Some(namespace) = call.namespace {
-                        item["namespace"] = json!(namespace);
-                    }
-                    if let Some(extra_content) = call.extra_content {
-                        item["extra_content"] = extra_content;
-                    }
-                    events.push(sse_event(
-                        "response.output_item.done",
-                        {
-                            self.output.push(item.clone());
-                            json!({ "type": "response.output_item.done", "output_index": call.output_index, "item": item })
-                        },
-                    ));
-                }
-            }
+            let calls = std::mem::take(&mut self.calls);
+            events.extend(self.finish_calls(calls.into_values(), incomplete_reason));
         }
         let terminal = if let Some(failure) = self.failure.take() {
             sse_event(
@@ -581,26 +387,28 @@ impl ResponsesStream {
         events
     }
 
-    fn reasoning_delta(&mut self, delta: &str) -> Vec<Bytes> {
-        let mut events = Vec::new();
-        if self.reasoning.is_none() {
-            let index = self.next_index;
-            self.next_index += 1;
-            let id = gen_id("rs");
-            self.reasoning = Some(TextTrack {
-                id: id.clone(),
-                index,
-                text: String::new(),
-            });
-            events.push(sse_event(
+    fn reasoning_start(&mut self) -> Vec<Bytes> {
+        if self.reasoning.is_some() {
+            return Vec::new();
+        }
+        let index = self.next_index;
+        self.next_index = self.next_index.saturating_add(1);
+        let id = gen_id("rs");
+        self.reasoning = Some(TextTrack {
+            id: id.clone(),
+            index,
+            text: String::new(),
+        });
+        vec![
+            sse_event(
                 "response.output_item.added",
                 json!({
                     "type": "response.output_item.added",
                     "output_index": index,
                     "item": { "id": id, "type": "reasoning", "summary": [] }
                 }),
-            ));
-            events.push(sse_event(
+            ),
+            sse_event(
                 "response.reasoning_summary_part.added",
                 json!({
                     "type": "response.reasoning_summary_part.added",
@@ -609,9 +417,58 @@ impl ResponsesStream {
                     "summary_index": 0,
                     "part": { "type": "summary_text", "text": "" }
                 }),
-            ));
-        }
-        let track = self.reasoning.as_mut().unwrap();
+            ),
+        ]
+    }
+
+    fn reasoning_done(&mut self) -> Vec<Bytes> {
+        let Some(track) = self.reasoning.take() else {
+            return Vec::new();
+        };
+        self.reasoning_pending.clear();
+        vec![
+            sse_event(
+                "response.reasoning_summary_text.done",
+                json!({
+                    "type": "response.reasoning_summary_text.done",
+                    "item_id": track.id,
+                    "output_index": track.index,
+                    "summary_index": 0,
+                    "text": track.text
+                }),
+            ),
+            sse_event(
+                "response.reasoning_summary_part.done",
+                json!({
+                    "type": "response.reasoning_summary_part.done",
+                    "item_id": track.id,
+                    "output_index": track.index,
+                    "summary_index": 0,
+                    "part": { "type": "summary_text", "text": track.text }
+                }),
+            ),
+            sse_event("response.output_item.done", {
+                let item = json!({
+                    "id": track.id,
+                    "type": "reasoning",
+                    "summary": [{ "type": "summary_text", "text": track.text }]
+                });
+                self.output.push(item.clone());
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": track.index,
+                    "item": item
+                })
+            }),
+        ]
+    }
+
+    fn reasoning_delta(&mut self, delta: &str) -> Vec<Bytes> {
+        let mut events = self.reasoning_start();
+        let track = self
+            .reasoning
+            .as_mut()
+            .expect("reasoning_start must create a track");
         track.text.push_str(delta);
         events.push(sse_event(
             "response.reasoning_summary_text.delta",
@@ -720,6 +577,213 @@ impl ResponsesStream {
             Some(key) => key.checked_add(1).unwrap_or(key),
             None => 0,
         }
+    }
+
+    fn finish_calls(
+        &mut self,
+        calls: impl IntoIterator<Item = CallTrack>,
+        incomplete_reason: Option<&str>,
+    ) -> Vec<Bytes> {
+        let mut events = Vec::new();
+        for call in calls {
+            if call.custom {
+                let input = custom_tool_input(&call.arguments);
+                if !input.is_empty() {
+                    events.push(sse_event(
+                        "response.custom_tool_call_input.delta",
+                        json!({
+                            "type": "response.custom_tool_call_input.delta",
+                            "item_id": call.item_id,
+                            "output_index": call.output_index,
+                            "delta": input
+                        }),
+                    ));
+                }
+                events.push(sse_event(
+                    "response.custom_tool_call_input.done",
+                    json!({
+                        "type": "response.custom_tool_call_input.done",
+                        "item_id": call.item_id,
+                        "output_index": call.output_index,
+                        "input": input
+                    }),
+                ));
+                events.push(sse_event("response.output_item.done", {
+                    let item = json!({
+                        "id": call.item_id,
+                        "type": "custom_tool_call",
+                        "status": "completed",
+                        "call_id": call.call_id,
+                        "name": call.display_name,
+                        "input": input
+                    });
+                    self.output.push(item.clone());
+                    json!({
+                        "type": "response.output_item.done",
+                        "output_index": call.output_index,
+                        "item": item
+                    })
+                }));
+            } else if call.tool_search {
+                let (arguments, repaired) = normalize_arguments(&call.arguments);
+                let arguments = if incomplete_reason.is_some() && repaired {
+                    call.arguments.clone()
+                } else {
+                    arguments
+                };
+                let arguments = serde_json::from_str::<Value>(&arguments)
+                    .ok()
+                    .filter(Value::is_object)
+                    .unwrap_or_else(|| json!({ "query": arguments }));
+                let item = json!({
+                    "id": call.item_id,
+                    "type": "tool_search_call",
+                    "status": "completed",
+                    "call_id": call.call_id,
+                    "execution": "client",
+                    "arguments": arguments
+                });
+                events.push(sse_event("response.output_item.done", {
+                    self.output.push(item.clone());
+                    json!({
+                        "type": "response.output_item.done",
+                        "output_index": call.output_index,
+                        "item": item
+                    })
+                }));
+            } else {
+                let arguments = if call.arguments.trim().is_empty() {
+                    "{}".to_string()
+                } else {
+                    call.arguments.clone()
+                };
+                if call.emitted_arguments_len == 0 && call.arguments.trim().is_empty() {
+                    events.push(sse_event(
+                        "response.function_call_arguments.delta",
+                        json!({
+                            "type": "response.function_call_arguments.delta",
+                            "item_id": call.item_id,
+                            "output_index": call.output_index,
+                            "delta": "{}"
+                        }),
+                    ));
+                } else if call.emitted_arguments_len < call.arguments.len() {
+                    events.push(sse_event(
+                        "response.function_call_arguments.delta",
+                        json!({
+                            "type": "response.function_call_arguments.delta",
+                            "item_id": call.item_id,
+                            "output_index": call.output_index,
+                            "delta": &call.arguments[call.emitted_arguments_len..]
+                        }),
+                    ));
+                }
+                events.push(sse_event(
+                    "response.function_call_arguments.done",
+                    json!({
+                        "type": "response.function_call_arguments.done",
+                        "item_id": call.item_id,
+                        "output_index": call.output_index,
+                        "arguments": arguments
+                    }),
+                ));
+                let mut item = json!({
+                    "id": call.item_id,
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": call.call_id,
+                    "name": call.display_name,
+                    "arguments": arguments
+                });
+                if let Some(namespace) = call.namespace {
+                    item["namespace"] = json!(namespace);
+                }
+                if let Some(extra_content) = call.extra_content {
+                    item["extra_content"] = extra_content;
+                }
+                events.push(sse_event(
+                    "response.output_item.done",
+                    {
+                        self.output.push(item.clone());
+                        json!({ "type": "response.output_item.done", "output_index": call.output_index, "item": item })
+                    },
+                ));
+            }
+        }
+        events
+    }
+
+    fn finish_text(&mut self) -> Vec<Bytes> {
+        let Some(track) = self.text.take() else {
+            return Vec::new();
+        };
+        vec![
+            sse_event(
+                "response.output_text.done",
+                json!({
+                    "type": "response.output_text.done",
+                    "item_id": track.id,
+                    "output_index": track.index,
+                    "content_index": 0,
+                    "text": track.text,
+                    "annotations": []
+                }),
+            ),
+            sse_event(
+                "response.content_part.done",
+                json!({
+                    "type": "response.content_part.done",
+                    "item_id": track.id,
+                    "output_index": track.index,
+                    "content_index": 0,
+                    "part": {
+                        "type": "output_text",
+                        "text": track.text,
+                        "annotations": []
+                    }
+                }),
+            ),
+            sse_event("response.output_item.done", {
+                let item = json!({
+                    "id": track.id,
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{
+                        "type": "output_text",
+                        "text": track.text,
+                        "annotations": []
+                    }]
+                });
+                self.output.push(item.clone());
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": track.index,
+                    "item": item
+                })
+            }),
+        ]
+    }
+
+    fn finish_added_calls(&mut self) -> Vec<Bytes> {
+        let keys = self
+            .calls
+            .iter()
+            .filter_map(|(key, call)| {
+                (call.added
+                    && !call.display_name.is_empty()
+                    && (call.custom || !normalize_arguments(&call.arguments).1))
+                    .then_some(*key)
+            })
+            .collect::<Vec<_>>();
+        let mut events = Vec::new();
+        for key in keys {
+            let Some(call) = self.calls.remove(&key) else {
+                continue;
+            };
+            events.extend(self.finish_calls(std::iter::once(call), None));
+        }
+        events
     }
 
     fn flush_ready_calls(&mut self) -> Vec<Bytes> {

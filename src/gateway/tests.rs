@@ -2217,6 +2217,42 @@ async fn responses_stream_omits_whitespace_only_reasoning() {
 }
 
 #[tokio::test]
+async fn responses_stream_keeps_reasoning_per_tool_turn() {
+    let (_temp, gateway, upstream_task) = gateway_with_static_responses_stream(
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"first\"},\"finish_reason\":null}]}\n\n\
+         data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n\
+         data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"second\"},\"finish_reason\":null}]}\n\n\
+         data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n\
+         data: [DONE]\n\n",
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{}/v1/responses", gateway.port()))
+        .json(&json!({
+            "model": "model",
+            "input": "hello",
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let text = response.text().await.unwrap();
+
+    assert_eq!(
+        text.matches("event: response.reasoning_summary_part.added")
+            .count(),
+        2
+    );
+    assert!(text.contains("\"text\":\"first\""));
+    assert!(text.contains("\"text\":\"second\""));
+    assert!(text.contains("event: response.completed"));
+    gateway.stop().await;
+    upstream_task.abort();
+}
+
+#[tokio::test]
 async fn responses_logs_ignored_input_features() {
     let upstream = Router::new().route(
         "/chat/completions",

@@ -46,6 +46,8 @@ CNB Chat 上游当前只接受流式请求。桌面网关会在发送前把合�
 
 Responses 回译会保留上游合法 function arguments 的原始字节，流式 delta 拼接结果与 arguments done、output item 和最终 response 完全一致；无参数调用统一为 `{}`。无法由 Chat 表达的 hosted tool 会安全丢弃并在日志记录 `tools.ignored:<type>`，例如 `tools.ignored:web_search`。`custom_tool_call(apply_patch)` 的输入和输出不会增删换行；Codex 的 `apply_patch` 在更新文件时会按工具自身语义保证文件以 LF 结束，需要保留“文件末尾无换行”的任务应在补丁完成后单独处理。
 
+纯空白 reasoning 不会生成空的“思考过程”项。上游在同一个工具回合内切换 `reasoning_content`、`reasoning` 或 `reasoning_details` 时会合并到当前 reasoning item；完成一轮工具调用后出现的新 reasoning 会创建新的独立 item。
+
 模型目录通过编译内置的 `resources/models.json` 提供。`deepseek-v4.1-flash` 声明文本/图像输入、流式输出、工具调用、reasoning summary 和 1,048,576 token 上下文；推理请求仍允许显式传入其它模型 ID。
 
 ## PromptGate 兼容层
