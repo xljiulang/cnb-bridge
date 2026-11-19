@@ -382,7 +382,10 @@ describe("App shell", () => {
 
     const startButton = wrapper.get(".head-actions .primary");
     await startButton.trigger("click");
-    expect(startButton.text()).toContain("正在启动");
+    expect(startButton.text()).toContain("正在桥接");
+    expect(startButton.text()).not.toContain("正在启动");
+    expect(wrapper.text()).not.toContain("正在启动");
+    expect(wrapper.get(".title-row .badge").text()).toBe("正在桥接");
     expect(startButton.find(".spin").exists()).toBe(true);
     await startButton.trigger("click");
     expect(startCalls).toBe(1);
@@ -547,6 +550,7 @@ describe("App shell", () => {
     const action = wrapper.get(".head-actions .primary");
     expect(action.text()).toContain("正在断开");
     expect(action.text()).not.toContain("正在启动");
+    expect(wrapper.get(".title-row .badge").text()).toBe("正在断开");
     const workspaceStep = wrapper.findAll(".pipeline .step")[2];
     expect(workspaceStep.text()).toContain("正在断开");
     expect(workspaceStep.text()).not.toContain("工作空间已保留");
@@ -655,6 +659,8 @@ describe("App shell", () => {
     expect(wrapper.find(".api-key-card").exists()).toBe(false);
     expect(wrapper.find(".pipeline-card").exists()).toBe(false);
     expect(wrapper.text()).not.toContain("扫码绑定 CNB");
+    expect(wrapper.text()).toContain("桥接状态");
+    expect(wrapper.text()).not.toContain("启动状态");
 
     await wrapper.get(".sidebar-status").trigger("click");
     expect(document.body.textContent).toContain("扫码登录 CNB 账号");

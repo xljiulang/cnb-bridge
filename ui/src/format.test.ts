@@ -30,6 +30,7 @@ describe("format helpers", () => {
     expect(bridgeLabel("needsSshKey")).toBe("需要注册 SSH 公钥");
     expect(bridgeLabel("needsRepoCreation")).toBe("需要创建仓库");
     expect(bridgeLabel("stopping")).toBe("正在断开");
+    expect(bridgeLabel("failed")).toBe("桥接失败");
   });
 
   it("validates ports", () => {

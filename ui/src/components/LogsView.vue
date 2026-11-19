@@ -70,7 +70,7 @@ defineProps<{ app: DesktopApp }>();
       <div v-if="app.filteredLogs.length === 0" class="empty-state">
         <ScrollText :size="28" aria-hidden="true" />
         <strong>暂无日志</strong>
-        <span>启动桥接后，运行信息会显示在这里。</span>
+        <span>完成桥接后，运行信息会显示在这里。</span>
       </div>
       <div
         v-for="entry in app.filteredLogs"

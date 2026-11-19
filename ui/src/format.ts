@@ -18,7 +18,7 @@ const BRIDGE_LABELS: Record<BridgeState, string> = {
   needsSshKey: "需要注册 SSH 公钥",
   needsRepoCreation: "需要创建仓库",
   stopping: "正在断开",
-  failed: "启动失败",
+  failed: "桥接失败",
 };
 
 export function bridgeLabel(state: BridgeState): string {

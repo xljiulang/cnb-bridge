@@ -137,7 +137,7 @@ export function useDesktopApp() {
     ),
   );
   const statusLabel = computed(() => {
-    if (startingBridge.value) return "正在启动";
+    if (startingBridge.value) return "正在桥接";
     if (accountState.value === "signingIn") return "等待授权";
     if (accountState.value === "failed") return "登录失败";
     if (accountState.value === "signedOut") return "未登录";
@@ -282,12 +282,12 @@ export function useDesktopApp() {
     if (bridgeState.value === "stopping") return "正在断开…";
     if (startingBridge.value || bridgeTransitioning.value) {
       return startingSeconds.value > 0
-        ? `正在启动… ${startingSeconds.value}s`
-        : "正在启动…";
+        ? `正在桥接… ${startingSeconds.value}s`
+        : "正在桥接…";
     }
     if (repoCreationNeeded.value) return "重新检查仓库";
     if (idle.value) return "立即桥接";
-    return "启动桥接";
+    return "立即桥接";
   });
   const pipelineSteps = computed<ConnectionStep[]>(() => {
     const effectiveBridgeState =

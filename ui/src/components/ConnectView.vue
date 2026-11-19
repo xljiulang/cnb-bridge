@@ -44,13 +44,17 @@ defineProps<{ app: DesktopApp }>();
                     : "未登录"
                 : app.organizationRequired
                 ? "准备组织"
-                : app.ready
-                  ? "在线"
-                  : app.idle
-                    ? "待命"
-                    : app.startingBridge || app.bridgeTransitioning
-                      ? "处理中"
-                      : "待连接"
+                : app.bridgeState === "stopping"
+                  ? "正在断开"
+                  : app.ready
+                    ? "在线"
+                    : app.startingBridge
+                      ? "正在桥接"
+                      : app.idle
+                        ? "待命"
+                        : app.bridgeTransitioning
+                          ? "处理中"
+                          : "待连接"
             }}
           </span>
         </div>
@@ -118,7 +122,7 @@ defineProps<{ app: DesktopApp }>();
             ? "请完成账号验证。关闭扫码窗口即可取消本次登录。"
             : app.accountState === "failed"
               ? "请从左下角账号卡重新选择账号或扫码登录。"
-              : "选择已保存账号或扫码登录 CNB。登录后即可查看模型、端点和启动状态。"
+              : "选择已保存账号或扫码登录 CNB。登录后即可查看模型、端点和桥接状态。"
         }}
       </p>
       <div class="connect-location-hint">
@@ -376,7 +380,7 @@ defineProps<{ app: DesktopApp }>();
       <article v-if="app.connectionDetailsVisible" class="card pipeline-card">
         <div class="section-head">
           <div>
-            <span class="card-label">启动链路</span>
+            <span class="card-label">桥接流程</span>
             <h2>自动连接状态</h2>
           </div>
           <span class="card-meta">
