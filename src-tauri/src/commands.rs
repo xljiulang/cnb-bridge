@@ -99,7 +99,7 @@ pub async fn start_login(state: State<'_, DesktopState>) -> Result<AccountStatus
 
 #[tauri::command]
 pub async fn logout(state: State<'_, DesktopState>) -> Result<AccountStatus, CommandError> {
-    let _ = state.bridge.stop_all().await;
+    let _ = state.bridge.disconnect().await;
     auth_webview::clear_web_data(&state.app);
     let status = state
         .account
@@ -245,7 +245,7 @@ pub async fn create_cnb_namespace(
 
 #[tauri::command]
 pub async fn stop_bridge(state: State<'_, DesktopState>) -> Result<AppSnapshot, CommandError> {
-    let _ = state.bridge.stop_all().await;
+    let _ = state.bridge.disconnect().await;
     state.snapshot().await
 }
 

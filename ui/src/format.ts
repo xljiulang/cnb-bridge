@@ -17,7 +17,7 @@ const BRIDGE_LABELS: Record<BridgeState, string> = {
   ready: "桥接就绪",
   needsSshKey: "需要注册 SSH 公钥",
   needsRepoCreation: "需要创建仓库",
-  stopping: "正在关闭",
+  stopping: "正在断开",
   failed: "启动失败",
 };
 

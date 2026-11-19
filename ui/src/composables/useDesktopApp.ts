@@ -279,14 +279,14 @@ export function useDesktopApp() {
     return `${devCpuUsageAmount.value}，${devCpuUsagePercent.value}`;
   });
   const mainActionLabel = computed(() => {
-    if (bridgeState.value === "stopping") return "正在关闭…";
+    if (bridgeState.value === "stopping") return "正在断开…";
     if (startingBridge.value || bridgeTransitioning.value) {
       return startingSeconds.value > 0
         ? `正在启动… ${startingSeconds.value}s`
         : "正在启动…";
     }
     if (repoCreationNeeded.value) return "重新检查仓库";
-    if (idle.value) return "立即启动";
+    if (idle.value) return "立即桥接";
     return "启动桥接";
   });
   const pipelineSteps = computed<ConnectionStep[]>(() => {
@@ -336,7 +336,7 @@ export function useDesktopApp() {
         detail: ready.value
           ? "SSH 已连接"
           : effectiveBridgeState === "stopping"
-            ? "正在停止"
+            ? "正在断开"
             : effectiveBridgeState === "connecting"
               ? "正在连接"
               : idle.value && snapshot.value?.bridge.workspaceSn

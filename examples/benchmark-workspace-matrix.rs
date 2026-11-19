@@ -1,11 +1,11 @@
 use anyhow::{bail, Context, Result};
 use cnb_bridge::account::{AccountBridgeSettings, AccountManager, AccountState};
-use cnb_bridge::api::CnbApi;
+use cnb_bridge::api::{CnbApi, DEFAULT_API_URL};
 use cnb_bridge::bridge::{Bridge, BridgeState};
 use cnb_bridge::logging::Logger;
 use cnb_bridge::settings::SettingsStore;
 use cnb_bridge::ssh_key::SshKeyStore;
-use cnb_bridge::workspace::{RepoProvisioner, WorkspaceManager};
+use cnb_bridge::workspace::RepoProvisioner;
 use git2::build::CheckoutBuilder;
 use git2::{FetchOptions, PushOptions, RemoteCallbacks, Signature};
 use serde::Serialize;
@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const DEFAULT_RUNS: usize = 3;
-const STOP_TIMEOUT: Duration = Duration::from_secs(180);
+const WORKSPACE_RECYCLE_TIMEOUT: Duration = Duration::from_secs(180);
 const START_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Debug)]
@@ -154,8 +154,9 @@ async fn run() -> Result<()> {
 async fn run_matrix(args: &Args, token: &str, api: &CnbApi) -> Result<BenchmarkReport> {
     let mut runs = Vec::with_capacity(args.runs);
     for run in 1..=args.runs {
-        stop_running_workspace(token, api, &args.repo_slug).await?;
-        wait_for_no_running_workspace(token, api, &args.repo_slug, STOP_TIMEOUT).await?;
+        stop_running_workspaces(token, api, &args.repo_slug).await?;
+        wait_for_no_running_workspace(token, api, &args.repo_slug, WORKSPACE_RECYCLE_TIMEOUT)
+            .await?;
         println!(
             "Run {run}/{}: cold workspace is stopped, starting bridge...",
             args.runs
@@ -208,8 +209,10 @@ async fn run_matrix(args: &Args, token: &str, api: &CnbApi) -> Result<BenchmarkR
         );
         runs.push(run_result);
 
-        bridge.stop_all().await;
-        wait_for_no_running_workspace(token, api, &args.repo_slug, STOP_TIMEOUT).await?;
+        bridge.disconnect().await;
+        stop_running_workspaces(token, api, &args.repo_slug).await?;
+        wait_for_no_running_workspace(token, api, &args.repo_slug, WORKSPACE_RECYCLE_TIMEOUT)
+            .await?;
     }
 
     let failure_count = runs.iter().filter(|run| !run.success).count();
@@ -232,24 +235,68 @@ async fn run_matrix(args: &Args, token: &str, api: &CnbApi) -> Result<BenchmarkR
     })
 }
 
-async fn stop_running_workspace(token: &str, api: &CnbApi, slug: &str) -> Result<()> {
+async fn stop_running_workspaces(token: &str, api: &CnbApi, slug: &str) -> Result<()> {
     let workspaces = api
         .list_workspaces(token, slug)
         .await
         .with_context(|| format!("读取 {slug} 的 workspace 列表失败"))?;
-    let manager = WorkspaceManager::new(api);
+    if !workspaces
+        .list
+        .iter()
+        .any(|workspace| workspace.status == "running")
+    {
+        return Ok(());
+    }
+    let endpoint = std::env::var("CNB_BRIDGE_API_URL")
+        .unwrap_or_else(|_| DEFAULT_API_URL.to_string())
+        .trim_end_matches('/')
+        .to_string();
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("创建 benchmark workspace 控制客户端失败")?;
     for workspace in workspaces
         .list
         .into_iter()
         .filter(|workspace| workspace.status == "running")
     {
-        manager
-            .stop(token, &workspace.sn)
+        println!("Stopping benchmark workspace {}", workspace.sn);
+        let response = http
+            .post(format!("{endpoint}/workspace/stop"))
+            .bearer_auth(token)
+            .header("Accept", "application/vnd.cnb.api+json")
+            .json(&serde_json::json!({ "sn": workspace.sn }))
+            .send()
             .await
-            .with_context(|| format!("停止 workspace {} 失败", workspace.sn))?;
-        println!("Stopping workspace {}", workspace.sn);
+            .with_context(|| format!("请求停止 workspace {} 失败", workspace.sn))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("读取 workspace 停止响应失败")?;
+        if status.is_success() || is_already_ended_success_response(status, &body) {
+            continue;
+        }
+        bail!(
+            "停止 benchmark workspace {} 失败: HTTP {} {}",
+            workspace.sn,
+            status.as_u16(),
+            body
+        );
     }
     Ok(())
+}
+
+fn is_already_ended_success_response(status: reqwest::StatusCode, body: &str) -> bool {
+    if status != reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+        return false;
+    }
+    let normalized = body
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ");
+    normalized.contains("stop_fail_wrong_status") && normalized.contains("already end: success")
 }
 
 async fn wait_for_no_running_workspace(
@@ -272,7 +319,7 @@ async fn wait_for_no_running_workspace(
             return Ok(());
         }
         if Instant::now() >= deadline {
-            bail!("等待 {slug} 的 workspace 停止超时");
+            bail!("等待 {slug} 的 workspace 停止超时；请先在 CNB 控制台停止运行中的云主机");
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }

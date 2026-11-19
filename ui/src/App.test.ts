@@ -389,7 +389,7 @@ describe("App shell", () => {
 
     resolveStart(readySnapshot);
     await flushPromises();
-    expect(wrapper.find(".head-actions .danger").text()).toContain("停止桥接");
+    expect(wrapper.find(".head-actions .danger").text()).toContain("断开桥接");
     wrapper.unmount();
   });
 
@@ -499,6 +499,7 @@ describe("App shell", () => {
     expect(workspaceStep.classes()).toContain("done");
     expect(workspaceStep.classes()).not.toContain("current");
     expect(workspaceStep.text()).toContain("等待重连");
+    expect(wrapper.find(".head-actions .primary").text()).toContain("立即桥接");
     wrapper.unmount();
   });
 
@@ -544,10 +545,10 @@ describe("App shell", () => {
     await flushPromises();
 
     const action = wrapper.get(".head-actions .primary");
-    expect(action.text()).toContain("正在关闭");
+    expect(action.text()).toContain("正在断开");
     expect(action.text()).not.toContain("正在启动");
     const workspaceStep = wrapper.findAll(".pipeline .step")[2];
-    expect(workspaceStep.text()).toContain("正在停止");
+    expect(workspaceStep.text()).toContain("正在断开");
     expect(workspaceStep.text()).not.toContain("工作空间已保留");
     expect(workspaceStep.text()).not.toContain("工作空间");
     wrapper.unmount();

@@ -80,7 +80,7 @@ defineProps<{ app: DesktopApp }>();
           @click="app.stopBridge"
         >
           <Square :size="15" aria-hidden="true" />
-          停止桥接
+          断开桥接
         </button>
       </div>
     </header>

@@ -162,17 +162,17 @@ fn forwarded_headers_force_identity_content_encoding() {
 #[test]
 fn only_stops_after_five_idle_minutes_without_active_connections() {
     let timeout = Duration::from_secs(5 * 60);
-    assert!(!should_stop_idle_workspace(
+    assert!(!should_disconnect_idle_tunnel(
         1,
         Duration::from_secs(301),
         timeout
     ));
-    assert!(!should_stop_idle_workspace(
+    assert!(!should_disconnect_idle_tunnel(
         0,
         Duration::from_secs(299),
         timeout
     ));
-    assert!(should_stop_idle_workspace(0, timeout, timeout));
+    assert!(should_disconnect_idle_tunnel(0, timeout, timeout));
 }
 
 #[tokio::test]

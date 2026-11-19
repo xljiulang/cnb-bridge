@@ -246,7 +246,7 @@ pub fn apply_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
 
 const EXIT_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Stops the bridge and cloud workspace, then exits the process.
+/// Disconnects the local bridge tunnel, then exits the process.
 pub fn exit_with_shutdown(app: AppHandle) {
     static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
     if EXIT_REQUESTED.swap(true, std::sync::atomic::Ordering::AcqRel) {
@@ -254,7 +254,7 @@ pub fn exit_with_shutdown(app: AppHandle) {
     }
     tauri::async_runtime::spawn(async move {
         if let Some(state) = app.try_state::<DesktopState>() {
-            let _ = tokio::time::timeout(EXIT_STOP_TIMEOUT, state.bridge.stop_all()).await;
+            let _ = tokio::time::timeout(EXIT_STOP_TIMEOUT, state.bridge.disconnect()).await;
         }
         tray::exit_now(&app);
     });

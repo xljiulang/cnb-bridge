@@ -1,8 +1,6 @@
 //! Repository provisioning and CNB workspace lifecycle.
 
-use crate::api::{
-    ApiError, Branch, CnbApi, Namespace, Repo, WorkspaceDetail, WorkspaceStopOutcome,
-};
+use crate::api::{ApiError, Branch, CnbApi, Namespace, Repo, WorkspaceDetail};
 use git2::{RemoteCallbacks, Repository, Signature};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -336,11 +334,6 @@ impl<'a> WorkspaceManager<'a> {
             sn.ok_or_else(|| ApiError::InvalidResponse("工作空间启动超时（120 秒）".to_string()))?;
         let detail = self.api.workspace_detail(token, slug, &sn).await?;
         Ok(WorkspaceSession { sn, detail })
-    }
-
-    /// Stops the workspace when the client exits.
-    pub async fn stop(&self, token: &str, sn: &str) -> Result<WorkspaceStopOutcome, ApiError> {
-        self.api.stop_workspace(token, sn).await
     }
 }
 

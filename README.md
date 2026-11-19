@@ -127,19 +127,24 @@ $env:PATH = "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\C
 3. 若账号没有 Owner 组织，客户端使用账号名自动创建根组织，无需再手动启动一次请求来触发建仓。
 4. 多账号凭据和账号级仓库设置通过 DPAPI 加密保存；同一 username 再次扫码会更新最近凭据，退出登录只断开当前账号，不删除本机凭据。界面优先显示 CNB 昵称，没有昵称时降级显示账号，并从 `https://cnb.cool/users/{username}/avatar/l` 加载可选头像。同一 CNB 账号可在多台机器登录，每台机器只使用自己的公钥派生名称，其他机器及旧名称的资源不会被主动删除。
 
-“停止桥接”会关闭本地 SSH 隧道并停止云端工作空间；退出当前 CNB 账号同样会停止该账号的云端工作空间，避免继续占用资源。
+“断开桥接”只关闭本地 SSH 隧道，不停止 CNB 云端工作空间；退出当前 CNB
+账号和退出客户端也只断开本机连接。云端工作空间由 CNB 平台的空闲机制、会话
+上限或强制回收机制结束，用户也可以前往 CNB 控制台主动关闭。
 
 工作空间冷启动性能可通过 `scripts/benchmark-workspace-start.ps1` 和
 `scripts/benchmark-workspace/` 下的配置矩阵进行对照测试。基准必须使用独立
-benchmark 仓库，并验证 `remoteSsh`、SSH 端口转发和 Agent `/healthz`。
+benchmark 仓库，并验证 `remoteSsh`、SSH 端口转发和 Agent `/healthz`。基准
+工具会针对该独立仓库在每轮前后停止云主机，确保下一轮为冷启动；生产客户端
+仍不会主动调用停止接口。
 当前矩阵中，保留 `cnbcool/default-dev-env` 并移除 Docker service 后的 3 次
 冷启动中位耗时为 15.193 秒，比原配置的 21.658 秒降低 29.85%。固定
 `node:22-bookworm-slim` 的两种变体均无法获得 `remoteSsh`，因此生产模板保留
 默认镜像和 vscode service，并移除 Docker service。
 5. 客户端启动后只运行本机网关，不会立即启动 CNB 工作空间。
 6. 把任意 OpenAI 兼容客户端的 base URL 指向 `http://127.0.0.1:11233/v1`；首个请求会按需创建或连接工作空间。
-7. 最后一次请求结束 5 分钟后关闭 SSH 隧道并停止云端工作空间。
-8. 登录 Windows 自动启动时保持隐藏并驻留托盘；手动启动显示主窗口，关闭窗口固定最小化到托盘。托盘“退出客户端”会先停止云端工作空间再退出。
+7. 最后一次请求结束 5 分钟后只关闭 SSH 隧道，不停止云端工作空间。
+8. 登录 Windows 自动启动时保持隐藏并驻留托盘；手动启动显示主窗口，关闭窗口
+   固定最小化到托盘。托盘“退出客户端”会先断开桥接再退出，不关闭云端工作空间。
 
 ## 配置
 

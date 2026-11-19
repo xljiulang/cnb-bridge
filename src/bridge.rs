@@ -1,7 +1,7 @@
 //! End-to-end bridge state machine.
 
 use crate::account::{AccountError, AccountManager, AccountStatus};
-use crate::api::{ApiError, CnbApi, Namespace, WorkspaceDetail, WorkspaceStopOutcome};
+use crate::api::{ApiError, CnbApi, Namespace, WorkspaceDetail};
 use crate::gateway::{GatewayConfig, GatewayHandle};
 use crate::logging::Logger;
 use crate::settings::{Settings, SettingsStore};
@@ -425,41 +425,17 @@ impl Bridge {
         });
     }
 
-    /// Stops the tunnel and the cloud workspace.
-    pub async fn stop_all(&self) -> BridgeSnapshot {
+    /// Disconnects the local SSH tunnel while preserving the cloud workspace.
+    pub async fn disconnect(&self) -> BridgeSnapshot {
         let _transition = self.transition.lock().await;
-        self.stop_locked().await
+        self.disconnect_locked().await
     }
 
-    async fn stop_locked(&self) -> BridgeSnapshot {
+    async fn disconnect_locked(&self) -> BridgeSnapshot {
         self.set_state(BridgeState::Stopping).await;
-        let (tunnel, sn) = {
-            let mut runtime = self.runtime.lock().await;
-            (runtime.tunnel.take(), runtime.workspace_sn.clone())
-        };
+        let tunnel = self.runtime.lock().await.tunnel.take();
         if let Some(tunnel) = tunnel {
             tunnel.stop().await;
-        }
-        if let Some(sn) = sn {
-            match self.account.access_token().await {
-                Ok(token) => {
-                    let manager = WorkspaceManager::new(&self.api);
-                    match manager.stop(&token, &sn).await {
-                        Ok(WorkspaceStopOutcome::StopRequested) => {}
-                        Ok(WorkspaceStopOutcome::AlreadyEndedSuccess) => {
-                            self.logger
-                                .log("info", "workspace 已自然结束，无需再次停止");
-                        }
-                        Err(error) => {
-                            self.logger
-                                .log("warn", format!("停止工作空间失败: {error}"));
-                        }
-                    }
-                }
-                Err(error) => self
-                    .logger
-                    .log("warn", format!("关停时无法刷新登录: {error}")),
-            }
         }
         let connected = self.is_account_connected();
         {
@@ -469,9 +445,7 @@ impl Bridge {
             } else {
                 BridgeState::SignedOut
             });
-            runtime.workspace_sn = None;
-            runtime.repo_creation_url = None;
-            runtime.manual_creation_pending = false;
+            runtime.error = None;
         }
         self.notify_runtime_changed();
         self.snapshot().await
@@ -557,17 +531,17 @@ impl Bridge {
         }
     }
 
-    /// Stops an idle tunnel and its cloud workspace.
-    pub async fn stop_idle_workspace(&self) -> bool {
+    /// Disconnects an idle SSH tunnel while preserving the cloud workspace.
+    pub async fn disconnect_idle_tunnel(&self) -> bool {
         let Ok(_transition) = self.transition.try_lock() else {
             return false;
         };
-        if self.current_state().await != BridgeState::Ready {
+        let has_tunnel = self.runtime.lock().await.tunnel.is_some();
+        if self.current_state().await != BridgeState::Ready || !has_tunnel {
             return false;
         }
-        self.logger
-            .log("info", "工作空间空闲 5 分钟，正在停止云主机");
-        self.stop_locked().await;
+        self.logger.log("info", "工作空间空闲 5 分钟，正在断开 SSH");
+        self.disconnect_locked().await;
         true
     }
 
@@ -1054,22 +1028,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_workspace_stop_is_a_noop_outside_ready_state() {
+    async fn idle_disconnect_is_a_noop_outside_ready_state() {
         let temp = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&temp);
         bridge.runtime.lock().await.state = Some(BridgeState::Idle);
 
-        assert!(!bridge.stop_idle_workspace().await);
+        assert!(!bridge.disconnect_idle_tunnel().await);
     }
 
     #[tokio::test]
-    async fn idle_workspace_stop_stops_cloud_workspace_and_clears_its_sn() {
+    async fn idle_disconnect_releases_tunnel_and_preserves_workspace_sn() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/workspace/stop"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
-            .mount(&server)
-            .await;
         let temp = tempfile::tempdir().unwrap();
         let account =
             AccountManager::with_store(AccountStore::new(temp.path().join("account.bin")));
@@ -1086,28 +1055,26 @@ mod tests {
             Arc::new(Logger::new(32)),
         );
         bridge.api = CnbApi::with_base_url(server.uri());
+        let (tunnel, address) = TunnelHandle::test_handle().await;
         {
             let mut runtime = bridge.runtime.lock().await;
             runtime.state = Some(BridgeState::Ready);
             runtime.workspace_sn = Some("ws-idle".to_string());
+            runtime.tunnel = Some(tunnel);
         }
 
-        assert!(bridge.stop_idle_workspace().await);
+        assert!(bridge.disconnect_idle_tunnel().await);
 
         let snapshot = bridge.snapshot().await;
         assert_eq!(snapshot.state, BridgeState::Idle);
-        assert_eq!(snapshot.workspace_sn, None);
-        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert_eq!(snapshot.workspace_sn.as_deref(), Some("ws-idle"));
+        assert!(tokio::net::TcpListener::bind(address).await.is_ok());
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn stop_all_stops_workspace_and_clears_its_sn() {
+    async fn disconnect_releases_tunnel_and_preserves_workspace_sn() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/workspace/stop"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
-            .mount(&server)
-            .await;
         let temp = tempfile::tempdir().unwrap();
         let account =
             AccountManager::with_store(AccountStore::new(temp.path().join("account.bin")));
@@ -1124,18 +1091,21 @@ mod tests {
             Arc::new(Logger::new(32)),
         );
         bridge.api = CnbApi::with_base_url(server.uri());
+        let (tunnel, address) = TunnelHandle::test_handle().await;
         {
             let mut runtime = bridge.runtime.lock().await;
             runtime.state = Some(BridgeState::Ready);
             runtime.repo_slug = Some("team/repo".to_string());
             runtime.workspace_sn = Some("ws-stopped".to_string());
+            runtime.tunnel = Some(tunnel);
         }
 
-        let snapshot = bridge.stop_all().await;
+        let snapshot = bridge.disconnect().await;
 
         assert_eq!(snapshot.state, BridgeState::Idle);
-        assert_eq!(snapshot.workspace_sn, None);
-        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert_eq!(snapshot.workspace_sn.as_deref(), Some("ws-stopped"));
+        assert!(tokio::net::TcpListener::bind(address).await.is_ok());
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1361,46 +1331,6 @@ mod tests {
             .recent(4)
             .iter()
             .any(|entry| entry.message.contains("回退完整启动")));
-    }
-
-    #[tokio::test]
-    async fn stop_logs_already_ended_success_as_info() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/workspace/stop"))
-            .respond_with(ResponseTemplate::new(422).set_body_string(
-                "[STOP_FAIL_WRONG_STATUS]Current build(cnb-test) already end: success",
-            ))
-            .mount(&server)
-            .await;
-        let temp = tempfile::tempdir().unwrap();
-        let account =
-            AccountManager::with_store(AccountStore::new(temp.path().join("account.bin")));
-        account
-            .complete_token_login("token", Some("alice".to_string()), None, None, None)
-            .unwrap();
-        let logger = Arc::new(Logger::new(32));
-        let mut bridge = Bridge::new(
-            account,
-            SettingsStore::new(temp.path().join("settings.json")),
-            SshKeyStore::new(
-                temp.path().join("id_ed25519"),
-                temp.path().join("id_ed25519.pub"),
-            ),
-            Arc::clone(&logger),
-        );
-        bridge.api = CnbApi::with_base_url(server.uri());
-        bridge.runtime.lock().await.workspace_sn = Some("ws-ended".to_string());
-
-        bridge.stop_all().await;
-
-        let logs = logger.recent(8);
-        assert!(logs
-            .iter()
-            .any(|entry| { entry.level == "info" && entry.message.contains("已自然结束") }));
-        assert!(!logs
-            .iter()
-            .any(|entry| entry.message.contains("停止工作空间失败")));
     }
 
     #[test]

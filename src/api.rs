@@ -10,13 +10,6 @@ use crate::net;
 /// Default CNB OpenAPI endpoint.
 pub const DEFAULT_API_URL: &str = "https://api.cnb.cool";
 
-/// Result of requesting that a workspace stop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkspaceStopOutcome {
-    StopRequested,
-    AlreadyEndedSuccess,
-}
-
 /// Errors returned by the CNB API.
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -47,26 +40,6 @@ impl ApiError {
             }
         )
     }
-}
-
-/// Returns whether a stop request failed only because the workspace already
-/// finished successfully.
-pub fn is_workspace_already_ended_success(error: &ApiError) -> bool {
-    let ApiError::Remote {
-        status, message, ..
-    } = error
-    else {
-        return false;
-    };
-    if *status != StatusCode::UNPROCESSABLE_ENTITY {
-        return false;
-    }
-    let normalized = message
-        .split_whitespace()
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>()
-        .join(" ");
-    normalized.contains("stop_fail_wrong_status") && normalized.contains("already end: success")
 }
 
 impl From<reqwest::Error> for ApiError {
@@ -479,25 +452,6 @@ impl CnbApi {
         self.send_json(Method::GET, &path, token, None::<&()>).await
     }
 
-    /// Stops a workspace by serial number.
-    pub async fn stop_workspace(
-        &self,
-        token: &str,
-        sn: &str,
-    ) -> Result<WorkspaceStopOutcome, ApiError> {
-        let body = serde_json::json!({ "sn": sn });
-        let result: Result<serde_json::Value, ApiError> = self
-            .send_json(Method::POST, "/workspace/stop", token, Some(&body))
-            .await;
-        match result {
-            Ok(_) => Ok(WorkspaceStopOutcome::StopRequested),
-            Err(error) if is_workspace_already_ended_success(&error) => {
-                Ok(WorkspaceStopOutcome::AlreadyEndedSuccess)
-            }
-            Err(error) => Err(error),
-        }
-    }
-
     async fn send_json<T, B>(
         &self,
         method: Method,
@@ -791,103 +745,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(result["sn"], "pipeline-1");
-    }
-
-    #[tokio::test]
-    async fn treats_already_ended_success_as_idempotent_stop_success() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/workspace/stop"))
-            .respond_with(ResponseTemplate::new(422).set_body_string(
-                "[STOP_FAIL_WRONG_STATUS]Current build(cnb-gal-1k7nl7nab) ALREADY   END: SUCCESS",
-            ))
-            .mount(&server)
-            .await;
-        let api = CnbApi::with_base_url(server.uri());
-
-        let outcome = api.stop_workspace("token", "ws-1").await.unwrap();
-
-        assert!(matches!(outcome, WorkspaceStopOutcome::AlreadyEndedSuccess));
-    }
-
-    #[tokio::test]
-    async fn normal_stop_returns_stop_requested() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/workspace/stop"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
-            .mount(&server)
-            .await;
-        let api = CnbApi::with_base_url(server.uri());
-
-        let outcome = api.stop_workspace("token", "ws-1").await.unwrap();
-
-        assert_eq!(outcome, WorkspaceStopOutcome::StopRequested);
-    }
-
-    #[test]
-    fn only_the_exact_success_message_is_classified_as_already_stopped() {
-        for status in [StatusCode::UNAUTHORIZED, StatusCode::INTERNAL_SERVER_ERROR] {
-            assert!(!is_workspace_already_ended_success(&ApiError::Remote {
-                status,
-                code: None,
-                message: "[STOP_FAIL_WRONG_STATUS] already end: success".to_string(),
-            }));
-        }
-        assert!(!is_workspace_already_ended_success(
-            &ApiError::InvalidResponse("[STOP_FAIL_WRONG_STATUS] already end: success".to_string(),)
-        ));
-    }
-
-    #[tokio::test]
-    async fn does_not_treat_other_wrong_status_errors_as_stop_success() {
-        for terminal_status in ["failed", "cancelled", "timeout"] {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/workspace/stop"))
-                .respond_with(
-                    ResponseTemplate::new(422).set_body_string(format!(
-                        "[STOP_FAIL_WRONG_STATUS]Current build(cnb-test) already end: {terminal_status}"
-                    )),
-                )
-                .mount(&server)
-                .await;
-            let api = CnbApi::with_base_url(server.uri());
-
-            let error = api.stop_workspace("token", "ws-1").await.unwrap_err();
-
-            assert!(matches!(
-                error,
-                ApiError::Remote {
-                    status: StatusCode::UNPROCESSABLE_ENTITY,
-                    ..
-                }
-            ));
-        }
-    }
-
-    #[tokio::test]
-    async fn does_not_treat_generic_unprocessable_errors_as_stop_success() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/workspace/stop"))
-            .respond_with(
-                ResponseTemplate::new(422)
-                    .set_body_string("workspace cannot be stopped in its current state"),
-            )
-            .mount(&server)
-            .await;
-        let api = CnbApi::with_base_url(server.uri());
-
-        let error = api.stop_workspace("token", "ws-1").await.unwrap_err();
-
-        assert!(matches!(
-            error,
-            ApiError::Remote {
-                status: StatusCode::UNPROCESSABLE_ENTITY,
-                ..
-            }
-        ));
     }
 
     #[tokio::test]
