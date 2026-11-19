@@ -1,4 +1,4 @@
-use super::request::HANDLED_INPUT_TYPES;
+use super::request::{COMPACTION_PLACEHOLDER, COMPACTION_PROMPT, HANDLED_INPUT_TYPES};
 use super::*;
 use bytes::Bytes;
 use serde_json::json;
@@ -150,9 +150,18 @@ fn reports_unsupported_responses_features_without_rejecting_them() {
         "input": [{ "type": "mcp_call" }]
     });
 
+    // `text.format` is translated now, so only a format this layer cannot
+    // carry (no schema) shows up as an ignored detail.
     assert_eq!(
         unsupported_feature_names(&request),
-        ["previous_response_id", "text.format", "input.items"]
+        ["previous_response_id", "input.items"]
+    );
+    assert_eq!(
+        ignored_feature_details(&request),
+        [
+            "input.item:mcp_call",
+            "text.format.type:json_schema_without_schema"
+        ]
     );
 }
 
@@ -801,4 +810,267 @@ fn handled_input_types_stay_in_sync() {
             "handled type {name} is reported as dropped: {details:?}"
         );
     }
+}
+
+#[test]
+fn translates_text_format_json_schema() {
+    let request = json!({
+        "model": "model",
+        "input": "hi",
+        "text": { "format": {
+            "type": "json_schema",
+            "name": "codex_output_schema",
+            "strict": true,
+            "schema": {
+                "type": "object",
+                "properties": { "answer": { "type": "string" } }
+            }
+        }}
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let format = &chat["response_format"];
+
+    assert_eq!(format["type"], "json_schema");
+    assert_eq!(format["json_schema"]["name"], "codex_output_schema");
+    assert_eq!(format["json_schema"]["strict"], true);
+    assert_eq!(
+        format["json_schema"]["schema"]["properties"]["answer"]["type"],
+        "string"
+    );
+}
+
+#[test]
+fn prefers_top_level_format_schema() {
+    let request = json!({
+        "text": { "format": {
+            "type": "json_schema",
+            "name": "flat_name",
+            "schema": { "type": "object", "properties": { "flat": { "type": "string" } } },
+            "json_schema": {
+                "name": "nested_name",
+                "schema": { "type": "object", "properties": { "nested": { "type": "string" } } }
+            }
+        }}
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let json_schema = &chat["response_format"]["json_schema"];
+
+    assert_eq!(json_schema["name"], "flat_name");
+    assert!(json_schema["schema"]["properties"]["flat"].is_object());
+    assert!(json_schema["schema"]["properties"]["nested"].is_null());
+}
+
+#[test]
+fn translates_text_format_json_object_and_omits_text() {
+    let object = responses_to_chat(
+        &json!({ "input": "hi", "text": { "format": { "type": "json_object" } } }),
+        false,
+    )
+    .unwrap();
+    assert_eq!(object["response_format"], json!({ "type": "json_object" }));
+
+    let text = responses_to_chat(
+        &json!({ "input": "hi", "text": { "format": { "type": "text" } } }),
+        false,
+    )
+    .unwrap();
+    assert!(text.get("response_format").is_none());
+}
+
+#[test]
+fn reports_unknown_text_format_type() {
+    let request = json!({
+        "input": "hi",
+        "text": { "format": { "type": "json_schema" } }
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+
+    assert!(chat.get("response_format").is_none());
+    assert_eq!(
+        ignored_feature_details(&request),
+        ["text.format.type:json_schema_without_schema"]
+    );
+}
+
+#[test]
+fn merges_additional_tools_without_emitting_a_message() {
+    let request = json!({
+        "model": "model",
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [{
+                    "type": "function",
+                    "name": "read_file",
+                    "parameters": { "type": "object", "properties": {} }
+                }]
+            },
+            {
+                "type": "message",
+                "role": "developer",
+                "content": [{ "type": "input_text", "text": "rules" }]
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "hi" }]
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert_eq!(roles(messages), ["system", "user"]);
+    assert_eq!(messages[0]["content"], "rules");
+    assert_eq!(chat["tools"][0]["function"]["name"], "read_file");
+}
+
+#[test]
+fn lets_top_level_tools_win_over_input_carriers() {
+    let request = json!({
+        "tools": [{
+            "type": "function",
+            "name": "read_file",
+            "description": "from top level"
+        }],
+        "input": [{
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{
+                "type": "function",
+                "name": "read_file",
+                "description": "from carrier"
+            }]
+        }]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let tools = chat["tools"].as_array().unwrap();
+
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["function"]["description"], "from top level");
+}
+
+#[test]
+fn defers_tool_search_output_to_a_note_after_the_tool_block() {
+    let request = json!({
+        "input": [
+            { "type": "function_call", "call_id": "c1", "name": "read", "arguments": "{}" },
+            { "type": "function_call_output", "call_id": "c1", "output": "ok" },
+            {
+                "type": "tool_search_output",
+                "call_id": "search_1",
+                "tools": [{
+                    "type": "namespace",
+                    "name": "ns",
+                    "tools": [{ "type": "function", "name": "exec" }]
+                }]
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert_eq!(roles(messages), ["assistant", "tool", "user"]);
+    let note = messages[2]["content"][0]["text"].as_str().unwrap();
+    assert!(note.contains("ns_exec"), "{note}");
+    assert_eq!(chat["tools"][0]["function"]["name"], "ns_exec");
+}
+
+#[test]
+fn compaction_turn_rewrites_trigger_and_drops_tool_fields() {
+    let request = json!({
+        "model": "model",
+        "instructions": "be brief",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "do the work" }]
+            },
+            { "type": "compaction_trigger" }
+        ],
+        "tools": [{ "type": "function", "name": "read" }],
+        "tool_choice": "auto",
+        "parallel_tool_calls": true,
+        "prompt_cache_key": "session-1",
+        "text": { "format": { "type": "json_object" } }
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert_eq!(messages.last().unwrap()["content"], COMPACTION_PROMPT);
+    assert!(chat.get("tools").is_none());
+    assert!(chat.get("tool_choice").is_none());
+    assert!(chat.get("parallel_tool_calls").is_none());
+    assert!(chat.get("response_format").is_none());
+    // Cache and tier fields are unrelated to tools and stay for prefix reuse.
+    assert_eq!(chat["prompt_cache_key"], "session-1");
+}
+
+#[test]
+fn replaces_encrypted_compaction_with_placeholder() {
+    let request = json!({
+        "input": [
+            { "type": "compaction", "encrypted_content": "gAAAAABm" },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "continue" }]
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+
+    assert_eq!(roles(messages), ["user", "user"]);
+    assert_eq!(messages[0]["content"], COMPACTION_PLACEHOLDER);
+    assert_eq!(messages[1]["content"], "continue");
+}
+
+#[test]
+fn uses_plaintext_compaction_summary_when_available() {
+    let request = json!({
+        "input": [
+            { "type": "compaction", "summary": "we shipped the parser" },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "continue" }]
+            }
+        ]
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+
+    assert_eq!(chat["messages"][0]["content"], "we shipped the parser");
+}
+
+#[test]
+fn keeps_tools_on_non_compaction_turns_with_compaction_history() {
+    let request = json!({
+        "input": [
+            { "type": "compaction", "summary": "earlier work" },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "next step" }]
+            }
+        ],
+        "tools": [{ "type": "function", "name": "read" }],
+        "text": { "format": { "type": "json_object" } }
+    });
+
+    let chat = responses_to_chat(&request, false).unwrap();
+
+    assert_eq!(chat["tools"][0]["function"]["name"], "read");
+    assert_eq!(chat["response_format"]["type"], "json_object");
 }

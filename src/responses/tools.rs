@@ -46,6 +46,11 @@ impl ToolSource {
 /// back to a declaration the upstream was not given.
 pub(super) fn collect_declared_tools(request: &Value) -> DeclaredTools {
     let mut declared = DeclaredTools::default();
+    // A compaction turn is a summarization request: exposing tools would let
+    // the model answer with a tool call the client never asked for.
+    if super::request::is_compaction_turn(request) {
+        return declared;
+    }
     let mut seen: HashMap<String, ToolSource> = HashMap::new();
     if let Some(tools) = request.get("tools").and_then(Value::as_array) {
         absorb_tools(ToolSource::TopLevel, tools, &mut seen, &mut declared);
@@ -369,6 +374,36 @@ pub(super) fn translate_tool_choice(choice: Option<&Value>) -> Option<Value> {
         }
         _ => None,
     }
+}
+
+/// Flattened Chat names contributed by a list of Responses tool declarations.
+pub(super) fn declared_tool_names(tools: &[Value]) -> Vec<String> {
+    let mut names = Vec::new();
+    for tool in tools {
+        match tool.get("type").and_then(Value::as_str) {
+            Some("namespace") => {
+                let Some(namespace) = tool.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                for child in tool
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(name) = child.get("name").and_then(Value::as_str) {
+                        names.push(flat_namespace_name(namespace, name));
+                    }
+                }
+            }
+            _ => {
+                if let Some(name) = tool.get("name").and_then(Value::as_str) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+    }
+    names
 }
 
 pub(super) fn flat_namespace_name(namespace: &str, name: &str) -> String {

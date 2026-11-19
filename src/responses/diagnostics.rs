@@ -5,7 +5,7 @@
 //! in the log. The endpoint calls [`ignored_feature_details`] once per request
 //! to record that degradation.
 
-use super::request::is_handled_input_type;
+use super::request::{is_compaction_turn, is_handled_input_type, text_format_kind};
 use super::*;
 
 /// Content part types `message_content` carries into the Chat message.
@@ -18,6 +18,10 @@ pub fn ignored_feature_details(request: &Value) -> Vec<String> {
     collect_input_items(request, &mut details);
     collect_content_parts(request, &mut details);
     details.extend(collect_declared_tools(request).notes);
+    details.extend(text_format_kind(request).details());
+    if is_compaction_turn(request) && request.get("tools").is_some() {
+        details.push("tools.suppressed_by_compaction".to_string());
+    }
     details.sort();
     details.dedup();
     details

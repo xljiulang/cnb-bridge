@@ -28,7 +28,11 @@ use tokio::sync::watch;
 
 const REQUEST_ID_HEADER: &str = "x-request-id";
 const BODY_LIMIT: usize = 64 * 1024 * 1024;
-const OPTIONAL_CHAT_FIELDS: [(&str, &[&str]); 7] = [
+/// Chat fields dropped when the upstream rejects them by name.
+///
+/// Only needles unique to the field belong here: matching on `json_schema`
+/// would also fire for tool parameter errors and strip a field that was fine.
+const OPTIONAL_CHAT_FIELDS: [(&str, &[&str]); 8] = [
     ("stream_options", &["stream_options", "include_usage"]),
     (
         "reasoning_effort",
@@ -39,6 +43,7 @@ const OPTIONAL_CHAT_FIELDS: [(&str, &[&str]); 7] = [
     ("service_tier", &["service_tier"]),
     ("tool_choice", &["tool_choice"]),
     ("max_tokens", &["max_tokens"]),
+    ("response_format", &["response_format", "response format"]),
 ];
 
 #[derive(Debug)]

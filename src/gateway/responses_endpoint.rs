@@ -130,6 +130,10 @@ pub(super) async fn handle_responses(
             None
         };
         if let Some(field) = removable {
+            state.logger.log(
+                "warn",
+                format!("responses.compat.retry_without field={field}"),
+            );
             if let Some(object) = chat.as_object_mut() {
                 object.remove(field);
             }

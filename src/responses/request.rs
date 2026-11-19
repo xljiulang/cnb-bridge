@@ -1,10 +1,36 @@
 use super::*;
 
+/// Schema name used when the client asks for structured output without naming it.
+const DEFAULT_SCHEMA_NAME: &str = "codex_output_schema";
+
+/// Chat Completions rejects `response_format.json_schema.name` over 64 bytes.
+const MAX_SCHEMA_NAME_BYTES: usize = 64;
+
+/// Prompt that replaces a `compaction_trigger` item.
+pub(super) const COMPACTION_PROMPT: &str = "\
+You are compacting this conversation for an AI coding agent that will continue the work.
+Write a dense handoff note covering: the user's goals and constraints, decisions made, \
+files and paths touched, commands run and their outcomes, what remains to be done, and \
+pitfalls to avoid.
+Keep exact identifiers, paths and error strings. Do not call tools. Do not ask questions. \
+Output only the note.";
+
+/// Stand-in for a compaction checkpoint this proxy cannot read.
+pub(super) const COMPACTION_PLACEHOLDER: &str = "\
+[The client compacted the earlier conversation into a checkpoint this proxy cannot read, \
+so the summary text is unavailable. Rely on the messages that remain.]";
+
+/// Item types that only exist to carry a compaction checkpoint.
+const COMPACTION_ITEM_TYPES: [&str; 3] = ["compaction", "compaction_summary", "context_compaction"];
+
 /// Translates a Responses request into a Chat Completions request.
 pub fn responses_to_chat(request: &Value, want_stream: bool) -> Result<Value, String> {
     if !request.is_object() {
         return Err("request body must be a JSON object".to_string());
     }
+    // A compaction turn is a summarization request: it must not be able to call
+    // tools, so this decision gates the tool fields below.
+    let compaction = is_compaction_turn(request);
     let mut messages = Vec::new();
     if let Some(instructions) = request
         .get("instructions")
@@ -18,7 +44,12 @@ pub fn responses_to_chat(request: &Value, want_stream: bool) -> Result<Value, St
         Some(Value::String(text)) if !text.is_empty() => {
             messages.push(json!({ "role": "user", "content": text }));
         }
-        Some(Value::Array(items)) => translate_input_items(items, &mut messages),
+        Some(Value::Array(items)) => {
+            // Compaction items are rewritten before translation so the message
+            // state machine never has to know about them.
+            let rewritten = rewrite_compaction_items(items);
+            translate_input_items(rewritten.as_deref().unwrap_or(items), &mut messages);
+        }
         _ => {}
     }
     drop_empty_user_messages(&mut messages);
@@ -53,15 +84,216 @@ pub fn responses_to_chat(request: &Value, want_stream: bool) -> Result<Value, St
     {
         chat["reasoning_effort"] = json!(effort);
     }
-    for field in ["parallel_tool_calls", "prompt_cache_key", "service_tier"] {
+    if !compaction {
+        if let Some(value) = request
+            .get("parallel_tool_calls")
+            .filter(|value| !value.is_null())
+        {
+            chat["parallel_tool_calls"] = value.clone();
+        }
+    }
+    for field in ["prompt_cache_key", "service_tier"] {
         if let Some(value) = request.get(field).filter(|value| !value.is_null()) {
             chat[field] = value.clone();
         }
     }
-    if let Some(choice) = translate_tool_choice(request.get("tool_choice")) {
-        chat["tool_choice"] = choice;
+    if !compaction {
+        if let Some(choice) = translate_tool_choice(request.get("tool_choice")) {
+            chat["tool_choice"] = choice;
+        }
+        if let Some(format) = translate_text_format(request) {
+            chat["response_format"] = format;
+        }
     }
     Ok(chat)
+}
+
+/// Whether this request asks for a compaction checkpoint.
+///
+/// `collect_declared_tools` returns nothing for such a turn, so neither the
+/// upstream tool list nor the reverse name map can leak tools into a summary.
+pub(super) fn is_compaction_turn(request: &Value) -> bool {
+    request
+        .get("input")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.get("type").and_then(Value::as_str) == Some("compaction_trigger"))
+        })
+}
+
+/// Replaces compaction items with plain messages.
+///
+/// Returns `None` when the history holds no compaction item, so the common case
+/// does not clone the input array.
+fn rewrite_compaction_items(items: &[Value]) -> Option<Vec<Value>> {
+    let needs_rewrite = items.iter().any(|item| {
+        matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("compaction_trigger")
+        ) || COMPACTION_ITEM_TYPES.contains(&item.get("type").and_then(Value::as_str).unwrap_or(""))
+    });
+    if !needs_rewrite {
+        return None;
+    }
+    Some(
+        items
+            .iter()
+            .map(|item| match item.get("type").and_then(Value::as_str) {
+                Some("compaction_trigger") => user_text_message(COMPACTION_PROMPT),
+                Some(name) if COMPACTION_ITEM_TYPES.contains(&name) => {
+                    let text = compaction_summary_text(item)
+                        .unwrap_or_else(|| COMPACTION_PLACEHOLDER.to_string());
+                    user_text_message(&text)
+                }
+                _ => item.clone(),
+            })
+            .collect(),
+    )
+}
+
+/// Reads the summary body out of a compaction item when the client kept it in
+/// plain text. Encrypted checkpoints are unreadable by design.
+fn compaction_summary_text(item: &Value) -> Option<String> {
+    for key in ["summary", "text"] {
+        if let Some(text) = item
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            return Some(text.to_string());
+        }
+    }
+    let parts = item.get("content")?.as_array()?;
+    let text = parts
+        .iter()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
+}
+
+fn user_text_message(text: &str) -> Value {
+    json!({
+        "type": "message",
+        "role": "user",
+        "content": [{ "type": "input_text", "text": text }]
+    })
+}
+
+/// Classifies the Responses `text.format` field.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum TextFormatKind {
+    /// No structured output requested.
+    Absent,
+    /// Plain text, the default; nothing is sent upstream.
+    Text,
+    JsonObject,
+    JsonSchema {
+        name: String,
+        schema: Value,
+        strict: Option<bool>,
+    },
+    /// A format this translation cannot carry; `details()` explains why.
+    Unknown(String),
+}
+
+impl TextFormatKind {
+    pub(super) fn details(&self) -> Option<String> {
+        match self {
+            Self::Unknown(reason) => Some(format!("text.format.type:{reason}")),
+            _ => None,
+        }
+    }
+}
+
+/// Reads `text.format`, accepting both the flat Responses shape and the nested
+/// Chat shape, because the client's exact serialization is not observable here.
+pub(super) fn text_format_kind(request: &Value) -> TextFormatKind {
+    let Some(format) = request
+        .pointer("/text/format")
+        .filter(|value| value.is_object())
+    else {
+        return TextFormatKind::Absent;
+    };
+    match format.get("type").and_then(Value::as_str) {
+        Some("text") => TextFormatKind::Text,
+        Some("json_object") => TextFormatKind::JsonObject,
+        Some("json_schema") => {
+            let nested = format.get("json_schema");
+            let Some(schema) = format
+                .get("schema")
+                .filter(|value| value.is_object())
+                .or_else(|| {
+                    nested
+                        .and_then(|nested| nested.get("schema"))
+                        .filter(|value| value.is_object())
+                })
+            else {
+                return TextFormatKind::Unknown("json_schema_without_schema".to_string());
+            };
+            let name = format
+                .get("name")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    nested
+                        .and_then(|nested| nested.get("name"))
+                        .and_then(Value::as_str)
+                })
+                .map(sanitize_schema_name)
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+            let strict = format.get("strict").and_then(Value::as_bool).or_else(|| {
+                nested
+                    .and_then(|nested| nested.get("strict"))
+                    .and_then(Value::as_bool)
+            });
+            TextFormatKind::JsonSchema {
+                name,
+                schema: schema.clone(),
+                strict,
+            }
+        }
+        Some(other) => TextFormatKind::Unknown(other.to_string()),
+        None => TextFormatKind::Unknown("missing_type".to_string()),
+    }
+}
+
+fn translate_text_format(request: &Value) -> Option<Value> {
+    match text_format_kind(request) {
+        TextFormatKind::JsonObject => Some(json!({ "type": "json_object" })),
+        TextFormatKind::JsonSchema {
+            name,
+            schema,
+            strict,
+        } => {
+            // The schema is forwarded verbatim: a response schema may have any
+            // root type, so the tool-parameter normalization must not run here.
+            let mut json_schema = json!({ "name": name, "schema": schema });
+            if let Some(strict) = strict {
+                json_schema["strict"] = json!(strict);
+            }
+            Some(json!({ "type": "json_schema", "json_schema": json_schema }))
+        }
+        TextFormatKind::Absent | TextFormatKind::Text | TextFormatKind::Unknown(_) => None,
+    }
+}
+
+fn sanitize_schema_name(name: &str) -> String {
+    let mut sanitized = String::new();
+    for ch in name.trim().chars() {
+        if sanitized.len() + ch.len_utf8() > MAX_SCHEMA_NAME_BYTES {
+            break;
+        }
+        sanitized.push(if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            ch
+        } else {
+            '_'
+        });
+    }
+    sanitized
 }
 
 /// Lists accepted-but-unsupported Responses features for compatibility logging.
@@ -69,9 +301,6 @@ pub fn unsupported_feature_names(request: &Value) -> Vec<&'static str> {
     let mut features = Vec::new();
     if request.get("previous_response_id").is_some() {
         features.push("previous_response_id");
-    }
-    if request.pointer("/text/format").is_some() {
-        features.push("text.format");
     }
     if request
         .get("input")
@@ -109,6 +338,12 @@ pub(super) const HANDLED_INPUT_TYPES: &[&str] = &[
     "custom_tool_call",
     "function_call_output",
     "custom_tool_call_output",
+    "additional_tools",
+    "tool_search_output",
+    "compaction",
+    "compaction_summary",
+    "context_compaction",
+    "compaction_trigger",
 ];
 
 pub(super) fn is_handled_input_type(name: &str) -> bool {
@@ -217,6 +452,31 @@ pub(super) fn translate_input_items(items: &[Value], messages: &mut Vec<Value>) 
                     "content": content
                 }));
             }
+            Some("additional_tools") => {
+                // The declared tools were lifted by `collect_declared_tools`.
+                // The carrier carries a role but no content, so letting it fall
+                // through to the message arm would emit an empty system message.
+            }
+            Some("tool_search_output") => {
+                // The loaded tools were lifted as well; the receipt itself is
+                // not a Chat message. Queued on the media buffer so it lands
+                // after the whole tool turn instead of splitting a contiguous
+                // `role: tool` run that `repair_tool_pairing` walks.
+                let names = object
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .map(|tools| declared_tool_names(tools))
+                    .unwrap_or_default();
+                let text = if names.is_empty() {
+                    "[tool search returned no tools]".to_string()
+                } else {
+                    format!("[tool search loaded: {}]", names.join(", "))
+                };
+                media.push(json!({ "type": "text", "text": text }));
+            }
+            // `tool_search` is not declared upstream, so a historical search
+            // call has no counterpart. Left unhandled on purpose so diagnostics
+            // keeps reporting it.
             _ => {}
         }
     }
