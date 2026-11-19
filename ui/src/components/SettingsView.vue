@@ -45,7 +45,7 @@ defineProps<{ app: DesktopApp }>();
             <FolderGit2 :size="16" aria-hidden="true" />
             创建位置
           </h2>
-          <p>桥接配置会保存在该 CNB 仓库中。</p>
+          <p>连接配置会保存在该 CNB 仓库中。</p>
           <small v-if="!app.accountConnected">
             登录 CNB 账号后才能修改账号级仓库设置。
           </small>
@@ -69,7 +69,7 @@ defineProps<{ app: DesktopApp }>();
                 :disabled="!app.accountConnected"
                 spellcheck="false"
               />
-              <small>桥接隧道与配置使用的仓库名称。</small>
+              <small>连接所使用的 SSH 隧道与配置仓库名称。</small>
             </label>
           </div>
         </div>

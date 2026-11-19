@@ -10,7 +10,7 @@ import {
   KeyRound,
   LoaderCircle,
   Network,
-  Power,
+  Play,
   RefreshCw,
   Square,
 } from "@lucide/vue";
@@ -49,7 +49,7 @@ defineProps<{ app: DesktopApp }>();
                   : app.ready
                     ? "在线"
                     : app.startingBridge
-                      ? "正在桥接"
+                      ? "正在连接"
                       : app.idle
                         ? "按需连接"
                         : app.bridgeTransitioning
@@ -73,7 +73,7 @@ defineProps<{ app: DesktopApp }>();
             :size="15"
             aria-hidden="true"
           />
-          <Power v-else :size="15" aria-hidden="true" />
+          <Play v-else :size="15" aria-hidden="true" />
           {{ app.mainActionLabel }}
         </button>
         <button
@@ -84,7 +84,7 @@ defineProps<{ app: DesktopApp }>();
           @click="app.stopBridge"
         >
           <Square :size="15" aria-hidden="true" />
-          断开桥接
+          断开连接
         </button>
       </div>
     </header>
@@ -113,7 +113,7 @@ defineProps<{ app: DesktopApp }>();
               : "正在登录 CNB"
             : app.accountState === "failed"
               ? "登录未完成"
-              : "登录后开始本机桥接"
+              : "登录后开始本机连接"
         }}
       </h2>
       <p class="connect-signed-out-copy">
@@ -122,7 +122,7 @@ defineProps<{ app: DesktopApp }>();
             ? "请完成账号验证。关闭扫码窗口即可取消本次登录。"
             : app.accountState === "failed"
               ? "请从左下角账号卡重新选择账号或扫码登录。"
-              : "选择已保存账号或扫码登录 CNB。登录后即可查看模型、端点和桥接状态。"
+              : "选择已保存账号或扫码登录 CNB。登录后即可查看模型、端点和连接状态。"
         }}
       </p>
       <div class="connect-location-hint">
@@ -282,10 +282,7 @@ defineProps<{ app: DesktopApp }>();
             </p>
           </article>
 
-          <article
-            class="card connect-card endpoint-card"
-            :class="{ 'is-live': app.localEndpointReady }"
-          >
+          <article class="card connect-card endpoint-card">
             <div class="section-head">
               <div>
                 <span class="card-label">接入端点</span>
@@ -383,7 +380,7 @@ defineProps<{ app: DesktopApp }>();
       <article v-if="app.connectionDetailsVisible" class="card pipeline-card">
         <div class="section-head">
           <div>
-            <span class="card-label">桥接流程</span>
+            <span class="card-label">连接流程</span>
             <h2>自动连接状态</h2>
           </div>
           <span class="card-meta">

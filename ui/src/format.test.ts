@@ -26,11 +26,11 @@ const savedSettings: Settings = {
 
 describe("format helpers", () => {
   it("labels bridge states", () => {
-    expect(bridgeLabel("ready")).toBe("桥接就绪");
+    expect(bridgeLabel("ready")).toBe("连接就绪");
     expect(bridgeLabel("needsSshKey")).toBe("需要注册 SSH 公钥");
     expect(bridgeLabel("needsRepoCreation")).toBe("需要创建仓库");
     expect(bridgeLabel("stopping")).toBe("正在断开");
-    expect(bridgeLabel("failed")).toBe("桥接失败");
+    expect(bridgeLabel("failed")).toBe("连接失败");
   });
 
   it("validates ports", () => {

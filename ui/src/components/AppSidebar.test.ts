@@ -262,7 +262,7 @@ describe("AppSidebar", () => {
   });
 
   it("uses the bridge status label in the badge", () => {
-    const cases = ["桥接就绪", "建立 SSH 通道", "组织未就绪"];
+    const cases = ["连接就绪", "建立 SSH 通道", "组织未就绪"];
 
     for (const label of cases) {
       const wrapper = mount(AppSidebar, {

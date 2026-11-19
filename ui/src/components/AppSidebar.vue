@@ -18,7 +18,7 @@ defineProps<{ app: DesktopApp }>();
       <img class="brand-mark" :src="appIcon" alt="" aria-hidden="true" />
       <div class="brand-copy">
         <div class="brand-name">CNB Bridge</div>
-        <div class="brand-sub">本机 AI 桥接</div>
+        <div class="brand-sub">本机 AI 连接</div>
       </div>
     </div>
 

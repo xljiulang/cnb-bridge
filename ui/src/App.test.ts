@@ -312,6 +312,9 @@ describe("App shell", () => {
     expect(logsButton).toBeDefined();
     await logsButton!.trigger("click");
     await flushPromises();
+    expect(wrapper.text()).toContain(
+      "完成连接后，运行信息会显示在这里。",
+    );
     const snapshotCallsBeforeTimer = snapshotCalls;
     const logCallsBeforeTimer = logCalls;
 
@@ -382,17 +385,17 @@ describe("App shell", () => {
 
     const startButton = wrapper.get(".head-actions .primary");
     await startButton.trigger("click");
-    expect(startButton.text()).toContain("正在桥接");
+    expect(startButton.text()).toContain("正在连接");
     expect(startButton.text()).not.toContain("正在启动");
     expect(wrapper.text()).not.toContain("正在启动");
-    expect(wrapper.get(".title-row .badge").text()).toBe("正在桥接");
+    expect(wrapper.get(".title-row .badge").text()).toBe("正在连接");
     expect(startButton.find(".spin").exists()).toBe(true);
     await startButton.trigger("click");
     expect(startCalls).toBe(1);
 
     resolveStart(readySnapshot);
     await flushPromises();
-    expect(wrapper.find(".head-actions .danger").text()).toContain("断开桥接");
+    expect(wrapper.find(".head-actions .danger").text()).toContain("断开连接");
     wrapper.unmount();
   });
 
@@ -507,7 +510,9 @@ describe("App shell", () => {
     expect(workspaceStep.text()).not.toContain("等待重连");
     expect(wrapper.text()).not.toContain("等待建立通道");
     expect(wrapper.get(".title-row .badge").text()).toBe("按需连接");
-    expect(wrapper.find(".head-actions .primary").text()).toContain("立即桥接");
+    const action = wrapper.get(".head-actions .primary");
+    expect(action.text()).toContain("立即连接");
+    expect(action.find(".lucide-play").exists()).toBe(true);
     wrapper.unmount();
   });
 
@@ -697,7 +702,7 @@ describe("App shell", () => {
     await flushPromises();
 
     const endpointCard = wrapper.get(".endpoint-card");
-    expect(endpointCard.classes()).toContain("is-live");
+    expect(endpointCard.classes()).not.toContain("is-live");
     expect(endpointCard.get(".badge").text()).toBe("监听中");
     expect(endpointCard.text()).not.toContain("按需启动");
     wrapper.unmount();
@@ -766,7 +771,7 @@ describe("App shell", () => {
     expect(wrapper.find(".api-key-card").exists()).toBe(false);
     expect(wrapper.find(".pipeline-card").exists()).toBe(false);
     expect(wrapper.text()).not.toContain("扫码绑定 CNB");
-    expect(wrapper.text()).toContain("桥接状态");
+    expect(wrapper.text()).toContain("连接状态");
     expect(wrapper.text()).not.toContain("启动状态");
 
     await wrapper.get(".sidebar-status").trigger("click");
@@ -1080,6 +1085,12 @@ describe("App shell", () => {
 
     await wrapper.findAll("nav button")[1].trigger("click");
     await flushPromises();
+    expect(wrapper.text()).toContain(
+      "连接配置会保存在该 CNB 仓库中。",
+    );
+    expect(wrapper.text()).toContain(
+      "连接所使用的 SSH 隧道与配置仓库名称。",
+    );
     expect(wrapper.find(".badge.warn").exists()).toBe(false);
 
     await wrapper.find('.switch-row input[type="checkbox"]').setValue(true);
@@ -1144,6 +1155,9 @@ describe("App shell", () => {
     await flushPromises();
 
     expect(wrapper.get(".details-card").text()).toContain("1.0.0");
+    expect(wrapper.text()).toContain(
+      "把 CNB 云工作空间中的 AI 端点安全连接到本机 loopback。",
+    );
     const projectLink = wrapper.get(".project-home-action");
     expect(projectLink.text()).toContain("项目主页");
     await projectLink.trigger("click");

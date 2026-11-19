@@ -14,11 +14,11 @@ const BRIDGE_LABELS: Record<BridgeState, string> = {
   startingWorkspace: "启动云主机",
   connecting: "建立 SSH 通道",
   idle: "按需连接",
-  ready: "桥接就绪",
+  ready: "连接就绪",
   needsSshKey: "需要注册 SSH 公钥",
   needsRepoCreation: "需要创建仓库",
   stopping: "正在断开",
-  failed: "桥接失败",
+  failed: "连接失败",
 };
 
 export function bridgeLabel(state: BridgeState): string {

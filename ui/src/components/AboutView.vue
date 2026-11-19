@@ -11,7 +11,7 @@ defineProps<{ app: DesktopApp }>();
       <div class="page-title">
         <p class="eyebrow">ABOUT</p>
         <h1>CNB Bridge</h1>
-        <p class="muted">把 CNB 云工作空间中的 AI 端点安全桥接到本机 loopback。</p>
+        <p class="muted">把 CNB 云工作空间中的 AI 端点安全连接到本机 loopback。</p>
       </div>
     </header>
 

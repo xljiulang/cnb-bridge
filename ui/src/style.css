@@ -765,11 +765,6 @@ small {
   gap: 14px;
 }
 
-.endpoint-card.is-live {
-  border-color: rgba(92, 184, 255, 0.32);
-  box-shadow: var(--shadow);
-}
-
 .endpoint-url {
   display: block;
   margin: 0;
