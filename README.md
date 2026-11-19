@@ -34,7 +34,6 @@ agent 从云会话继承 `CNB_TOKEN`，只监听 loopback。客户端侧传入�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/v1/healthz` | 本机健康检查，不启动工作空间 |
 | GET | `/v1/models`、`/v1/models/{id}` | 客户端内置模型目录，包含 `deepseek-v4.1-flash` |
 | POST | `/v1/chat/completions` | PromptGate 兼容处理后转发 Chat Completions；支持流式与非流式客户端 |
 | POST | `/v1/responses` | Responses 入、Chat 出并回译 |

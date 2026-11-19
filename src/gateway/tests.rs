@@ -468,7 +468,7 @@ async fn test_gateway() -> (tempfile::TempDir, Arc<Bridge>, GatewayHandle) {
 }
 
 #[tokio::test]
-async fn health_request_is_answered_locally_without_activation() {
+async fn removed_health_route_is_not_found() {
     let (_temp, bridge, gateway) = test_gateway().await;
     let mut stream = TcpStream::connect(("127.0.0.1", gateway.port()))
         .await
@@ -480,8 +480,7 @@ async fn health_request_is_answered_locally_without_activation() {
     let mut response = String::new();
     stream.read_to_string(&mut response).await.unwrap();
 
-    assert!(response.starts_with("HTTP/1.1 200 OK"));
-    assert!(response.contains("local-gateway"));
+    assert!(response.starts_with("HTTP/1.1 404 Not Found"));
     assert_eq!(
         bridge.snapshot().await.state,
         crate::bridge::BridgeState::SignedOut

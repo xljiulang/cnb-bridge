@@ -2,7 +2,6 @@ use super::*;
 
 pub(super) fn router(state: GatewayState) -> Router {
     Router::new()
-        .route("/v1/healthz", get(handle_health))
         .route("/v1/models", get(handle_models))
         .route("/v1/models/{id}", get(handle_model))
         .route("/v1/chat/completions", post(handle_chat))
@@ -61,16 +60,8 @@ pub(super) fn with_cors(mut response: Response<Body>) -> Response<Body> {
 pub(super) fn is_known_path(path: &str) -> bool {
     matches!(
         path,
-        "/v1/healthz" | "/v1/models" | "/v1/chat/completions" | "/v1/responses"
+        "/v1/models" | "/v1/chat/completions" | "/v1/responses"
     ) || path
         .strip_prefix("/v1/models/")
         .is_some_and(|id| !id.is_empty() && !id.contains('/'))
-}
-
-pub(super) async fn handle_health(State(_state): State<GatewayState>) -> Response<Body> {
-    Json(json!({
-        "status": "ok",
-        "bridge": "local-gateway"
-    }))
-    .into_response()
 }
