@@ -810,11 +810,11 @@ fn chat_preparation_forces_upstream_stream_and_keeps_client_intent() {
 
         assert_eq!(upstream["stream"], true);
         assert_eq!(
-            prepared.request.downstream_stream,
+            prepared.request().downstream_stream(),
             expected_downstream_stream
         );
-        assert_eq!(prepared.request.requested_model, "hy4-flash");
-        assert!(prepared.request.valid_json_object);
+        assert_eq!(prepared.request().requested_model(), "hy4-flash");
+        assert!(prepared.request().valid_json_object());
     }
 }
 
@@ -829,8 +829,8 @@ fn chat_preparation_reuses_unchanged_streaming_body() {
 
     assert!(prepared.rewritten_body().is_none());
     assert_eq!(original.as_ptr(), original_pointer);
-    assert!(prepared.request.downstream_stream);
-    assert!(!prepared.body_changed);
+    assert!(prepared.request().downstream_stream());
+    assert!(!prepared.body_changed());
 }
 
 #[test]
@@ -2389,8 +2389,8 @@ fn non_json_chat_bodies_are_not_reencoded() {
     let body = Bytes::from_static(b"Codex is not JSON");
     let prepared = openai_compat::chat::prepare_chat_request(&body);
     assert!(prepared.rewritten_body().is_none());
-    assert!(!prepared.request.valid_json_object);
-    assert!(!prepared.request.downstream_stream);
+    assert!(!prepared.request().valid_json_object());
+    assert!(!prepared.request().downstream_stream());
 }
 
 #[tokio::test]

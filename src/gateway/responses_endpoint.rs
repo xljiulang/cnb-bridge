@@ -33,16 +33,6 @@ pub(super) async fn handle_responses(
             )
         }
     };
-    let unsupported = unsupported_feature_names(&request);
-    if !unsupported.is_empty() {
-        state.logger.log(
-            "warn",
-            format!(
-                "responses.compat.unsupported features={}",
-                unsupported.join(",")
-            ),
-        );
-    }
     let stream = request
         .get("stream")
         .and_then(Value::as_bool)
@@ -58,28 +48,39 @@ pub(super) async fn handle_responses(
             models
                 .into_iter()
                 .find(|candidate| candidate.id == model)
-                .map(|candidate| TranslationOptions {
-                    supports_file_input: candidate.supports_file_input,
-                    supports_audio_input: candidate.supports_audio_input,
+                .map(|candidate| {
+                    TranslationOptions::new(
+                        candidate.supports_file_input,
+                        candidate.supports_audio_input,
+                    )
                 })
         })
         .unwrap_or_default();
-    let ignored = ignored_feature_details_with_options(&request, options);
-    if !ignored.is_empty() {
+    let prepared = match prepare_responses(&request, true, options) {
+        Ok(prepared) => prepared,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, "invalid_json", message),
+    };
+    if !prepared.unsupported().is_empty() {
+        state.logger.log(
+            "warn",
+            format!(
+                "responses.compat.unsupported features={}",
+                prepared.unsupported().join(",")
+            ),
+        );
+    }
+    if !prepared.ignored().is_empty() {
         state.logger.log(
             "warn",
             format!(
                 "responses.compat.ignored count={} details={}",
-                ignored.len(),
-                ignored.join(",")
+                prepared.ignored().len(),
+                prepared.ignored().join(",")
             ),
         );
     }
-    let shape = ToolShape::from_request(&request);
-    let mut chat = match responses_to_chat_with_options(&request, true, options) {
-        Ok(chat) => chat,
-        Err(message) => return error_response(StatusCode::BAD_REQUEST, "invalid_json", message),
-    };
+    let shape = prepared.shape().clone();
+    let mut chat = prepared.chat;
     if chat.get("stream_options").is_none() {
         chat["stream_options"] = json!({ "include_usage": true });
     }

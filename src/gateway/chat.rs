@@ -25,11 +25,10 @@ pub(super) async fn handle_chat(
     };
     let mut prepared = openai_compat::chat::prepare_chat_request(&bytes);
     let mut gate_report = GateReport::default();
-    if prepared.request.valid_json_object {
+    if prepared.request().valid_json_object() {
         {
             let chat = prepared
-                .value
-                .as_mut()
+                .value_mut()
                 .expect("valid JSON objects are returned by the compatibility layer");
             gate_report = normalize_chat(chat, &headers);
             if gate_report.changed() {
@@ -46,7 +45,7 @@ pub(super) async fn handle_chat(
     }
     let upstream_body = prepared.rewritten_body().unwrap_or(bytes);
     let send = send_chat_request(&state, &headers, &uri, upstream_body);
-    let exchange = if prepared.request.downstream_stream {
+    let exchange = if prepared.request().downstream_stream() {
         match send.await {
             Ok(exchange) => exchange,
             Err(response) => return response,
@@ -71,13 +70,13 @@ pub(super) async fn handle_chat(
     if !exchange.response.status().is_success() {
         return upstream_error_response(&state, exchange, trace, &request_id, &gate_report).await;
     }
-    if !prepared.request.downstream_stream && is_event_stream(exchange.response.headers()) {
+    if !prepared.request().downstream_stream() && is_event_stream(exchange.response.headers()) {
         let status = status_from_reqwest(exchange.response.status());
         let aggregate = aggregate_chat_stream(
             exchange.response,
             trace,
             status,
-            &prepared.request.requested_model,
+            prepared.request().requested_model(),
         );
         return match tokio::time::timeout(state.non_stream_timeout, aggregate).await {
             Ok(Ok(chat)) => with_request_id(Json(chat).into_response(), &request_id),

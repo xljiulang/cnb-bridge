@@ -22,7 +22,7 @@ bytes = "1.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 futures-util = "0.3"
 git2 = { version = "0.21", features = ["https"] }
-openai-compat = { git = "https://github.com/xljiulang/openai-compat.git", rev = "ed1f359" }
+openai-compat = { git = "https://github.com/xljiulang/openai-compat.git", rev = "2527990" }
 rand = "0.8"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }

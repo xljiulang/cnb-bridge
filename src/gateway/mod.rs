@@ -14,8 +14,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use futures_util::StreamExt;
 use openai_compat::responses::{
-    chat_to_responses, ignored_feature_details_with_options, responses_to_chat_with_options,
-    unsupported_feature_names, ResponsesStream, ToolShape, TranslationOptions,
+    chat_to_responses, prepare_responses, ResponsesStream, ToolShape, TranslationOptions,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
