@@ -2446,7 +2446,7 @@ async fn developer_role_is_forwarded_as_system() {
         .map(|entry| entry.message)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(logs.contains("rules=gate/developer-role:1"));
+    assert!(logs.contains("rules=compat/developer-role:1"));
     upstream_task.abort();
 }
 

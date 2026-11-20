@@ -37,6 +37,7 @@ pub(super) async fn handle_chat(
                 prepared.set_body(body);
             }
         }
+        gate_report.record_developer_roles(prepared.role_changes().developer_to_system);
         apply_headers(&mut headers, &mut gate_report);
         headers.insert(
             header::ACCEPT,
