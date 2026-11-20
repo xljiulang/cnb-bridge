@@ -43,24 +43,56 @@ pub(super) fn should_disconnect_idle_tunnel(
     active_connections == 0 && idle_for >= idle_timeout
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ActivityReason {
+    GatewayStarted,
+    TunnelReady,
+    RequestStarted,
+    RequestFinished,
+    IdleDisconnectCompleted,
+}
+
+impl ActivityReason {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::GatewayStarted => "gateway_started",
+            Self::TunnelReady => "tunnel_ready",
+            Self::RequestStarted => "request_started",
+            Self::RequestFinished => "request_finished",
+            Self::IdleDisconnectCompleted => "idle_disconnect_completed",
+        }
+    }
+}
+
 pub(super) struct GatewayActivity {
     active_connections: AtomicUsize,
     last_activity: Mutex<Instant>,
+    last_activity_reason: Mutex<ActivityReason>,
+    tunnel_local_port: Mutex<Option<u16>>,
+    clock: Box<dyn Fn() -> Instant + Send + Sync>,
     request_gate: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl GatewayActivity {
     pub(super) fn new() -> Self {
+        Self::with_clock(Instant::now)
+    }
+
+    pub(super) fn with_clock(clock: impl Fn() -> Instant + Send + Sync + 'static) -> Self {
+        let now = clock();
         Self {
             active_connections: AtomicUsize::new(0),
-            last_activity: Mutex::new(Instant::now()),
+            last_activity: Mutex::new(now),
+            last_activity_reason: Mutex::new(ActivityReason::GatewayStarted),
+            tunnel_local_port: Mutex::new(None),
+            clock: Box::new(clock),
             request_gate: Arc::new(tokio::sync::RwLock::new(())),
         }
     }
 
     pub(super) async fn enter(self: &Arc<Self>) -> ActivityGuard {
         self.active_connections.fetch_add(1, Ordering::SeqCst);
-        self.touch();
+        self.touch(ActivityReason::RequestStarted);
         let mut guard = ActivityGuard {
             activity: Arc::clone(self),
             _lease: None,
@@ -69,11 +101,35 @@ impl GatewayActivity {
         guard
     }
 
-    fn touch(&self) {
+    fn touch(&self, reason: ActivityReason) {
         *self
             .last_activity
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = (self.clock)();
+        *self
+            .last_activity_reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = reason;
+    }
+
+    pub(super) fn tunnel_ready(&self, local_port: u16) {
+        let mut known_port = self
+            .tunnel_local_port
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *known_port == Some(local_port) {
+            return;
+        }
+        *known_port = Some(local_port);
+        drop(known_port);
+        self.touch(ActivityReason::TunnelReady);
+    }
+
+    pub(super) fn last_activity_reason(&self) -> ActivityReason {
+        *self
+            .last_activity_reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub(super) fn active_connections(&self) -> usize {
@@ -81,10 +137,11 @@ impl GatewayActivity {
     }
 
     pub(super) fn idle_for(&self) -> Duration {
-        self.last_activity
+        let last_activity = *self
+            .last_activity
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .elapsed()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (self.clock)().saturating_duration_since(last_activity)
     }
 
     pub(super) fn try_claim_idle_disconnect(
@@ -107,7 +164,7 @@ impl Drop for ActivityGuard {
         self.activity
             .active_connections
             .fetch_sub(1, Ordering::SeqCst);
-        self.activity.touch();
+        self.activity.touch(ActivityReason::RequestFinished);
     }
 }
 
@@ -121,6 +178,7 @@ pub struct GatewayHandle {
     shutdown: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
     trace_cleanup_task: tokio::task::JoinHandle<()>,
+    ready_task: tokio::task::JoinHandle<()>,
     activity: Arc<GatewayActivity>,
 }
 
@@ -166,6 +224,7 @@ impl GatewayHandle {
             upstream_override,
             trace_root,
             IdleMonitorProbe::default(),
+            Instant::now,
         )
         .await;
         #[cfg(not(test))]
@@ -179,6 +238,7 @@ impl GatewayHandle {
         upstream_override: Option<u16>,
         trace_root: std::path::PathBuf,
         idle_monitor_probe: IdleMonitorProbe,
+        clock: impl Fn() -> Instant + Send + Sync + 'static,
     ) -> Result<Self, String> {
         Self::start_with_upstream_internal_common(
             bridge,
@@ -186,6 +246,7 @@ impl GatewayHandle {
             upstream_override,
             trace_root,
             idle_monitor_probe,
+            clock,
         )
         .await
     }
@@ -207,6 +268,7 @@ impl GatewayHandle {
         upstream_override: Option<u16>,
         trace_root: std::path::PathBuf,
         #[cfg(test)] idle_monitor_probe: IdleMonitorProbe,
+        #[cfg(test)] clock: impl Fn() -> Instant + Send + Sync + 'static,
     ) -> Result<Self, String> {
         let listener = TcpListener::bind(("127.0.0.1", config.port))
             .await
@@ -216,6 +278,9 @@ impl GatewayHandle {
             .map_err(|error| format!("读取本地网关端口失败: {error}"))?
             .port();
         let (shutdown, _) = watch::channel(false);
+        #[cfg(test)]
+        let activity = Arc::new(GatewayActivity::with_clock(clock));
+        #[cfg(not(test))]
         let activity = Arc::new(GatewayActivity::new());
         let state = GatewayState {
             bridge: Arc::clone(&bridge),
@@ -247,6 +312,32 @@ impl GatewayHandle {
         let idle_activity = Arc::clone(&activity);
         let idle_timeout = config.idle_timeout;
         let mut idle_shutdown = shutdown.subscribe();
+        let mut runtime_changes = bridge.subscribe_runtime_changes();
+        let bridge_for_ready = Arc::clone(&bridge);
+        let activity_for_ready = Arc::clone(&activity);
+        let mut ready_shutdown = shutdown.subscribe();
+        let ready_task = tokio::spawn(async move {
+            if let Some(port) = bridge_for_ready.ready_tunnel_port().await {
+                activity_for_ready.tunnel_ready(port);
+            }
+            loop {
+                tokio::select! {
+                    changed = ready_shutdown.changed() => {
+                        if changed.is_err() || *ready_shutdown.borrow() {
+                            break;
+                        }
+                    }
+                    changed = runtime_changes.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        if let Some(port) = bridge_for_ready.ready_tunnel_port().await {
+                            activity_for_ready.tunnel_ready(port);
+                        }
+                    }
+                }
+            }
+        });
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
@@ -265,6 +356,8 @@ impl GatewayHandle {
                         else {
                             continue;
                         };
+                        let idle_for = idle_activity.idle_for();
+                        let activity_reason = idle_activity.last_activity_reason();
                         #[cfg(test)]
                         idle_monitor_probe.disconnect_started.notify_waiters();
                         tokio::select! {
@@ -276,8 +369,14 @@ impl GatewayHandle {
                             disconnected = bridge.disconnect_idle_tunnel() => {
                                 #[cfg(test)]
                                 idle_monitor_probe.disconnect_finished.notify_waiters();
-                                if disconnected {
-                                    idle_activity.touch();
+                                if let Some(port) = disconnected {
+                                    bridge.log_idle_disconnect(
+                                        port,
+                                        idle_for,
+                                        activity_reason.as_str(),
+                                        idle_timeout,
+                                    );
+                                    idle_activity.touch(ActivityReason::IdleDisconnectCompleted);
                                 }
                             }
                         }
@@ -310,6 +409,7 @@ impl GatewayHandle {
             task,
             trace_cleanup_task,
             activity,
+            ready_task,
         })
     }
 
@@ -341,6 +441,14 @@ impl GatewayHandle {
         {
             cleanup_task.abort();
             let _ = cleanup_task.await;
+        }
+        let mut ready_task = self.ready_task;
+        if tokio::time::timeout(Duration::from_secs(5), &mut ready_task)
+            .await
+            .is_err()
+        {
+            ready_task.abort();
+            let _ = ready_task.await;
         }
     }
 }

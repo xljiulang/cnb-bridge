@@ -532,17 +532,36 @@ impl Bridge {
     }
 
     /// Disconnects an idle SSH tunnel while preserving the cloud workspace.
-    pub async fn disconnect_idle_tunnel(&self) -> bool {
+    pub async fn disconnect_idle_tunnel(&self) -> Option<u16> {
         let Ok(_transition) = self.transition.try_lock() else {
-            return false;
+            return None;
         };
-        let has_tunnel = self.runtime.lock().await.tunnel.is_some();
-        if self.current_state().await != BridgeState::Ready || !has_tunnel {
-            return false;
-        }
-        self.logger.log("info", "工作空间空闲 5 分钟，正在断开 SSH");
+        let tunnel_local_port = {
+            let runtime = self.runtime.lock().await;
+            if runtime.state != Some(BridgeState::Ready) {
+                return None;
+            }
+            runtime.tunnel.as_ref()?.local_port()
+        };
         self.disconnect_locked().await;
-        true
+        Some(tunnel_local_port)
+    }
+
+    pub(crate) fn log_idle_disconnect(
+        &self,
+        tunnel_local_port: u16,
+        idle_for: std::time::Duration,
+        reason: &str,
+        idle_timeout: std::time::Duration,
+    ) {
+        self.logger.log(
+            "info",
+            format!(
+                "工作空间空闲，正在断开 SSH;timeout_ms={};idle_for_ms={};last_activity_reason={reason};tunnel_local_port={tunnel_local_port}",
+                idle_timeout.as_millis(),
+                idle_for.as_millis(),
+            ),
+        );
     }
 
     /// Invalidates a stale tunnel so the next request activates a new one.
@@ -641,6 +660,40 @@ impl Bridge {
 
     pub(crate) fn logger_handle(&self) -> Arc<Logger> {
         Arc::clone(&self.logger)
+    }
+
+    pub(crate) async fn ready_tunnel_port(&self) -> Option<u16> {
+        let runtime = self.runtime.lock().await;
+        if runtime.state != Some(BridgeState::Ready) {
+            return None;
+        }
+        let tunnel = runtime.tunnel.as_ref()?;
+        if tunnel.failure_reason().is_some() {
+            return None;
+        }
+        Some(tunnel.local_port())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn install_test_ready_tunnel(&self, tunnel: TunnelHandle) {
+        {
+            let mut runtime = self.runtime.lock().await;
+            runtime.state = Some(BridgeState::Ready);
+            runtime.tunnel = Some(tunnel);
+            runtime.error = None;
+        }
+        self.notify_runtime_changed();
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn install_test_tunnel_state(&self, state: BridgeState, tunnel: TunnelHandle) {
+        {
+            let mut runtime = self.runtime.lock().await;
+            runtime.state = Some(state);
+            runtime.tunnel = Some(tunnel);
+            runtime.error = None;
+        }
+        self.notify_runtime_changed();
     }
 
     #[cfg(test)]
@@ -777,14 +830,6 @@ impl Bridge {
         }
         self.set_error(BridgeState::Failed, error.clone()).await;
         error
-    }
-
-    async fn current_state(&self) -> BridgeState {
-        self.runtime
-            .lock()
-            .await
-            .state
-            .unwrap_or(BridgeState::SignedOut)
     }
 
     fn is_account_connected(&self) -> bool {
@@ -1034,7 +1079,7 @@ mod tests {
         let bridge = test_bridge(&temp);
         bridge.runtime.lock().await.state = Some(BridgeState::Idle);
 
-        assert!(!bridge.disconnect_idle_tunnel().await);
+        assert!(bridge.disconnect_idle_tunnel().await.is_none());
     }
 
     #[tokio::test]
@@ -1064,13 +1109,55 @@ mod tests {
             runtime.tunnel = Some(tunnel);
         }
 
-        assert!(bridge.disconnect_idle_tunnel().await);
+        assert!(bridge.disconnect_idle_tunnel().await.is_some());
 
         let snapshot = bridge.snapshot().await;
         assert_eq!(snapshot.state, BridgeState::Idle);
         assert_eq!(snapshot.workspace_sn.as_deref(), Some("ws-idle"));
         assert!(tokio::net::TcpListener::bind(address).await.is_ok());
         assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn idle_disconnect_log_contains_threshold_activity_and_tunnel_port() {
+        let temp = tempfile::tempdir().unwrap();
+        let logger = Arc::new(Logger::new(16));
+        let bridge = Bridge::new(
+            AccountManager::with_store(AccountStore::new(temp.path().join("account.bin"))),
+            SettingsStore::new(temp.path().join("settings.json")),
+            SshKeyStore::new(
+                temp.path().join("id_ed25519"),
+                temp.path().join("id_ed25519.pub"),
+            ),
+            Arc::clone(&logger),
+        );
+        let (tunnel, address) = TunnelHandle::test_handle().await;
+        {
+            let mut runtime = bridge.runtime.lock().await;
+            runtime.state = Some(BridgeState::Ready);
+            runtime.tunnel = Some(tunnel);
+        }
+
+        let port = bridge.disconnect_idle_tunnel().await.unwrap();
+        bridge.log_idle_disconnect(
+            port,
+            std::time::Duration::from_secs(301),
+            "tunnel_ready",
+            std::time::Duration::from_secs(300),
+        );
+
+        let message = logger
+            .recent(4)
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(port, address.port());
+        assert!(message.contains("timeout_ms=300000"));
+        assert!(message.contains("idle_for_ms=301000"));
+        assert!(message.contains("last_activity_reason=tunnel_ready"));
+        assert!(message.contains(&format!("tunnel_local_port={port}")));
+        assert!(!message.to_ascii_lowercase().contains("token"));
     }
 
     #[tokio::test]

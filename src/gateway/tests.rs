@@ -175,6 +175,27 @@ fn only_stops_after_five_idle_minutes_without_active_connections() {
     assert!(should_disconnect_idle_tunnel(0, timeout, timeout));
 }
 
+#[test]
+fn new_tunnel_ready_refreshes_activity_but_repeated_ready_does_not() {
+    let now = Arc::new(Mutex::new(Instant::now()));
+    let clock_now = Arc::clone(&now);
+    let activity = Arc::new(GatewayActivity::with_clock(move || {
+        *clock_now.lock().unwrap()
+    }));
+    *now.lock().unwrap() += Duration::from_secs(301);
+
+    activity.tunnel_ready(41_001);
+    assert!(activity.idle_for() < Duration::from_secs(1));
+    assert_eq!(activity.last_activity_reason(), ActivityReason::TunnelReady);
+
+    *now.lock().unwrap() += Duration::from_secs(60);
+    activity.tunnel_ready(41_001);
+    assert!(activity.idle_for() >= Duration::from_secs(60));
+
+    activity.tunnel_ready(41_002);
+    assert!(activity.idle_for() < Duration::from_secs(1));
+}
+
 #[tokio::test]
 async fn activity_tracks_requests_and_last_use() {
     let activity = Arc::new(GatewayActivity::new());
@@ -366,6 +387,7 @@ async fn stop_interrupts_blocked_idle_disconnect() {
             None,
             temp.path().join("http-trace"),
             probe.clone(),
+            Instant::now,
         )
         .await
         .unwrap();
@@ -379,6 +401,253 @@ async fn stop_interrupts_blocked_idle_disconnect() {
         .await
         .expect("gateway stop should not wait for a blocked disconnect");
     assert!(futures_util::FutureExt::now_or_never(probe.disconnect_finished.notified()).is_none());
+}
+
+#[tokio::test]
+async fn idle_monitor_does_not_disconnect_a_tunnel_that_just_became_ready() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let started_probe = Arc::clone(&started);
+    let release_probe = Arc::clone(&release);
+    let probe = IdleMonitorProbe {
+        disconnect_started: Arc::clone(&started_probe),
+        disconnect_finished: Arc::clone(&release_probe),
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let account = crate::account::AccountManager::with_store(AccountStore::new(
+        temp.path().join("account.bin"),
+    ));
+    let bridge = Arc::new(Bridge::new(
+        account,
+        {
+            let store = SettingsStore::new(temp.path().join("settings.json"));
+            store
+                .save(&crate::settings::Settings {
+                    http_log_filter: crate::settings::HttpLogFilter::All,
+                    ..crate::settings::Settings::default()
+                })
+                .unwrap();
+            store
+        },
+        SshKeyStore::new(
+            temp.path().join("id_ed25519"),
+            temp.path().join("id_ed25519.pub"),
+        ),
+        Arc::new(Logger::new(32)),
+    ));
+    let clock = Arc::new(Mutex::new(Instant::now()));
+    let clock_for_gateway = Arc::clone(&clock);
+    let gateway = GatewayHandle::start_with_upstream_internal_impl(
+        Arc::clone(&bridge),
+        GatewayConfig {
+            port: 0,
+            activation_timeout: Duration::from_secs(1),
+            idle_timeout: Duration::from_secs(300),
+            upstream_connect_timeout: Duration::from_secs(5),
+            upstream_read_timeout: Duration::from_secs(60),
+            non_stream_timeout: Duration::from_secs(120),
+        },
+        None,
+        temp.path().join("http-trace"),
+        probe,
+        move || *clock_for_gateway.lock().unwrap(),
+    )
+    .await
+    .unwrap();
+    *clock.lock().unwrap() += Duration::from_secs(301);
+
+    let (tunnel, _address) = crate::tunnel::TunnelHandle::test_handle().await;
+    bridge.install_test_ready_tunnel(tunnel).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        bridge.snapshot().await.state,
+        crate::bridge::BridgeState::Ready
+    );
+
+    assert!(futures_util::FutureExt::now_or_never(started.notified()).is_none());
+    gateway.stop().await;
+    assert_eq!(
+        bridge.snapshot().await.state,
+        crate::bridge::BridgeState::Ready
+    );
+}
+
+#[tokio::test]
+async fn gateway_stop_ends_ready_monitor_without_refreshing_activity() {
+    let temp = tempfile::tempdir().unwrap();
+    let account = crate::account::AccountManager::with_store(AccountStore::new(
+        temp.path().join("account.bin"),
+    ));
+    let bridge = Arc::new(Bridge::new(
+        account,
+        {
+            let store = SettingsStore::new(temp.path().join("settings.json"));
+            store
+                .save(&crate::settings::Settings {
+                    http_log_filter: crate::settings::HttpLogFilter::All,
+                    ..crate::settings::Settings::default()
+                })
+                .unwrap();
+            store
+        },
+        SshKeyStore::new(
+            temp.path().join("id_ed25519"),
+            temp.path().join("id_ed25519.pub"),
+        ),
+        Arc::new(Logger::new(32)),
+    ));
+    let clock = Arc::new(Mutex::new(Instant::now()));
+    let clock_for_gateway = Arc::clone(&clock);
+    let gateway = GatewayHandle::start_with_upstream_internal_impl(
+        Arc::clone(&bridge),
+        GatewayConfig {
+            port: 0,
+            activation_timeout: Duration::from_secs(1),
+            idle_timeout: Duration::from_secs(300),
+            upstream_connect_timeout: Duration::from_secs(5),
+            upstream_read_timeout: Duration::from_secs(60),
+            non_stream_timeout: Duration::from_secs(120),
+        },
+        None,
+        temp.path().join("http-trace"),
+        IdleMonitorProbe::default(),
+        move || *clock_for_gateway.lock().unwrap(),
+    )
+    .await
+    .unwrap();
+
+    gateway.stop().await;
+    *clock.lock().unwrap() += Duration::from_secs(301);
+    bridge.account_signed_out().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        bridge.snapshot().await.state,
+        crate::bridge::BridgeState::SignedOut
+    );
+}
+
+#[tokio::test]
+async fn non_ready_tunnel_state_does_not_refresh_idle_activity() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let probe = IdleMonitorProbe {
+        disconnect_started: Arc::clone(&started),
+        disconnect_finished: Arc::new(tokio::sync::Notify::new()),
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let account = crate::account::AccountManager::with_store(AccountStore::new(
+        temp.path().join("account.bin"),
+    ));
+    let bridge = Arc::new(Bridge::new(
+        account,
+        {
+            let store = SettingsStore::new(temp.path().join("settings.json"));
+            store
+                .save(&crate::settings::Settings {
+                    http_log_filter: crate::settings::HttpLogFilter::All,
+                    ..crate::settings::Settings::default()
+                })
+                .unwrap();
+            store
+        },
+        SshKeyStore::new(
+            temp.path().join("id_ed25519"),
+            temp.path().join("id_ed25519.pub"),
+        ),
+        Arc::new(Logger::new(32)),
+    ));
+    let clock = Arc::new(Mutex::new(Instant::now()));
+    let clock_for_gateway = Arc::clone(&clock);
+    let gateway = GatewayHandle::start_with_upstream_internal_impl(
+        Arc::clone(&bridge),
+        GatewayConfig {
+            port: 0,
+            activation_timeout: Duration::from_secs(1),
+            idle_timeout: Duration::from_secs(300),
+            upstream_connect_timeout: Duration::from_secs(5),
+            upstream_read_timeout: Duration::from_secs(60),
+            non_stream_timeout: Duration::from_secs(120),
+        },
+        None,
+        temp.path().join("http-trace"),
+        probe,
+        move || *clock_for_gateway.lock().unwrap(),
+    )
+    .await
+    .unwrap();
+    *clock.lock().unwrap() += Duration::from_secs(301);
+
+    let (tunnel, _address) = crate::tunnel::TunnelHandle::test_handle().await;
+    bridge
+        .install_test_tunnel_state(crate::bridge::BridgeState::Connecting, tunnel)
+        .await;
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("non-ready tunnel state must not refresh activity");
+
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn failed_tunnel_does_not_refresh_idle_activity() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let probe = IdleMonitorProbe {
+        disconnect_started: Arc::clone(&started),
+        disconnect_finished: Arc::new(tokio::sync::Notify::new()),
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let account = crate::account::AccountManager::with_store(AccountStore::new(
+        temp.path().join("account.bin"),
+    ));
+    let bridge = Arc::new(Bridge::new(
+        account,
+        {
+            let store = SettingsStore::new(temp.path().join("settings.json"));
+            store
+                .save(&crate::settings::Settings {
+                    http_log_filter: crate::settings::HttpLogFilter::All,
+                    ..crate::settings::Settings::default()
+                })
+                .unwrap();
+            store
+        },
+        SshKeyStore::new(
+            temp.path().join("id_ed25519"),
+            temp.path().join("id_ed25519.pub"),
+        ),
+        Arc::new(Logger::new(32)),
+    ));
+    let clock = Arc::new(Mutex::new(Instant::now()));
+    let clock_for_gateway = Arc::clone(&clock);
+    let gateway = GatewayHandle::start_with_upstream_internal_impl(
+        Arc::clone(&bridge),
+        GatewayConfig {
+            port: 0,
+            activation_timeout: Duration::from_secs(1),
+            idle_timeout: Duration::from_secs(300),
+            upstream_connect_timeout: Duration::from_secs(5),
+            upstream_read_timeout: Duration::from_secs(60),
+            non_stream_timeout: Duration::from_secs(120),
+        },
+        None,
+        temp.path().join("http-trace"),
+        probe,
+        move || *clock_for_gateway.lock().unwrap(),
+    )
+    .await
+    .unwrap();
+    *clock.lock().unwrap() += Duration::from_secs(301);
+
+    bridge
+        .install_test_tunnel_state(
+            crate::bridge::BridgeState::Ready,
+            crate::tunnel::TunnelHandle::test_handle_with_failure(41_001, "health failed"),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("failed tunnel must not refresh activity");
+
+    gateway.stop().await;
 }
 
 #[tokio::test]

@@ -194,6 +194,19 @@ impl TunnelHandle {
             address,
         )
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_handle_with_failure(local_port: u16, failure: &str) -> Self {
+        let (shutdown, _) = watch::channel(false);
+        let (_failure_tx, failure_rx) = watch::channel(Some(failure.to_string()));
+        let task = tokio::spawn(async {});
+        Self {
+            local_port,
+            shutdown,
+            task,
+            failure: failure_rx,
+        }
+    }
 }
 
 /// Parses `user@host` or `user@host:port` returned by CNB.
