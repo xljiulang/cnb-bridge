@@ -58,7 +58,13 @@ pub(super) async fn handle_responses(
         .unwrap_or_default();
     let prepared = match prepare_responses(&request, true, options) {
         Ok(prepared) => prepared,
-        Err(message) => return error_response(StatusCode::BAD_REQUEST, "invalid_json", message),
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                error.code(),
+                error.message().to_string(),
+            )
+        }
     };
     if !prepared.unsupported().is_empty() {
         state.logger.log(
@@ -278,10 +284,10 @@ pub(super) async fn handle_responses(
     }
     match chat_to_responses(&chat, &model, &shape) {
         Ok(response) => with_request_id(Json(response).into_response(), &request_id),
-        Err(message) => error_response_with_id(
+        Err(error) => error_response_with_id(
             StatusCode::BAD_GATEWAY,
-            "malformed_tool_call_arguments",
-            message,
+            error.code(),
+            error.message().to_string(),
             request_id,
         ),
     }

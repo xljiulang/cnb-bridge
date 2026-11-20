@@ -1151,8 +1151,8 @@ fn chat_completion_aggregation_rejects_in_stream_errors() {
         .push_data(r#"{"error":{"message":"upstream exploded"}}"#)
         .unwrap_err();
 
-    assert_eq!(error.message, "upstream exploded");
-    assert_eq!(error.code, "upstream_error");
+    assert_eq!(error.message(), "upstream exploded");
+    assert_eq!(error.code(), "upstream_error");
 }
 
 #[test]
@@ -1184,8 +1184,8 @@ fn chat_completion_aggregation_normalizes_nested_and_flat_stream_errors() {
         let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
         let error = accumulator.push_data(payload).unwrap_err();
 
-        assert_eq!(error.message, message);
-        assert_eq!(error.code, code);
+        assert_eq!(error.message(), message);
+        assert_eq!(error.code(), code);
     }
 }
 
@@ -1217,7 +1217,7 @@ fn chat_completion_aggregation_rejects_truncated_streams() {
 
     let error = accumulator.finish("hy4-flash").unwrap_err();
 
-    assert!(error.message.contains("缺少完成分片"));
+    assert!(error.message().contains("缺少完成分片"));
 }
 
 #[test]
@@ -1226,7 +1226,7 @@ fn chat_completion_aggregation_rejects_invalid_sse_json() {
     let error =
         openai_compat::chat::process_sse_line(&mut accumulator, b"data: not-json\n").unwrap_err();
 
-    assert_eq!(error.code, "upstream_server_error");
+    assert_eq!(error.code(), "upstream_server_error");
 }
 
 #[test]
@@ -1410,7 +1410,7 @@ fn chat_completion_aggregation_rejects_done_without_any_output() {
 
     let error = accumulator.finish("model").unwrap_err();
 
-    assert!(error.message.contains("没有有效输出"));
+    assert!(error.message().contains("没有有效输出"));
 }
 
 #[test]
@@ -1425,7 +1425,7 @@ fn chat_completion_aggregation_rejects_output_without_finish_reason() {
 
     let error = accumulator.finish("model").unwrap_err();
 
-    assert!(error.message.contains("缺少 finish_reason"));
+    assert!(error.message().contains("缺少 finish_reason"));
 }
 
 #[test]
@@ -1469,8 +1469,8 @@ fn chat_completion_aggregation_rejects_tool_terminal_without_a_tool_call() {
 
     let error = accumulator.finish("model").unwrap_err();
 
-    assert_eq!(error.code, "incomplete_stream");
-    assert!(error.message.contains("tool_calls"));
+    assert_eq!(error.code(), "incomplete_stream");
+    assert!(error.message().contains("tool_calls"));
 }
 
 #[test]
@@ -1484,7 +1484,7 @@ fn chat_completion_aggregation_rejects_tool_calls_without_names() {
 
     let error = accumulator.finish("model").unwrap_err();
 
-    assert!(error.message.contains("缺少函数名"));
+    assert!(error.message().contains("缺少函数名"));
 }
 
 #[test]
@@ -1498,7 +1498,7 @@ fn chat_completion_aggregation_rejects_malformed_tool_arguments() {
 
     let error = accumulator.finish("model").unwrap_err();
 
-    assert!(error.message.contains("参数不是合法 JSON"));
+    assert!(error.message().contains("参数不是合法 JSON"));
 }
 
 #[test]

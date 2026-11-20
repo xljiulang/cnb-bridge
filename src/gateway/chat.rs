@@ -23,19 +23,22 @@ pub(super) async fn handle_chat(
             )
         }
     };
-    let mut prepared = openai_compat::chat::prepare_chat_request(&bytes);
     let mut gate_report = GateReport::default();
-    if prepared.request().valid_json_object() {
-        {
-            let chat = prepared
-                .value_mut()
-                .expect("valid JSON objects are returned by the compatibility layer");
-            gate_report = normalize_chat(chat, &headers);
-            if gate_report.changed() {
-                let body = openai_compat::chat::encode_chat(chat);
-                prepared.set_body(body);
-            }
+    let prepared = match openai_compat::chat::prepare_chat_request_with(&bytes, |chat| {
+        let before = chat.clone();
+        gate_report = normalize_chat(chat, &headers);
+        Ok(*chat != before)
+    }) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                error.code(),
+                error.message().to_string(),
+            )
         }
+    };
+    if prepared.request().valid_json_object() {
         gate_report.record_developer_roles(prepared.role_changes().developer_to_system);
         apply_headers(&mut headers, &mut gate_report);
         headers.insert(
@@ -111,29 +114,29 @@ pub(super) struct AggregateHttpError {
 
 impl From<openai_compat::ChatError> for AggregateHttpError {
     fn from(error: openai_compat::ChatError) -> Self {
-        let status = match error.code.as_str() {
+        let status = match error.code() {
             "context_length_exceeded" => StatusCode::BAD_REQUEST,
             "upstream_rate_limited" => StatusCode::TOO_MANY_REQUESTS,
             _ => StatusCode::BAD_GATEWAY,
         };
-        let code = match error.code.as_str() {
+        let code = match error.code() {
             "context_length_exceeded" => "context_length_exceeded".to_string(),
             "upstream_rate_limited" => "upstream_rate_limited".to_string(),
             _ => "upstream_server_error".to_string(),
         };
         let (fallback_type, retryable) = error_contract(&code, status);
-        let error_type = if error.error_type == "upstream_error" {
+        let error_type = if error.error_type() == "upstream_error" {
             fallback_type.to_string()
         } else {
-            error.error_type
+            error.error_type().to_string()
         };
         AggregateHttpError {
             status,
             code,
-            message: error.message,
+            message: error.message().to_string(),
             error_type,
-            param: error.param,
-            retryable,
+            param: error.param().map(str::to_string),
+            retryable: retryable || error.retryable(),
         }
     }
 }
