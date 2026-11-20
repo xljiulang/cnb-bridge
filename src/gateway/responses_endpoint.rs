@@ -86,10 +86,7 @@ pub(super) async fn handle_responses(
         );
     }
     let shape = prepared.shape().clone();
-    let mut chat = prepared.chat;
-    if chat.get("stream_options").is_none() {
-        chat["stream_options"] = json!({ "include_usage": true });
-    }
+    let mut chat = prepared.into_chat();
     let mut gate_report = normalize_chat(&mut chat, &headers);
     apply_headers(&mut headers, &mut gate_report);
     let exchange = loop {
@@ -334,7 +331,8 @@ pub(super) fn responses_stream_response(
     );
     let state = ResponsesStreamState {
         source: response.bytes_stream().boxed(),
-        translator: ResponsesStream::with_shape(response_id, model, shape),
+        translator: ResponsesStream::with_shape(response_id, model, shape)
+            .with_max_bytes(BODY_LIMIT),
         buffer: Vec::new(),
         pending: std::collections::VecDeque::new(),
         saw_done: false,

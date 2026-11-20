@@ -1217,7 +1217,8 @@ fn chat_completion_aggregation_rejects_truncated_streams() {
 
     let error = accumulator.finish("hy4-flash").unwrap_err();
 
-    assert!(error.message().contains("缺少完成分片"));
+    assert_eq!(error.code(), "incomplete_stream");
+    assert!(error.message().contains("finish chunk"));
 }
 
 #[test]
@@ -1410,7 +1411,8 @@ fn chat_completion_aggregation_rejects_done_without_any_output() {
 
     let error = accumulator.finish("model").unwrap_err();
 
-    assert!(error.message().contains("没有有效输出"));
+    assert_eq!(error.code(), "incomplete_stream");
+    assert!(error.message().contains("usable output"));
 }
 
 #[test]
@@ -1425,7 +1427,8 @@ fn chat_completion_aggregation_rejects_output_without_finish_reason() {
 
     let error = accumulator.finish("model").unwrap_err();
 
-    assert!(error.message().contains("缺少 finish_reason"));
+    assert_eq!(error.code(), "incomplete_stream");
+    assert!(error.message().contains("finish_reason"));
 }
 
 #[test]
@@ -1484,7 +1487,8 @@ fn chat_completion_aggregation_rejects_tool_calls_without_names() {
 
     let error = accumulator.finish("model").unwrap_err();
 
-    assert!(error.message().contains("缺少函数名"));
+    assert_eq!(error.code(), "upstream_tool_call_dropped");
+    assert!(error.message().contains("function name"));
 }
 
 #[test]
@@ -1498,7 +1502,8 @@ fn chat_completion_aggregation_rejects_malformed_tool_arguments() {
 
     let error = accumulator.finish("model").unwrap_err();
 
-    assert!(error.message().contains("参数不是合法 JSON"));
+    assert_eq!(error.code(), "malformed_tool_call_arguments");
+    assert!(error.message().contains("JSON object"));
 }
 
 #[test]

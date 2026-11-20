@@ -3573,8 +3573,8 @@ dependencies = [
 
 [[package]]
 name = "openai-compat"
-version = "0.1.0"
-source = "git+https://github.com/xljiulang/openai-compat.git?rev=9662838#966283898c263b27bf4437e166bfc5e20f45d875"
+version = "0.2.0"
+source = "git+https://github.com/xljiulang/openai-compat.git?rev=f4aa279#f4aa279721672d3b89f2be81df00ff01e22be10f"
 dependencies = [
  "bytes",
  "serde",
