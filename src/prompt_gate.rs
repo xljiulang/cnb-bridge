@@ -97,7 +97,7 @@ const PROFILES: &[GateProfile] = &[GateProfile {
     ],
 }];
 
-/// Applies User-Agent-matched profiles to system message text.
+/// Applies User-Agent-matched profiles to system/developer message text.
 pub(crate) fn normalize_chat(body: &mut Value, headers: &HeaderMap) -> GateReport {
     let mut report = GateReport::default();
     let user_agent_product = user_agent_product(headers);
@@ -115,7 +115,7 @@ pub(crate) fn normalize_chat(body: &mut Value, headers: &HeaderMap) -> GateRepor
         let Some(role) = message.get("role").and_then(Value::as_str) else {
             continue;
         };
-        if !role.eq_ignore_ascii_case("system") {
+        if !role.eq_ignore_ascii_case("system") && !role.eq_ignore_ascii_case("developer") {
             continue;
         }
         let Some(content) = message.get_mut("content") else {
@@ -421,6 +421,26 @@ mod tests {
         assert_eq!(body["messages"][1]["role"], "user");
         assert_eq!(body["messages"][2]["role"], "System");
         assert_eq!(report.hit_count(openai_compat::chat::ROLE_RULE_ID), 0);
+    }
+
+    #[test]
+    fn applies_harness_rules_before_developer_role_is_normalized() {
+        let mut body = json!({
+            "messages": [{
+                "role": "developer",
+                "content": "You are an AI agent powered by DeepSeek Harness."
+            }]
+        });
+        let headers = headers_with_user_agent(HARNESS_USER_AGENT);
+
+        let report = normalize_chat(&mut body, &headers);
+
+        assert_eq!(report.profile_order(), &["harness"]);
+        assert_eq!(
+            body["messages"][0]["content"],
+            "You are an AI agent powered by Harness of DeepSeek."
+        );
+        assert_eq!(report.hit_count("harness/brand"), 1);
     }
 
     #[test]

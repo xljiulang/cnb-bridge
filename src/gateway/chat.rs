@@ -24,9 +24,10 @@ pub(super) async fn handle_chat(
         }
     };
     let mut gate_report = GateReport::default();
+    let client_headers = headers.clone();
     let prepared = match openai_compat::chat::prepare_chat_request_with(&bytes, |chat| {
         let before = chat.clone();
-        gate_report = normalize_chat(chat, &headers);
+        gate_report = normalize_chat(chat, &client_headers);
         Ok(*chat != before)
     }) {
         Ok(prepared) => prepared,
