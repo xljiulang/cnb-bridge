@@ -801,13 +801,20 @@ fn chat_preparation_forces_upstream_stream_and_keeps_client_intent() {
         if let Some(stream) = stream {
             request["stream"] = json!(stream);
         }
-        let prepared = prepare_chat_request(Bytes::from(request.to_string()), &HeaderMap::new());
-        let upstream: Value = serde_json::from_slice(&prepared.body).unwrap();
+        let request_body = request.to_string();
+        let prepared = openai_compat::chat::prepare_chat_request(request_body.as_bytes());
+        let rewritten = prepared.rewritten_body();
+        let upstream: Value =
+            serde_json::from_slice(rewritten.as_deref().unwrap_or(request_body.as_bytes()))
+                .unwrap();
 
         assert_eq!(upstream["stream"], true);
-        assert_eq!(prepared.downstream_stream, expected_downstream_stream);
-        assert_eq!(prepared.requested_model, "hy4-flash");
-        assert!(prepared.valid_json_object);
+        assert_eq!(
+            prepared.request.downstream_stream,
+            expected_downstream_stream
+        );
+        assert_eq!(prepared.request.requested_model, "hy4-flash");
+        assert!(prepared.request.valid_json_object);
     }
 }
 
@@ -818,11 +825,12 @@ fn chat_preparation_reuses_unchanged_streaming_body() {
     );
     let original_pointer = original.as_ptr();
 
-    let prepared = prepare_chat_request(original, &HeaderMap::new());
+    let prepared = openai_compat::chat::prepare_chat_request(&original);
 
-    assert_eq!(prepared.body.as_ptr(), original_pointer);
-    assert!(prepared.downstream_stream);
-    assert!(!prepared.gate_report.changed());
+    assert!(prepared.rewritten_body().is_none());
+    assert_eq!(original.as_ptr(), original_pointer);
+    assert!(prepared.request.downstream_stream);
+    assert!(!prepared.body_changed);
 }
 
 #[test]
@@ -831,8 +839,11 @@ fn non_stream_chat_preserves_unchanged_json_bytes() {
         br#"{"model":"hy4-flash","temperature":1.00,"messages":[{"role":"user","content":"hello"}],"stream":false}"#,
     );
 
-    let prepared = prepare_chat_request(original, &HeaderMap::new());
-    let body = std::str::from_utf8(&prepared.body).unwrap();
+    let prepared = openai_compat::chat::prepare_chat_request(&original);
+    let prepared_body = prepared
+        .rewritten_body()
+        .expect("stream:false should be rewritten");
+    let body = std::str::from_utf8(&prepared_body).unwrap();
 
     assert!(body.contains("\"temperature\":1.00"));
     assert!(body.contains("\"stream\":true"));
@@ -1135,7 +1146,7 @@ fn event_stream_content_type_is_case_insensitive_and_parameterized() {
 
 #[test]
 fn chat_completion_aggregation_rejects_in_stream_errors() {
-    let mut accumulator = ChatCompletionAccumulator::default();
+    let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
     let error = accumulator
         .push_data(r#"{"error":{"message":"upstream exploded"}}"#)
         .unwrap_err();
@@ -1170,7 +1181,7 @@ fn chat_completion_aggregation_normalizes_nested_and_flat_stream_errors() {
     ];
 
     for (payload, message, code) in cases {
-        let mut accumulator = ChatCompletionAccumulator::default();
+        let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
         let error = accumulator.push_data(payload).unwrap_err();
 
         assert_eq!(error.message, message);
@@ -1180,7 +1191,7 @@ fn chat_completion_aggregation_normalizes_nested_and_flat_stream_errors() {
 
 #[test]
 fn chat_completion_aggregation_accepts_usage_only_terminal_chunks() {
-    let mut accumulator = ChatCompletionAccumulator::default();
+    let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
     accumulator
         .push_data(
             r#"{"choices":[{"index":0,"delta":{"content":"complete"},"finish_reason":"stop"}]}"#,
@@ -1199,7 +1210,7 @@ fn chat_completion_aggregation_accepts_usage_only_terminal_chunks() {
 
 #[test]
 fn chat_completion_aggregation_rejects_truncated_streams() {
-    let mut accumulator = ChatCompletionAccumulator::default();
+    let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
     accumulator
         .push_data(r#"{"choices":[{"index":0,"delta":{"content":"half"},"finish_reason":null}]}"#)
         .unwrap();
@@ -1211,16 +1222,16 @@ fn chat_completion_aggregation_rejects_truncated_streams() {
 
 #[test]
 fn chat_completion_aggregation_rejects_invalid_sse_json() {
-    let mut accumulator = ChatCompletionAccumulator::default();
-    let error = process_aggregate_line(b"data: not-json\n", &mut accumulator).unwrap_err();
+    let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
+    let error =
+        openai_compat::chat::process_sse_line(&mut accumulator, b"data: not-json\n").unwrap_err();
 
-    assert_eq!(error.status, StatusCode::BAD_GATEWAY);
     assert_eq!(error.code, "upstream_server_error");
 }
 
 #[test]
 fn chat_completion_aggregation_keeps_parallel_calls_separate_without_index() {
-    let mut accumulator = ChatCompletionAccumulator::default();
+    let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
     accumulator
         .push_data(
             r#"{"id":"chatcmpl-parallel","created":42,"model":"upstream-model","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_a","function":{"name":"read_file","arguments":"{\"path\":\"a\"}"}}]},"finish_reason":null}]}"#,
@@ -1248,7 +1259,7 @@ fn chat_completion_aggregation_keeps_parallel_calls_separate_without_index() {
 
 #[test]
 fn chat_completion_aggregation_does_not_duplicate_repeated_tool_headers() {
-    let mut accumulator = ChatCompletionAccumulator::default();
+    let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
     accumulator
         .push_data(
             r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}"#,
@@ -1270,7 +1281,7 @@ fn chat_completion_aggregation_does_not_duplicate_repeated_tool_headers() {
 
 #[test]
 fn chat_completion_aggregation_reuses_a_known_id_when_its_index_changes() {
-    let mut accumulator = ChatCompletionAccumulator::default();
+    let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
     accumulator
         .push_data(
             r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read_file","arguments":"{\"path\":"}}]},"finish_reason":null}]}"#,
@@ -1294,7 +1305,7 @@ fn chat_completion_aggregation_reuses_a_known_id_when_its_index_changes() {
 
 #[test]
 fn chat_completion_aggregation_treats_a_new_id_at_the_same_index_as_new_call() {
-    let mut accumulator = ChatCompletionAccumulator::default();
+    let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
     accumulator
         .push_data(
             r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":null}]}"#,
@@ -1318,7 +1329,7 @@ fn chat_completion_aggregation_treats_a_new_id_at_the_same_index_as_new_call() {
 
 #[test]
 fn chat_completion_aggregation_keeps_sparse_parallel_ids_separate_in_one_frame() {
-    let mut accumulator = ChatCompletionAccumulator::default();
+    let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
     accumulator
         .push_data(
             r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read_file","arguments":"{}"}},{"index":3,"id":"call_b","function":{"name":"write_file","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
@@ -1337,7 +1348,7 @@ fn chat_completion_aggregation_keeps_sparse_parallel_ids_separate_in_one_frame()
 
 #[test]
 fn chat_completion_aggregation_preserves_content_parts_and_refusal() {
-    let mut accumulator = ChatCompletionAccumulator::default();
+    let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
     accumulator
         .push_data(
             r#"{"choices":[{"index":0,"delta":{"content":[{"type":"text","text":"partial"},{"type":"refusal","refusal":"blocked"}]},"finish_reason":"stop"}]}"#,
@@ -1355,7 +1366,7 @@ fn chat_completion_aggregation_preserves_content_parts_and_refusal() {
 
 #[test]
 fn chat_completion_aggregation_preserves_raw_function_arguments() {
-    let mut accumulator = ChatCompletionAccumulator::default();
+    let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
     accumulator
         .push_data(
             r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_raw","type":"function","function":{"name":"lookup","arguments":"{ \"b\": 2,"}}]},"finish_reason":null}]}"#,
@@ -1377,7 +1388,7 @@ fn chat_completion_aggregation_preserves_raw_function_arguments() {
 
 #[test]
 fn chat_completion_aggregation_keeps_the_first_finish_reason() {
-    let mut accumulator = ChatCompletionAccumulator::default();
+    let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
     accumulator
         .push_data(
             r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
@@ -1394,7 +1405,7 @@ fn chat_completion_aggregation_keeps_the_first_finish_reason() {
 
 #[test]
 fn chat_completion_aggregation_rejects_done_without_any_output() {
-    let mut accumulator = ChatCompletionAccumulator::default();
+    let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
     accumulator.push_data("[DONE]").unwrap();
 
     let error = accumulator.finish("model").unwrap_err();
@@ -1404,7 +1415,7 @@ fn chat_completion_aggregation_rejects_done_without_any_output() {
 
 #[test]
 fn chat_completion_aggregation_rejects_output_without_finish_reason() {
-    let mut accumulator = ChatCompletionAccumulator::default();
+    let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
     accumulator
         .push_data(
             r#"{"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}"#,
@@ -1420,7 +1431,7 @@ fn chat_completion_aggregation_rejects_output_without_finish_reason() {
 #[test]
 fn chat_completion_aggregation_preserves_length_and_content_filter_terminals() {
     for finish_reason in ["length", "content_filter"] {
-        let mut accumulator = ChatCompletionAccumulator::default();
+        let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
         accumulator
             .push_data(&format!(
                 r#"{{"choices":[{{"index":0,"delta":{{"content":"partial"}},"finish_reason":"{finish_reason}"}}]}}"#
@@ -1435,7 +1446,7 @@ fn chat_completion_aggregation_preserves_length_and_content_filter_terminals() {
 
 #[test]
 fn chat_completion_aggregation_marks_valid_tool_output_as_tool_calls() {
-    let mut accumulator = ChatCompletionAccumulator::default();
+    let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
     accumulator
         .push_data(
             r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":"stop"}]}"#,
@@ -1449,7 +1460,7 @@ fn chat_completion_aggregation_marks_valid_tool_output_as_tool_calls() {
 
 #[test]
 fn chat_completion_aggregation_rejects_tool_terminal_without_a_tool_call() {
-    let mut accumulator = ChatCompletionAccumulator::default();
+    let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
     accumulator
         .push_data(
             r#"{"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"tool_calls"}]}"#,
@@ -1464,7 +1475,7 @@ fn chat_completion_aggregation_rejects_tool_terminal_without_a_tool_call() {
 
 #[test]
 fn chat_completion_aggregation_rejects_tool_calls_without_names() {
-    let mut accumulator = ChatCompletionAccumulator::default();
+    let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
     accumulator
         .push_data(
             r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
@@ -1478,7 +1489,7 @@ fn chat_completion_aggregation_rejects_tool_calls_without_names() {
 
 #[test]
 fn chat_completion_aggregation_rejects_malformed_tool_arguments() {
-    let mut accumulator = ChatCompletionAccumulator::default();
+    let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
     accumulator
         .push_data(
             r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"lookup","arguments":"{\"path\":"}}]},"finish_reason":"tool_calls"}]}"#,
@@ -1493,7 +1504,7 @@ fn chat_completion_aggregation_rejects_malformed_tool_arguments() {
 #[test]
 fn chat_completion_aggregation_normalizes_missing_or_whitespace_tool_arguments() {
     for arguments in [None, Some(""), Some(" \n\t ")] {
-        let mut accumulator = ChatCompletionAccumulator::default();
+        let mut accumulator = openai_compat::chat::ChatCompletionAccumulator::default();
         let function = match arguments {
             Some(arguments) => json!({"name": "lookup", "arguments": arguments}),
             None => json!({"name": "lookup"}),
@@ -2376,12 +2387,10 @@ async fn non_harness_user_agent_skips_profile_on_chat_and_responses() {
 #[test]
 fn non_json_chat_bodies_are_not_reencoded() {
     let body = Bytes::from_static(b"Codex is not JSON");
-    let headers = HeaderMap::new();
-    let prepared = prepare_chat_request(body.clone(), &headers);
-    assert_eq!(prepared.body, body);
-    assert!(!prepared.gate_report.changed());
-    assert!(!prepared.valid_json_object);
-    assert!(!prepared.downstream_stream);
+    let prepared = openai_compat::chat::prepare_chat_request(&body);
+    assert!(prepared.rewritten_body().is_none());
+    assert!(!prepared.request.valid_json_object);
+    assert!(!prepared.request.downstream_stream);
 }
 
 #[tokio::test]

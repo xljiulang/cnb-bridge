@@ -17,7 +17,6 @@ pub mod model_catalog;
 pub mod net;
 pub mod paths;
 pub mod prompt_gate;
-pub mod responses;
 pub mod settings;
 pub mod ssh_key;
 pub mod tunnel;

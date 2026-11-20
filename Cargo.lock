@@ -782,6 +782,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "git2",
+ "openai-compat",
  "rand 0.8.8",
  "regex",
  "reqwest 0.12.28",
@@ -3568,6 +3569,17 @@ dependencies = [
  "dunce",
  "is-wsl",
  "libc",
+]
+
+[[package]]
+name = "openai-compat"
+version = "0.1.0"
+source = "git+https://github.com/xljiulang/openai-compat.git?rev=9c21531#9c215315cfcae7c8f1a22f0e9eede1089c0e03a9"
+dependencies = [
+ "bytes",
+ "serde",
+ "serde_json",
+ "xxhash-rust",
 ]
 
 [[package]]

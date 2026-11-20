@@ -258,7 +258,7 @@ pub(super) fn upstream_error_from_text(
             request_id.to_string(),
         );
     }
-    let normalized = crate::responses::normalize_chat_error_text(&text);
+    let normalized = openai_compat::responses::normalize_chat_error_text(&text);
     let message = if normalized.message.is_empty() {
         format!("upstream returned HTTP {}", status.as_u16())
     } else {

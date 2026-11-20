@@ -149,6 +149,7 @@ pub(super) async fn handle_responses(
             if let Some(object) = chat.as_object_mut() {
                 object.remove(field);
             }
+            chat["stream"] = Value::Bool(true);
             continue;
         }
         let trace = begin_upstream_trace_parts(

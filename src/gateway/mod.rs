@@ -5,10 +5,6 @@ use crate::http_trace::{HttpTraceSession, HttpTraceStore};
 use crate::logging::Logger;
 use crate::model_catalog;
 use crate::prompt_gate::{apply_headers, detect_gate_block, normalize_chat, GateReport};
-use crate::responses::{
-    chat_to_responses, ignored_feature_details_with_options, responses_to_chat_with_options,
-    unsupported_feature_names, ResponsesStream, ToolShape, TranslationOptions,
-};
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri};
@@ -17,6 +13,10 @@ use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
 use axum::Router;
 use futures_util::StreamExt;
+use openai_compat::responses::{
+    chat_to_responses, ignored_feature_details_with_options, responses_to_chat_with_options,
+    unsupported_feature_names, ResponsesStream, ToolShape, TranslationOptions,
+};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
