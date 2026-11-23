@@ -18,6 +18,8 @@ use std::sync::Mutex as StdMutex;
 use std::time::Instant;
 use tokio::sync::{watch, Mutex};
 
+const INCOMPLETE_READY_STATE: &str = "连接状态不完整，请重新连接";
+
 /// High-level bridge state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -146,7 +148,9 @@ impl Bridge {
         let _transition = self.transition.lock().await;
         {
             let runtime = self.runtime.lock().await;
-            if runtime.state == Some(BridgeState::Ready) {
+            if runtime.state == Some(BridgeState::Ready)
+                && self.ready_requirements_error(&runtime).is_none()
+            {
                 if let Some(tunnel) = &runtime.tunnel {
                     if tunnel.failure_reason().is_none() {
                         return Ok(tunnel.local_port());
@@ -352,6 +356,14 @@ impl Bridge {
             self.fail_tunnel_health(error.clone()).await;
             return Err(BridgeError::Other(error));
         }
+        let ready_error = {
+            let runtime = self.runtime.lock().await;
+            self.ready_requirements_error(&runtime)
+        };
+        if let Some(error) = ready_error {
+            self.fail_tunnel_health(error.to_string()).await;
+            return Err(BridgeError::Other(error.to_string()));
+        }
         log_phase(&self.logger, "agent_health", phase_started);
         self.logger.log(
             "info",
@@ -469,13 +481,17 @@ impl Bridge {
         *self.gateway.lock().await = Some(gateway);
         let mut runtime = self.runtime.lock().await;
         runtime.gateway_port = Some(gateway_port);
-        runtime.state = Some(if runtime.tunnel.is_some() {
-            BridgeState::Ready
-        } else if self.is_account_connected() {
-            BridgeState::Idle
-        } else {
-            BridgeState::SignedOut
-        });
+        runtime.state = Some(
+            if runtime.state == Some(BridgeState::Ready)
+                && self.ready_requirements_error(&runtime).is_none()
+            {
+                BridgeState::Ready
+            } else if self.is_account_connected() {
+                BridgeState::Idle
+            } else {
+                BridgeState::SignedOut
+            },
+        );
         runtime.error = None;
         drop(runtime);
         self.notify_runtime_changed();
@@ -631,6 +647,12 @@ impl Bridge {
         if runtime.error.is_none() {
             runtime.error = settings_warning;
         }
+        if runtime.state == Some(BridgeState::Ready) {
+            if let Some(error) = self.ready_requirements_error(&runtime) {
+                runtime.state = Some(BridgeState::Failed);
+                runtime.error = Some(error.to_string());
+            }
+        }
         let state = runtime.state.unwrap_or(BridgeState::SignedOut);
         BridgeSnapshot {
             state,
@@ -664,7 +686,9 @@ impl Bridge {
 
     pub(crate) async fn ready_tunnel_port(&self) -> Option<u16> {
         let runtime = self.runtime.lock().await;
-        if runtime.state != Some(BridgeState::Ready) {
+        if runtime.state != Some(BridgeState::Ready)
+            || self.ready_requirements_error(&runtime).is_some()
+        {
             return None;
         }
         let tunnel = runtime.tunnel.as_ref()?;
@@ -676,10 +700,21 @@ impl Bridge {
 
     #[cfg(test)]
     pub(crate) async fn install_test_ready_tunnel(&self, tunnel: TunnelHandle) {
+        if !self.is_account_connected() {
+            self.account
+                .complete_token_login("test-token", Some("tester".to_string()), None, None, None)
+                .unwrap();
+        }
         {
             let mut runtime = self.runtime.lock().await;
             runtime.state = Some(BridgeState::Ready);
             runtime.tunnel = Some(tunnel);
+            runtime
+                .repo_slug
+                .get_or_insert_with(|| "tester/repo".to_string());
+            runtime
+                .workspace_sn
+                .get_or_insert_with(|| "ws-test".to_string());
             runtime.error = None;
         }
         self.notify_runtime_changed();
@@ -835,6 +870,26 @@ impl Bridge {
     fn is_account_connected(&self) -> bool {
         self.account.status().state == crate::account::AccountState::Connected
     }
+
+    fn ready_requirements_error(&self, runtime: &Runtime) -> Option<&'static str> {
+        if !self.is_account_connected()
+            || !runtime
+                .repo_slug
+                .as_deref()
+                .is_some_and(|repo| !repo.trim().is_empty())
+            || !runtime
+                .workspace_sn
+                .as_deref()
+                .is_some_and(|workspace| !workspace.trim().is_empty())
+            || !runtime
+                .tunnel
+                .as_ref()
+                .is_some_and(|tunnel| tunnel.failure_reason().is_none())
+        {
+            return Some(INCOMPLETE_READY_STATE);
+        }
+        None
+    }
 }
 
 fn tunnel_failure_state(error: &str) -> BridgeState {
@@ -946,6 +1001,40 @@ mod tests {
             .expect("error change notification timed out")
             .expect("runtime change channel closed");
         assert_eq!(bridge.snapshot().await.error, None);
+    }
+
+    #[tokio::test]
+    async fn ready_without_repository_or_workspace_is_not_exposed() {
+        let temp = tempfile::tempdir().unwrap();
+        let account =
+            AccountManager::with_store(AccountStore::new(temp.path().join("account.bin")));
+        account
+            .complete_token_login("token", Some("alice".to_string()), None, None, None)
+            .unwrap();
+        let bridge = Bridge::new(
+            account,
+            SettingsStore::new(temp.path().join("settings.json")),
+            SshKeyStore::new(
+                temp.path().join("id_ed25519"),
+                temp.path().join("id_ed25519.pub"),
+            ),
+            Arc::new(Logger::new(32)),
+        );
+        let (tunnel, _address) = TunnelHandle::test_handle().await;
+        {
+            let mut runtime = bridge.runtime.lock().await;
+            runtime.state = Some(BridgeState::Ready);
+            runtime.tunnel = Some(tunnel);
+        }
+
+        let snapshot = bridge.snapshot().await;
+
+        assert_eq!(snapshot.state, BridgeState::Failed);
+        assert!(snapshot
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("连接状态不完整")));
+        assert!(bridge.ready_tunnel_port().await.is_none());
     }
 
     #[tokio::test]
@@ -1245,9 +1334,18 @@ mod tests {
     async fn stale_tunnel_invalidation_does_not_change_current_state() {
         let temp = tempfile::tempdir().unwrap();
         let bridge = test_bridge(&temp);
+        bridge
+            .account
+            .complete_token_login("token", Some("tester".to_string()), None, None, None)
+            .unwrap();
+        bridge.account_connected().await;
+        let (tunnel, _address) = TunnelHandle::test_handle().await;
         {
             let mut runtime = bridge.runtime.lock().await;
             runtime.state = Some(BridgeState::Ready);
+            runtime.repo_slug = Some("tester/repo".to_string());
+            runtime.workspace_sn = Some("ws-test".to_string());
+            runtime.tunnel = Some(tunnel);
             runtime.error = None;
         }
 

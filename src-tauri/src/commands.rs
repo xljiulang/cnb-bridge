@@ -99,7 +99,10 @@ pub async fn start_login(state: State<'_, DesktopState>) -> Result<AccountStatus
 
 #[tauri::command]
 pub async fn logout(state: State<'_, DesktopState>) -> Result<AccountStatus, CommandError> {
-    end_active_session(&state).await
+    state
+        .session_transition
+        .run(|| end_active_session(state.inner()))
+        .await
 }
 
 async fn end_active_session(state: &DesktopState) -> Result<AccountStatus, CommandError> {
@@ -116,6 +119,16 @@ async fn end_active_session(state: &DesktopState) -> Result<AccountStatus, Comma
 #[tauri::command]
 pub async fn login_with_account(
     state: State<'_, DesktopState>,
+    username: String,
+) -> Result<AccountStatus, CommandError> {
+    state
+        .session_transition
+        .run(|| login_with_account_locked(state.inner(), username))
+        .await
+}
+
+async fn login_with_account_locked(
+    state: &DesktopState,
     username: String,
 ) -> Result<AccountStatus, CommandError> {
     let current_status = state.account.status();
@@ -139,7 +152,7 @@ pub async fn login_with_account(
     }
 
     if switching {
-        end_active_session(&state).await?;
+        end_active_session(state).await?;
     }
 
     let credentials = state

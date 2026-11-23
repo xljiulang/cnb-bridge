@@ -28,6 +28,23 @@ pub struct AppSnapshot {
     pub models: Vec<ModelSummary>,
 }
 
+/// Serializes account-session changes so rapid switches cannot interleave.
+#[derive(Default)]
+pub struct SessionTransitionGate {
+    transition: tokio::sync::Mutex<()>,
+}
+
+impl SessionTransitionGate {
+    pub async fn run<F, Fut, T>(&self, operation: F) -> T
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let _transition = self.transition.lock().await;
+        operation().await
+    }
+}
+
 /// Shared desktop state.
 pub struct DesktopState {
     pub app: AppHandle,
@@ -38,6 +55,7 @@ pub struct DesktopState {
     pub models: Vec<ModelSummary>,
     pub login_generation: AtomicU64,
     pub organization_create_lock: tokio::sync::Mutex<()>,
+    pub session_transition: SessionTransitionGate,
     _lifecycle_mutex: AppLifecycleMutex,
 }
 
@@ -55,10 +73,11 @@ impl DesktopState {
     /// Builds the snapshot shown by the renderer.
     pub async fn snapshot(&self) -> Result<AppSnapshot, CommandError> {
         let settings = self.settings_store.load().unwrap_or_default();
+        let bridge = self.bridge.snapshot().await;
         Ok(AppSnapshot {
-            account: self.account.status(),
+            account: bridge.account.clone(),
             accounts: self.account.accounts(),
-            bridge: self.bridge.snapshot().await,
+            bridge,
             settings,
             version: env!("CARGO_PKG_VERSION").to_string(),
             logs_path: paths::logs_dir().display().to_string(),
@@ -96,6 +115,7 @@ pub fn initialize(
         models,
         login_generation: AtomicU64::new(0),
         organization_create_lock: tokio::sync::Mutex::new(()),
+        session_transition: SessionTransitionGate::default(),
         _lifecycle_mutex: lifecycle_mutex,
     });
 
@@ -264,6 +284,7 @@ pub fn exit_with_shutdown(app: AppHandle) {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::{mpsc, oneshot};
 
     #[tokio::test]
     async fn forwards_bridge_runtime_changes_to_the_ui_notifier() {
@@ -297,5 +318,46 @@ mod tests {
         .expect("runtime change was not forwarded");
 
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn session_transition_gate_serializes_rapid_operations() {
+        let gate = Arc::new(SessionTransitionGate::default());
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<&'static str>();
+        let (release_first_tx, release_first_rx) = oneshot::channel();
+
+        let first_gate = Arc::clone(&gate);
+        let first_entered = entered_tx.clone();
+        let first = tokio::spawn(async move {
+            first_gate
+                .run(|| async move {
+                    first_entered.send("first").unwrap();
+                    release_first_rx.await.unwrap();
+                    "first"
+                })
+                .await
+        });
+        assert_eq!(entered_rx.recv().await, Some("first"));
+
+        let second_gate = Arc::clone(&gate);
+        let second_entered = entered_tx.clone();
+        let second = tokio::spawn(async move {
+            second_gate
+                .run(|| async move {
+                    second_entered.send("second").unwrap();
+                    "second"
+                })
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), entered_rx.recv())
+                .await
+                .is_err()
+        );
+
+        release_first_tx.send(()).unwrap();
+        assert_eq!(first.await.unwrap(), "first");
+        assert_eq!(entered_rx.recv().await, Some("second"));
+        assert_eq!(second.await.unwrap(), "second");
     }
 }

@@ -98,7 +98,6 @@ export function useDesktopApp() {
   let startingTimer: number | undefined;
   let unlisten: UnlistenFn | undefined;
 
-  const ready = computed(() => snapshot.value?.bridge.state === "ready");
   const bridgeState = computed(() => snapshot.value?.bridge.state ?? "signedOut");
   const bridgeTransitioning = computed(() =>
     isBridgeTransitioning(bridgeState.value),
@@ -111,6 +110,16 @@ export function useDesktopApp() {
     () => snapshot.value?.account.state ?? "signedOut",
   );
   const accountConnected = computed(() => accountState.value === "connected");
+  const repoDone = computed(
+    () =>
+      Boolean(snapshot.value?.bridge.repoSlug) && !repoCreationNeeded.value,
+  );
+  const ready = computed(
+    () =>
+      bridgeState.value === "ready" &&
+      accountConnected.value &&
+      repoDone.value,
+  );
   const accountErrorAction = computed(
     () => snapshot.value?.account.errorAction ?? null,
   );
@@ -309,8 +318,6 @@ export function useDesktopApp() {
       effectiveBridgeState === "failed" ||
       effectiveBridgeState === "needsSshKey";
     const accountDone = accountState.value === "connected";
-    const repoDone =
-      Boolean(snapshot.value?.bridge.repoSlug) && !repoCreationNeeded.value;
     const tunnelActive = effectiveBridgeState === "connecting";
     const tone = (done: boolean, current: boolean): StepTone => {
       if (done) return "done";
@@ -343,15 +350,15 @@ export function useDesktopApp() {
       },
       {
         label: "仓库",
-        detail: repoDone
+        detail: repoDone.value
           ? snapshot.value?.bridge.repoSlug || ""
           : repoCreationNeeded.value
             ? "需要创建仓库"
             : "按需准备",
         tone: tone(
-          repoDone,
+          repoDone.value,
           accountDone &&
-            !repoDone &&
+            !repoDone.value &&
             (effectiveBridgeState === "preparingRepo" ||
               effectiveBridgeState === "preparingKey"),
         ),

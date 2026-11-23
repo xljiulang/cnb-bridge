@@ -518,6 +518,44 @@ describe("App shell", () => {
     wrapper.unmount();
   });
 
+  it("does not show a ready cloud workspace without a ready repository", async () => {
+    const inconsistentSnapshot = {
+      ...snapshot,
+      bridge: {
+        ...snapshot.bridge,
+        state: "ready",
+        repoSlug: null,
+        workspaceSn: "ws-without-repo",
+      },
+    };
+    mockWindows("main");
+    mockIPC(
+      (command) => {
+        switch (command) {
+          case "get_snapshot":
+            return inconsistentSnapshot;
+          case "get_logs":
+          case "list_http_traces":
+          case "list_namespaces":
+            return [];
+          case "get_cnb_usage":
+            return null;
+          default:
+            return null;
+        }
+      },
+      { shouldMockEvents: true },
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const workspaceStep = wrapper.findAll(".pipeline .step")[2];
+    expect(workspaceStep.classes()).not.toContain("done");
+    expect(workspaceStep.text()).not.toContain("SSH 已连接");
+    expect(wrapper.get(".title-row .badge").text()).not.toBe("连接就绪");
+    wrapper.unmount();
+  });
+
   it("shows repository provisioning as on demand before the first bridge", async () => {
     const unpreparedSnapshot = {
       ...snapshot,
